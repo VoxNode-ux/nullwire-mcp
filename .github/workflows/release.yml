@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to publish, e.g. v1.0.0 (created from the selected branch if new)"
-        required: true
+        description: "Version to publish, e.g. v1.0.0 (leave as is to publish v1.0.0)"
+        required: false
         default: "v1.0.0"
   push:
     branches: [main]
@@ -91,58 +91,84 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Publish GitHub release
-    # Runs on a pushed v* tag, or when you press Run workflow and give a tag.
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    name: Publish release
     needs: build
+    # Runs after tests + all 9 builds pass, on every push, tag and manual run.
+    # Never on pull requests, so untrusted code can't touch your releases.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    concurrency:
+      group: publish-release
+      cancel-in-progress: false
     env:
-      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       GH_TOKEN: ${{ github.token }}
+      EVENT: ${{ github.event_name }}
+      REF_NAME: ${{ github.ref_name }}
+      INPUT_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
       - name: Checksums
         run: cd dist && sha256sum nullwire-* > SHA256SUMS.txt
-      - name: Create or update release
+
+      - name: Decide which release this is
+        id: rel
         run: |
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            TAG="${INPUT_TAG:-v1.0.0}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$REF_NAME"
           else
-            gh release create "$TAG" dist/* \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "$TAG" \
-              --generate-notes
+            TAG="latest"
           fi
-  release:
-    name: Publish GitHub release
-    needs: build
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Checksums
-        run: cd dist && sha256sum nullwire-* > SHA256SUMS.txt
-      - name: Create release
+          case "$TAG" in
+            latest) KIND="rolling" ;;
+            v[0-9]*) KIND="stable" ;;
+            *) echo "::error::Tag must be 'latest' or look like v1.0.0 (got: $TAG)"; exit 1 ;;
+          esac
+          echo "Publishing $KIND release: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "kind=$KIND" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update the release
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: "v1.0.0"
+          TAG: ${{ steps.rel.outputs.tag }}
+          KIND: ${{ steps.rel.outputs.kind }}
         run: |
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          ROLL_TITLE="NullWire-MCP Latest Build (main)"
+          ROLL_NOTES="Automatic build of the latest commit on main (${GITHUB_SHA::7}). Tests and all 9 platform builds passed. Use a numbered release for a stable version."
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists: replacing its files."
+            gh release upload "$TAG" dist/* --clobber --repo "$REPO"
+            if [ "$KIND" = "rolling" ]; then
+              gh release edit "$TAG" --repo "$REPO" \
+                --title "$ROLL_TITLE" --notes "$ROLL_NOTES" \
+                --prerelease --latest=false
+              # Move the tag to the newest commit (create it if it vanished).
+              gh api -X PATCH "repos/$REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true \
+                || gh api -X POST "repos/$REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" \
+                || echo "::warning::Could not move the $TAG tag; files were still updated."
+            fi
           else
-            gh release create "$TAG" dist/* \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "$TAG" \
-              --generate-notes
+            echo "Creating release $TAG."
+            if [ "$KIND" = "rolling" ]; then
+              gh release create "$TAG" dist/* --repo "$REPO" \
+                --target "$GITHUB_SHA" \
+                --title "$ROLL_TITLE" --notes "$ROLL_NOTES" \
+                --prerelease --latest=false
+            else
+              gh release create "$TAG" dist/* --repo "$REPO" \
+                --target "$GITHUB_SHA" \
+                --title "$TAG" --generate-notes
+            fi
           fi
+ 
