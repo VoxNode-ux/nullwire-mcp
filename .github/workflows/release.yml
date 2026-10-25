@@ -9,56 +9,78 @@ on:
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   test:
     name: Vet and test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
+          cache: false
       - name: go vet
         run: go vet ./...
       - name: go test
-        run: go test -v ./...
+        run: go test -v -race ./...
 
   build:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    name: Build ${{ matrix.artifact }}
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - goos: linux
             goarch: amd64
+            artifact: nullwire-linux-amd64
           - goos: linux
             goarch: arm64
+            artifact: nullwire-linux-arm64
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+            artifact: nullwire-linux-armv7
+          - goos: linux
+            goarch: riscv64
+            artifact: nullwire-linux-riscv64
           - goos: darwin
             goarch: amd64
+            artifact: nullwire-darwin-amd64
           - goos: darwin
             goarch: arm64
+            artifact: nullwire-darwin-arm64
           - goos: windows
             goarch: amd64
+            artifact: nullwire-windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            artifact: nullwire-windows-arm64.exe
+          - goos: freebsd
+            goarch: amd64
+            artifact: nullwire-freebsd-amd64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
+          cache: false
       - name: Cross-compile static binary
         env:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
         run: |
-          ext=""
-          if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
           mkdir -p dist
-          go build -trimpath -ldflags="-s -w" -o "dist/nullwire-${GOOS}-${GOARCH}${ext}" .
+          go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.artifact }}" .
       - uses: actions/upload-artifact@v4
         with:
-          name: nullwire-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: ${{ matrix.artifact }}
           path: dist/*
           if-no-files-found: error
 
@@ -66,7 +88,7 @@ jobs:
     name: Publish GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
