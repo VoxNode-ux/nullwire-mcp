@@ -1,5 +1,5 @@
 <div align="center">
- 
+
 # ⚡ NullWire-MCP
 
 ### Let your AI agent debug live HTTP traffic — without it ever seeing a single secret.
@@ -130,7 +130,7 @@ The live telemetry bar on `stderr` (redrawn in place with `\r\033[K`):
 |---|---|---|
 | **Third-party dependencies** | **0** (Go standard library only; `go.mod` has no `require`) | Dozens of transitive Python / Node / JVM packages |
 | **Disk footprint** | **0 B**, RAM-only 50-slot ring; the code contains no file I/O | Flow files / SQLite databases on disk |
-| **Secret redaction** | **Salted SHA-256 correlation tags**, so reuse is provable and the secret is unseen | Often blind or static masks that destroys correlation |
+| **Secret redaction** | **Salted SHA-256 correlation tags**, so reuse is provable and the secret is unseen | None, or blind `[REDACTED]` that destroys correlation |
 | **Startup** | Native static binary: no interpreter, no VM, no package resolution | Interpreter / VM cold start |
 | **MCP protocol** | **2026-07-28 stateless + 2025-11-25 / 2024-11-05 legacy** | Usually legacy only |
 | **HTTPS upstreams** | Reverse gateway: no root CA, no keychain changes | Install a root CA and intercept TLS |
@@ -186,6 +186,25 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
 |---|---|---|
 | `-port` | `8080` | Loopback port. The host is hard-coded to `127.0.0.1`; there is no way to bind elsewhere. `0` picks a free port. |
 | `-target` | *(none)* | Default upstream base URL for reverse-gateway mode, e.g. `https://api.example.com` |
+
+### Try it without an AI client
+
+The MCP side lives as long as stdin stays open, so for a quick demo feed it a request on a timer:
+
+```bash
+( sleep 2
+  echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"inspect_traffic","arguments":{"limit":5}}}'
+  sleep 1 ) | nullwire-mcp -port 8080 &
+
+sleep 1
+curl -s -x http://127.0.0.1:8080 http://example.com/ \
+  -H 'Authorization: Bearer my_secret_token_123' \
+  -H 'Cookie: sid=my_secret_cookie' \
+  -H 'X-Forwarded-For: 198.51.100.1' > /dev/null
+wait
+```
+
+You'll see the live status bar on stderr and, on stdout, a flow whose headers read `Bearer [REDACTED_TOKEN#…]`, `[REDACTED_COOKIE#…]` and `[REDACTED_IP#…]`.
 
 ### Plug it into your AI client
 
