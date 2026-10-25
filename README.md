@@ -153,8 +153,10 @@ go install github.com/VoxNode-ux/nullwire-mcp@latest
 | Platform | File |
 |---|---|
 | Linux x86-64 / ARM64 | `nullwire-linux-amd64` / `nullwire-linux-arm64` |
+| Linux ARMv7 (Raspberry Pi etc.) / RISC-V 64 | `nullwire-linux-armv7` / `nullwire-linux-riscv64` |
 | macOS Intel / Apple Silicon | `nullwire-darwin-amd64` / `nullwire-darwin-arm64` |
-| Windows x86-64 | `nullwire-windows-amd64.exe` |
+| Windows x86-64 / ARM64 | `nullwire-windows-amd64.exe` / `nullwire-windows-arm64.exe` |
+| FreeBSD x86-64 | `nullwire-freebsd-amd64` |
 
 ```bash
 # Linux example (swap the file name for your platform)
@@ -437,7 +439,7 @@ The suite uses only the standard library (`net/http/httptest`) and covers:
 - A full reverse-gateway round trip: `Accept-Encoding` stripped, tokens scrubbed in the ring, a valid sanitized `curl` exported.
 - MCP dispatch: `server/discover`, `initialize`, `ping`, `tools/list`, `tools/call`, error codes, and **zero stdout bytes for notifications**.
 
-CI (`.github/workflows/release.yml`) runs `go vet` and `go test`, cross-compiles static `CGO_ENABLED=0` binaries for linux, darwin and windows, and publishes them with `SHA256SUMS.txt` on `v*` tags.
+CI (`.github/workflows/release.yml`) runs `go vet` and `go test -race`, cross-compiles static `CGO_ENABLED=0` binaries for nine targets (Linux amd64/arm64/armv7/riscv64, macOS amd64/arm64, Windows amd64/arm64, FreeBSD amd64), and publishes them with `SHA256SUMS.txt` on `v*` tags.
 
 ---
 
