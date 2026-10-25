@@ -1,5 +1,5 @@
 <div align="center">
-
+ 
 # ⚡ NullWire-MCP
 
 ### Let your AI agent debug live HTTP traffic — without it ever seeing a single secret.
