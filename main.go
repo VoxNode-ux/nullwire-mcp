@@ -655,14 +655,29 @@ type rpcResponse struct {
 	Error   *rpcError       `json:"error,omitempty"`
 }
 
+// marshalJSON encodes v without HTML escaping (so <, > and & stay readable and
+// cost fewer tokens). With indent=false the output is a single compact line.
+func marshalJSON(v any, indent bool) (string, error) {
+	var sb strings.Builder
+	enc := json.NewEncoder(&sb)
+	enc.SetEscapeHTML(false)
+	if indent {
+		enc.SetIndent("", "  ")
+	}
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(sb.String(), "\n"), nil
+}
+
 // writeFrame writes exactly one compact JSON line to stdout.
 func (a *App) writeFrame(resp rpcResponse) {
 	resp.JSONRPC = "2.0"
-	b, err := json.Marshal(resp)
+	line, err := marshalJSON(resp, false)
 	if err != nil {
-		b = []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal error: cannot encode response"}}`)
+		line = `{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal error: cannot encode response"}}`
 	}
-	b = append(b, '\n')
+	b := []byte(line + "\n")
 	a.stdoutMu.Lock()
 	defer a.stdoutMu.Unlock()
 	_, _ = os.Stdout.Write(b)
@@ -774,11 +789,11 @@ func (a *App) toolInspect(args json.RawMessage) map[string]any {
 		},
 		"flows": flows,
 	}
-	b, err := json.MarshalIndent(payload, "", "  ")
+	text, err := marshalJSON(payload, true)
 	if err != nil {
 		return toolResult("failed to encode flows: "+err.Error(), true)
 	}
-	return toolResult(string(b), false)
+	return toolResult(text, false)
 }
 
 var reTag = regexp.MustCompile(`\[REDACTED_(TOKEN|COOKIE|IP)#[0-9a-f]{6}\]`)
@@ -1103,3 +1118,4 @@ func main() {
 	app.ring.Clear()
 	_ = srv.Close()
 }
+ 
