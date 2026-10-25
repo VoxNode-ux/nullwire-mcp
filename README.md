@@ -130,7 +130,7 @@ The live telemetry bar on `stderr` (redrawn in place with `\r\033[K`):
 |---|---|---|
 | **Third-party dependencies** | **0** (Go standard library only; `go.mod` has no `require`) | Dozens of transitive Python / Node / JVM packages |
 | **Disk footprint** | **0 B**, RAM-only 50-slot ring; the code contains no file I/O | Flow files / SQLite databases on disk |
-| **Secret redaction** | **Salted SHA-256 correlation tags**, so reuse is provable and the secret is unseen | None, or blind `[REDACTED]` that destroys correlation |
+| **Secret redaction** | **Salted SHA-256 correlation tags**, so reuse is provable and the secret is unseen | Often blind or static masks that destroys correlation |
 | **Startup** | Native static binary: no interpreter, no VM, no package resolution | Interpreter / VM cold start |
 | **MCP protocol** | **2026-07-28 stateless + 2025-11-25 / 2024-11-05 legacy** | Usually legacy only |
 | **HTTPS upstreams** | Reverse gateway: no root CA, no keychain changes | Install a root CA and intercept TLS |
