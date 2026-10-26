@@ -2,6 +2,7 @@ name: Smoke test
 
 on:
   push:
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -39,18 +40,24 @@ jobs:
         shell: bash
         run: |
           PY=$(command -v python3 || command -v python)
-          "$PY" -m http.server 18081 --bind 127.0.0.1 > /dev/null 2>&1 &
+          mkdir -p upstream && echo ok > upstream/index.html
+          "$PY" -m http.server 18081 --bind 127.0.0.1 --directory upstream > upstream.log 2>&1 &
           UP=$!
-          sleep 2
-          ( sleep 4
+          rm -f go.flag
+          ( while [ ! -f go.flag ]; do sleep 0.5; done
             echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"inspect_traffic","arguments":{"limit":5}}}'
             sleep 2 ) | ./nullwire-smoke.exe -port 18080 -target http://127.0.0.1:18081 > e2e-out.txt 2> e2e-err.txt &
           NW=$!
-          sleep 2
-          curl -s http://127.0.0.1:18080/ \
+          for i in $(seq 1 20); do
+            if curl -s -o /dev/null --max-time 2 http://127.0.0.1:18080/; then break; fi
+            sleep 0.5
+          done
+          { date; if command -v lsof >/dev/null; then lsof -nP -iTCP:18080 -iTCP:18081; fi; } > e2e-ports.txt 2>&1 || true
+          curl -sS -v --max-time 10 http://127.0.0.1:18080/ \
             -H "Authorization: Bearer my_secret_token_123" \
             -H "Cookie: sid=my_secret_cookie" \
-            -H "X-Forwarded-For: 198.51.100.1" > /dev/null
+            -H "X-Forwarded-For: 198.51.100.1" > e2e-curl.txt 2>&1 || echo "curl exit code $?" >> e2e-curl.txt
+          touch go.flag
           wait $NW || true
           kill $UP 2>/dev/null || true
           grep -q 'REDACTED_TOKEN#' e2e-out.txt
@@ -92,6 +99,9 @@ jobs:
             quiet.txt
             e2e-out.txt
             e2e-err.txt
+            e2e-curl.txt
+            e2e-ports.txt
+            upstream.log
           if-no-files-found: ignore
           retention-days: 14
  
