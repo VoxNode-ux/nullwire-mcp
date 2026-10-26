@@ -15,8 +15,19 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download the Official MCP Publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl -fsSL -o mcp-publisher "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher-linux-amd64"
+          gh release download --repo modelcontextprotocol/registry \
+            --pattern '*linux*amd64*' --dir publisher-download --clobber
+          ls -la publisher-download
+          cd publisher-download
+          for f in *; do
+            case "$f" in *.tar.gz) tar xzf "$f" ;; esac
+          done
+          BIN=$(find . -type f -name 'mcp-publisher*' ! -name '*.tar.gz' ! -name '*.txt' ! -name '*.sha256' | head -1)
+          cp "$BIN" ../mcp-publisher
+          cd ..
           chmod +x mcp-publisher
           ./mcp-publisher --version
 
