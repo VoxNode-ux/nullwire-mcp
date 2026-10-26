@@ -450,11 +450,14 @@ We would rather you hear these from us than discover them in production.
 |---|---|
 | Linux x86-64 | CI: `go vet`, unit tests with `-race`, MCP smoke test, end-to-end redaction |
 | Windows x86-64 | CI: MCP smoke test, end-to-end redaction |
-| macOS (Apple Silicon, Intel) | CI: builds, starts, answers MCP requests, silent on notifications, request-side redaction verified end to end |
-| Linux ARM64 (Android / Termux) | Manual: redaction tags, `export_sanitized_curl`, reverse gateway and all three guards (needs `termux-chroot`) |
-| Linux ARMv7, RISC-V, Windows ARM64, FreeBSD | Cross-compiled in CI only; not run. Reports welcome |
+| macOS (Apple Silicon, Intel) | CI: MCP smoke test, silent notifications, end-to-end redaction |
+| FreeBSD x86-64 | CI (FreeBSD VM): MCP smoke test, silent notifications, end-to-end redaction |
+| Linux ARMv7 & RISC-V 64 | CI (QEMU user-mode): MCP smoke test, silent notifications, end-to-end redaction |
+| Linux ARM64 (Android / Termux) | Manual on-device: live upstream proxy, redaction tags, `export_sanitized_curl`, reverse gateway and guards |
+| Windows ARM64 | Cross-compiled in CI only; not run. Reports welcome |
 
 CI results (including raw smoke-test output) are on the [Actions tab](https://github.com/VoxNode-ux/nullwire-mcp/actions).
+
 
 ---
 
