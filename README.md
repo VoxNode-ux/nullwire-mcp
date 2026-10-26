@@ -19,8 +19,10 @@ Every token, cookie and IP is swapped for a **stable, salted tag**, so the agent
 [**How it works**](#-how-it-works) ·
 [**Install**](#-30-second-install) ·
 [**Tools**](#-mcp-tool-reference) ·
-[**Security**](#-security-&-protocol-engineering-deep-dive) ·
-[**Limitations**](#-honest-scope-&-known-limitations) ·
+[**Security**]<a id="security"></a>
+## 🛡️ Security & protocol engineering deep-dive
+[**Limitations**]<a id="limitations"></a>
+## ⚖️ Honest scope & known limitations
 [**FAQ**](#-faq)
 
 </div>
