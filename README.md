@@ -19,8 +19,8 @@ Every token, cookie and IP is swapped for a **stable, salted tag**, so the agent
 [**How it works**](#-how-it-works) ·
 [**Install**](#-30-second-install) ·
 [**Tools**](#-mcp-tool-reference) ·
-[**Security**](#-security--protocol-engineering-deep-dive) ·
-[**Limitations**](#-honest-scope--known-limitations) ·
+[**Security**](#-security-&-protocol-engineering-deep-dive) ·
+[**Limitations**](#-honest-scope-&-known-limitations) ·
 [**FAQ**](#-faq)
 
 </div>
@@ -507,7 +507,7 @@ We would rather you hear these from us than discover them in production.
 | Linux ARMv7 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
 | Linux RISC-V 64 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
 | Linux ARM64 (Android / Termux) | ✅ verified on device | live upstream proxy, redaction tags, `export_sanitized_curl`, reverse gateway, guards (needs `termux-chroot`) |
-| Windows ARM64 | ⬜ not run yet | cross-compiled in CI only. Reports welcome |
+| Windows ARM64 | ✅ verified | smoke test, silent notifications, end-to-end redaction |
 
 🟡 *emulated* means run under QEMU, not on real hardware. Full logs for each run are linked from [docs/test-results.md](docs/test-results.md) and the [Actions tab](https://github.com/VoxNode-ux/nullwire-mcp/actions).
 
