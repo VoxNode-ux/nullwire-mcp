@@ -33,7 +33,7 @@ jobs:
           echo '{"jsonrpc":"2.0","method":"notifications/initialized"}' | ./nullwire-smoke.exe -port 0 > quiet.txt 2>/dev/null
           test ! -s quiet.txt
 
-                 - name: Redaction end-to-end (local upstream, no internet)
+      - name: Redaction end-to-end (local upstream, no internet)
         id: e2e
         continue-on-error: true
         shell: bash
@@ -41,35 +41,24 @@ jobs:
           PY=$(command -v python3 || command -v python)
           "$PY" -m http.server 18081 --bind 127.0.0.1 > /dev/null 2>&1 &
           UP=$!
-          
-          # 1. Start the proxy in the background. 
-          # The subshell waits 10s before firing inspect_traffic.
-          ( sleep 10
+          sleep 2
+          ( sleep 4
             echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"inspect_traffic","arguments":{"limit":5}}}'
             sleep 2 ) | ./nullwire-smoke.exe -port 18080 -target http://127.0.0.1:18081 > e2e-out.txt 2> e2e-err.txt &
           NW=$!
-          
-          # 2. Wait 6 seconds to ensure macOS Gatekeeper finishes scanning 
-          # and the proxy is actually listening on port 18080.
-          sleep 6
-          
-          # 3. Fire the test request
+          sleep 2
           curl -s http://127.0.0.1:18080/ \
             -H "Authorization: Bearer my_secret_token_123" \
             -H "Cookie: sid=my_secret_cookie" \
             -H "X-Forwarded-For: 198.51.100.1" > /dev/null
-            
-          # 4. Wait for the 12s subshell to finish and clean up
           wait $NW || true
           kill $UP 2>/dev/null || true
-          
           grep -q 'REDACTED_TOKEN#' e2e-out.txt
           grep -q 'REDACTED_COOKIE#' e2e-out.txt
           grep -q 'REDACTED_IP#' e2e-out.txt
           if grep -q 'my_secret_token_123\|my_secret_cookie\|198.51.100.1' e2e-out.txt; then
             echo "SECRET LEAKED into output"; exit 1
           fi
-
 
       - name: Collect system info and summary
         if: always()
