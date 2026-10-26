@@ -1,11 +1,11 @@
 {
-  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/registry/main/docs/reference/server-json/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.VoxNode-ux/nullwire-mcp",
   "title": "NullWire-MCP",
   "description": "RAM-only HTTP debugging proxy and MCP server in Go. AI agents see salted tags, never secrets.",
-  "version": "1.0.0",
   "repository": {
     "url": "https://github.com/VoxNode-ux/nullwire-mcp",
     "source": "github"
-  }
+  },
+  "version": "1.0.0"
 }
