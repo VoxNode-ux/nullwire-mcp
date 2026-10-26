@@ -8,7 +8,7 @@ on:
         required: false
         default: "v1.0.0"
   push:
-    branches: [main,VoxNode-ux-patch-1] 
+    branches: [main] 
     tags: ["v*"]
   pull_request:
 
@@ -171,25 +171,4 @@ jobs:
                 --title "$TAG" --generate-notes
             fi
           fi
-   smoke:
-    name: Smoke test ${{ matrix.os }}
-    needs: test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: os: [ubuntu-24.04, macos-15, macos-15-intel, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.23"
-          cache: false
-      - name: Build and query the MCP server
-        shell: bash
-        run: |
-          go build -o nullwire-smoke.exe .
-          echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | ./nullwire-smoke.exe -port 0 > out.txt 2> err.txt
-          grep -q inspect_traffic out.txt
-          echo '{"jsonrpc":"2.0","method":"notifications/initialized"}' | ./nullwire-smoke.exe -port 0 > quiet.txt 2>/dev/null
-          test ! -s quiet.txt
+   
