@@ -43,6 +43,10 @@ jobs:
           mkdir -p upstream && echo ok > upstream/index.html
           "$PY" -m http.server 18081 --bind 127.0.0.1 --directory upstream > upstream.log 2>&1 &
           UP=$!
+          for i in $(seq 1 40); do
+            if curl -s -o /dev/null --max-time 2 http://127.0.0.1:18081/; then break; fi
+            sleep 0.5
+          done
           rm -f go.flag
           ( while [ ! -f go.flag ]; do sleep 0.5; done
             echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"inspect_traffic","arguments":{"limit":5}}}'
