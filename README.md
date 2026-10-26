@@ -497,21 +497,19 @@ We would rather you hear these from us than discover them in production.
 
 ## 🧪 Tested on
 
-| Platform | What has been verified |
-|---|---|
-| Linux x86-64 | CI: `go vet`, unit tests with `-race`, MCP smoke test, end-to-end redaction |
-| Windows x86-64 | CI: MCP smoke test, end-to-end redaction |
-| macOS (Apple Silicon, Intel) | CI: MCP smoke test, silent notifications, end-to-end redaction |
-| FreeBSD x86-64 | CI (FreeBSD VM): MCP smoke test, silent notifications, end-to-end redaction |
-| Linux ARMv7 & RISC-V 64 | CI (QEMU user-mode): MCP smoke test, silent notifications, end-to-end redaction |
-| Linux ARM64 (Android / Termux) | Manual on-device: live upstream proxy, redaction tags, `export_sanitized_curl`, reverse gateway and guards |
-| Windows ARM64 | Cross-compiled in CI only; not run. Reports welcome |
+| Platform | Status | What was run |
+|---|---|---|
+| Linux x86-64 (Ubuntu 24.04) | ✅ verified | `go vet`, unit tests with `-race`, smoke test, end-to-end redaction |
+| macOS 15 (Apple Silicon) | ✅ verified | smoke test, silent notifications, end-to-end redaction |
+| macOS 15 (Intel) | ✅ verified | smoke test, silent notifications, end-to-end redaction |
+| Windows x86-64 | ✅ verified | smoke test, silent notifications, end-to-end redaction |
+| FreeBSD amd64 (VM) | ✅ verified | smoke test, silent notifications, end-to-end redaction |
+| Linux ARMv7 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
+| Linux RISC-V 64 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
+| Linux ARM64 (Android / Termux) | ✅ verified on device | live upstream proxy, redaction tags, `export_sanitized_curl`, reverse gateway, guards (needs `termux-chroot`) |
+| Windows ARM64 | ⬜ not run yet | cross-compiled in CI only. Reports welcome |
 
-CI results (including raw smoke-test output) are on the [Actions tab](https://github.com/VoxNode-ux/nullwire-mcp/actions).
-
-
-
----
+🟡 *emulated* means run under QEMU, not on real hardware. Full logs for each run are linked from [docs/test-results.md](docs/test-results.md) and the [Actions tab](https://github.com/VoxNode-ux/nullwire-mcp/actions).
 
 ## ✅ Verification & testing
 
@@ -575,18 +573,7 @@ No. The listener is hard-coded to `127.0.0.1` and checked with `IsLoopback()`; t
 
 ## 🤝 Contributing
 
-Issues and PRs are welcome. The whole project is one `main.go` plus tests, so it is easy to read end to end.
-
-```bash
-go vet ./... && go test -v ./...
-```
-
-Good places to help:
-
-- **Found a secret format that slips through?** Open an issue with a *fake* example of its shape (never a real secret).
-- **Scrubber coverage:** more key formats, IPv6 addresses (currently IPv4 only).
-- **Platform reports:** Windows ARM64 is cross-compiled in CI but not run. Reports are very welcome.
-- **Client recipes:** config snippets for other MCP clients.
+Issues and PRs are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules, the test commands and the PR checklist. Security reports go through [SECURITY.md](SECURITY.md), not public issues.
 
 ---
 
