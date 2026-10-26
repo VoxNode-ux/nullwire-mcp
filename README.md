@@ -4,7 +4,7 @@
 
 ### Let your AI agent debug live HTTP traffic — without it ever seeing a single secret.
 
-[![CI](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml)
+[![CI](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml/badge.svg?branch=main&event=push)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml)
 ![Dependencies: 0](https://img.shields.io/badge/dependencies-0%20(pure%20Go%20stdlib)-brightgreen)
 ![Disk writes: 0 bytes](https://img.shields.io/badge/disk%20writes-0%20bytes%20(RAM--only)-brightgreen)
 ![MCP](https://img.shields.io/badge/MCP-2026--07--28%20%7C%202025--11--25%20%7C%202024--11--05-blue)
@@ -432,6 +432,7 @@ We would rather you hear these from us than discover them in production.
 
 - **`HTTP CONNECT` returns `501 Not Implemented`, by design.** Inspecting HTTPS through `CONNECT` means man-in-the-middling TLS, which means generating a root CA and getting it into your OS or browser trust store. That is key material and keychain pollution, the opposite of a zero-footprint tool. The **reverse gateway** gets the same visibility without any of that: point your app at `http://127.0.0.1:8080` and let NullWire do the TLS to the upstream.
 - **No WebSocket / `Upgrade` pass-through.** `Upgrade` and `Connection` are treated as hop-by-hop headers and stripped, so upgraded protocols won't work through the proxy. Plain request/response and streaming responses (e.g. SSE) are supported.
+- **Android / Termux:** static Go binaries have no DNS resolver config on Android, so upstream hostnames fail with `502 … lookup … connection refused`. Run inside `termux-chroot` (`pkg install proot`), which provides a resolver. Linux desktops, macOS, Windows and FreeBSD are not expected to be affected.
 - **Redaction is pattern-based, not magic.** It catches the shapes in the table above. A secret in a format we don't recognise, in a field we don't know, or split across a body boundary can pass through. Treat the scrubber as a strong seatbelt, not a guarantee, and test it with your own traffic. IPv6 addresses are not redacted yet. IPv4-shaped strings that aren't addresses (some version numbers) can be redacted as false positives.
 - **Tags are 24 bits.** Six hex characters are plenty to tell apart the handful of secrets in a 50-slot buffer, but collisions are possible in principle. They are for correlation, not identification.
 - **Bodies are bounded.** Only the first 64 KB of each body is captured, and stored bodies are cut to 8 KB / 16 KB. Responses that arrive with a `Content-Encoding` (e.g. gzip) are stored as a short placeholder rather than decoded. NullWire strips `Accept-Encoding` from forwarded requests so most servers reply uncompressed, but it can't force them to.
@@ -440,6 +441,20 @@ We would rather you hear these from us than discover them in production.
 - **Your app sees raw traffic.** NullWire protects what the *AI agent* sees, not what your local app sees. It isn't a security boundary for the app itself.
 - **Protocol coverage is what's documented.** Initialization, discovery, ping, `tools/list` and `tools/call` for the 2026-07-28 / 2025-11-25 / 2024-11-05 specs. Resources, prompts and sampling aren't implemented and return `-32601`.
 - **Release binaries are unsigned.** Verify them with `SHA256SUMS.txt`. On macOS you may need `xattr -d com.apple.quarantine ./nullwire-darwin-arm64`.
+
+---
+
+## 🧪 Tested on
+
+| Platform | What has been verified |
+|---|---|
+| Linux x86-64 | CI: `go vet`, unit tests with `-race`, MCP smoke test, end-to-end redaction |
+| Windows x86-64 | CI: MCP smoke test, end-to-end redaction |
+| macOS (Apple Silicon, Intel) | CI: builds, starts, answers MCP requests, silent on notifications, request-side redaction verified end to end |
+| Linux ARM64 (Android / Termux) | Manual: redaction tags, `export_sanitized_curl`, reverse gateway and all three guards (needs `termux-chroot`) |
+| Linux ARMv7, RISC-V, Windows ARM64, FreeBSD | Cross-compiled in CI only; not run. Reports welcome |
+
+CI results (including raw smoke-test output) are on the [Actions tab](https://github.com/VoxNode-ux/nullwire-mcp/actions).
 
 ---
 
