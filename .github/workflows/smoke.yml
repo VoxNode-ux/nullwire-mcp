@@ -31,3 +31,6 @@ jobs:
           echo '{"jsonrpc":"2.0","method":"notifications/initialized"}' | ./nullwire-smoke.exe -port 0 > quiet.txt 2>/dev/null
           test ! -s quiet.txt
  
+      - name: Unit tests
+        shell: bash
+        run: go test ./...
