@@ -1,0 +1,97 @@
+name: Smoke test
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false
+
+      - name: Build and query the MCP server
+        id: basic
+        shell: bash
+        run: |
+          go build -o nullwire-smoke.exe .
+          echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | ./nullwire-smoke.exe -port 0 > out.txt 2> err.txt
+          grep -q inspect_traffic out.txt
+          echo '{"jsonrpc":"2.0","method":"notifications/initialized"}' | ./nullwire-smoke.exe -port 0 > quiet.txt 2>/dev/null
+          test ! -s quiet.txt
+
+      - name: Redaction end-to-end (local upstream, no internet)
+        id: e2e
+        continue-on-error: true
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" -m http.server 18081 --bind 127.0.0.1 > /dev/null 2>&1 &
+          UP=$!
+          sleep 2
+          ( sleep 4
+            echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"inspect_traffic","arguments":{"limit":5}}}'
+            sleep 2 ) | ./nullwire-smoke.exe -port 18080 -target http://127.0.0.1:18081 > e2e-out.txt 2> e2e-err.txt &
+          NW=$!
+          sleep 2
+          curl -s http://127.0.0.1:18080/ \
+            -H "Authorization: Bearer my_secret_token_123" \
+            -H "Cookie: sid=my_secret_cookie" \
+            -H "X-Forwarded-For: 198.51.100.1" > /dev/null
+          wait $NW || true
+          kill $UP 2>/dev/null || true
+          grep -q 'REDACTED_TOKEN#' e2e-out.txt
+          grep -q 'REDACTED_COOKIE#' e2e-out.txt
+          grep -q 'REDACTED_IP#' e2e-out.txt
+          if grep -q 'my_secret_token_123\|my_secret_cookie\|198.51.100.1' e2e-out.txt; then
+            echo "SECRET LEAKED into output"; exit 1
+          fi
+
+      - name: Collect system info and summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "os_label=${{ matrix.os }}"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            go version
+            echo "basic=${{ steps.basic.outcome }}"
+            echo "e2e=${{ steps.e2e.outcome }}"
+          } > info.txt
+          {
+            echo "### ${{ matrix.os }}"
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Build + MCP answers + silent notifications | ${{ steps.basic.outcome }} |"
+            echo "| Redaction end-to-end | ${{ steps.e2e.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.os }}
+          path: |
+            info.txt
+            out.txt
+            err.txt
+            quiet.txt
+            e2e-out.txt
+            e2e-err.txt
+          if-no-files-found: ignore
+          retention-days: 14
+ 
