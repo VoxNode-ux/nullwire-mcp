@@ -19,15 +19,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download --repo modelcontextprotocol/registry \
-            --pattern '*linux*amd64*' --dir publisher-download --clobber
-          ls -la publisher-download
-          cd publisher-download
-          for f in *; do
-            case "$f" in *.tar.gz) tar xzf "$f" ;; esac
-          done
-          BIN=$(find . -type f -name 'mcp-publisher*' ! -name '*.tar.gz' ! -name '*.txt' ! -name '*.sha256' | head -1)
-          cp "$BIN" ../mcp-publisher
-          cd ..
+            --pattern 'mcp-publisher_linux_amd64.tar.gz' --dir publisher-download --clobber
+          tar xzf publisher-download/mcp-publisher_linux_amd64.tar.gz -C publisher-download
+          cp publisher-download/mcp-publisher ./mcp-publisher
           chmod +x mcp-publisher
           ./mcp-publisher --version
 
