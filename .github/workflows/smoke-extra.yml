@@ -1,0 +1,174 @@
+name: Smoke test - extra platforms
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows_arm:
+        description: "Also run Windows ARM64 (needs an ARM runner; leave off for private repos)"
+        type: boolean
+        default: false
+  push:
+    branches: [smoke-extra]
+
+permissions:
+  contents: read
+
+jobs:
+  emulated:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: freebsd-amd64
+            goos: freebsd
+            goarch: amd64
+          - label: linux-armv7
+            goos: linux
+            goarch: arm
+            goarm: "7"
+            arch: armv7
+          - label: linux-riscv64
+            goos: linux
+            goarch: riscv64
+            arch: riscv64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false
+
+      - name: Cross-compile the target binary
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: go build -trimpath -o nullwire-smoke.bin .
+
+      - name: Run tests in a FreeBSD VM
+        if: matrix.label == 'freebsd-amd64'
+        id: run-freebsd
+        continue-on-error: true
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y curl python3
+          run: |
+            sh .github/scripts/smoke-test.sh ./nullwire-smoke.bin
+
+      - name: Run tests under QEMU (Linux)
+        if: startsWith(matrix.label, 'linux-')
+        id: run-linux
+        continue-on-error: true
+        uses: uraimo/run-on-arch-action@v3
+        with:
+          arch: ${{ matrix.arch }}
+          distro: ubuntu_latest
+          githubToken: ${{ github.token }}
+          install: |
+            apt-get update -q -y
+            apt-get install -q -y curl python3
+          run: |
+            sh .github/scripts/smoke-test.sh ./nullwire-smoke.bin
+
+      - name: Summary and system info
+        if: always()
+        shell: bash
+        run: |
+          pick() { for v in "$@"; do if [ -n "$v" ] && [ "$v" != "skipped" ]; then echo "$v"; return; fi; done; echo "skipped"; }
+          RESULT=$(pick "${{ steps.run-freebsd.outcome }}" "${{ steps.run-linux.outcome }}")
+          {
+            echo "label=${{ matrix.label }}"
+            echo "goos=${{ matrix.goos }}"
+            echo "goarch=${{ matrix.goarch }}"
+            echo "goarm=${{ matrix.goarm }}"
+            echo "result=$RESULT"
+            date -u
+          } > info.txt
+          {
+            echo "### ${{ matrix.label }}"
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Build + MCP + end-to-end redaction | $RESULT |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extra-${{ matrix.label }}
+          path: |
+            info.txt
+            out.txt
+            err.txt
+            quiet.txt
+            e2e-*.txt
+            upstream.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+  windows-arm64:
+    name: windows-arm64
+    if: ${{ inputs.windows_arm }}
+    runs-on: windows-11-arm
+    continue-on-error: true
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        shell: bash
+        run: go build -trimpath -o nullwire-smoke.exe .
+
+      - name: Run tests
+        id: run-win
+        continue-on-error: true
+        shell: bash
+        run: sh .github/scripts/smoke-test.sh ./nullwire-smoke.exe
+
+      - name: Summary and system info
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "label=windows-arm64"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            go version
+            echo "result=${{ steps.run-win.outcome }}"
+          } > info.txt
+          {
+            echo "### windows-arm64"
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Build + MCP + end-to-end redaction | ${{ steps.run-win.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extra-windows-arm64
+          path: |
+            info.txt
+            out.txt
+            err.txt
+            quiet.txt
+            e2e-*.txt
+            upstream.log
+          if-no-files-found: ignore
+          retention-days: 30
