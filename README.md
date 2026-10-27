@@ -271,7 +271,7 @@ The client launches `nullwire-mcp` as a subprocess and talks JSON-RPC over stdio
 **Claude Code CLI**
 
 ```bash
-claude mcp add nullwire -- nullwire-mcp -port 8080 -target (https://api.example.com)
+claude mcp add nullwire -- nullwire-mcp -port 8080 -target https://api.example.com
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`)
@@ -281,7 +281,7 @@ claude mcp add nullwire -- nullwire-mcp -port 8080 -target (https://api.example.
   "mcpServers": {
     "nullwire": {
       "command": "nullwire-mcp",
-      "args": ["-port", "8080", "-target", "(https://api.example.com)"]
+      "args": ["-port", "8080", "-target", "https://api.example.com"]
     }
   }
 }
@@ -294,7 +294,7 @@ claude mcp add nullwire -- nullwire-mcp -port 8080 -target (https://api.example.
   "mcpServers": {
     "nullwire": {
       "command": "nullwire-mcp",
-      "args": ["-port", "8080", "-target", "(https://api.example.com)"]
+      "args": ["-port", "8080", "-target", "https://api.example.com"]
     }
   }
 }
@@ -307,7 +307,7 @@ claude mcp add nullwire -- nullwire-mcp -port 8080 -target (https://api.example.
   "mcpServers": {
     "nullwire": {
       "command": "nullwire-mcp",
-      "args": ["-port", "8080", "-target", "(https://api.example.com)"]
+      "args": ["-port", "8080", "-target", "https://api.example.com"]
     }
   }
 }
