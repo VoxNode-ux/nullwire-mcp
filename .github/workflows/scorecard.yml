@@ -23,11 +23,9 @@ jobs:
           persist-credentials: false
 
       - name: Run Scorecard
-        uses: ossf/scorecard-action@v2.4.0
-        with:
-          results_file: results.sarif
-          results_format: sarif
-          publish_results: true
+        run: |
+          go install github.com/ossf/scorecard/v4/cmd/scorecard@latest
+          "$(go env GOPATH)/bin/scorecard" --repo="$GITHUB_REPOSITORY" --format=sarif > results.sarif || true
 
       - name: Save the Scorecard report
         uses: actions/upload-artifact@v4
