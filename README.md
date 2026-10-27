@@ -9,7 +9,7 @@ Every token, cookie and IP is swapped for a **stable, salted tag**, so the agent
 
 [![CI](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml/badge.svg?branch=main&event=push)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml)
 [![Release](https://img.shields.io/github/v/release/VoxNode-ux/nullwire-mcp?color=blue)](https://github.com/VoxNode-ux/nullwire-mcp/releases)
-![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8?logo=go&logoColor=white)
+![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)
 ![Dependencies: 0](https://img.shields.io/badge/dependencies-0%20(pure%20Go%20stdlib)-brightgreen)
 ![Disk writes: 0 bytes](https://img.shields.io/badge/disk%20writes-0%20bytes%20(RAM--only)-brightgreen)
 ![MCP](https://img.shields.io/badge/MCP-2026--07--28%20%7C%202025--11--25%20%7C%202024--11--05-blue)
@@ -54,7 +54,7 @@ Blind `[REDACTED]` protects you but makes the AI useless for auth bugs. NullWire
 ## ⚡ Quick start in 60 seconds
 
 ```bash
-# 1. install (Go 1.23+), or grab a prebuilt binary from Releases
+# 1. install (Go 1.26+), or grab a prebuilt binary from Releases
 go install github.com/VoxNode-ux/nullwire-mcp@latest
 
 # 2. register it with your AI client (Claude Code shown; Cursor/Windsurf/Desktop configs below)
@@ -104,7 +104,12 @@ Two paths, one rule: **the real bytes go to your app, only a scrubbed copy goes 
 <details>
 <summary><b>Diagram not rendering (mobile, Mermaid disabled)? Open the ASCII version</b></summary>
 
+1. Your app or CLI sends plain HTTP traffic to the local loopback proxy at 127.0.0.1:8080.
+2. The proxy forwards the original bytes untouched to the upstream API while an async copy is scrubbed in RAM.
+3. Your AI agent inspects the sanitized flows over JSON-RPC stdio without ever seeing live tokens or secrets.
+
 ```text
+
 ╔══ [1] LOCAL APP / CLI ══════════════════════════════════════╗
 ║ curl · SDK · browser · your service                         ║▒
 ║ speaks plain HTTP to 127.0.0.1:8080                         ║▒
@@ -194,13 +199,13 @@ The live telemetry bar on `stderr` (redrawn in place with `\r\033[K`):
 
 ## 🚀 30-second install
 
-**Option A: `go install`** (Go 1.23+)
+**Option A: `go install`** (Go 1.26+)
 
 ```bash
-go install github.com/VoxNode-ux/nullwire-mcp@latest
+go install [github.com/VoxNode-ux/nullwire-mcp@latest](https://github.com/VoxNode-ux/nullwire-mcp@latest)
 ```
 
-**Option B: prebuilt static binary**, verified against `SHA256SUMS.txt` from [GitHub Releases](https://github.com/VoxNode-ux/nullwire-mcp/releases):
+**Option B: prebuilt static binary**, verified against `SHA256SUMS.txt` and signed GitHub build provenance from [GitHub Releases](https://github.com/VoxNode-ux/nullwire-mcp/releases) (each release also includes a CycloneDX SBOM `nullwire-sbom.cdx.json`):
 
 | Platform | File |
 |---|---|
@@ -212,10 +217,11 @@ go install github.com/VoxNode-ux/nullwire-mcp@latest
 
 ```bash
 # Linux example (swap the file name for your platform)
-BASE=https://github.com/VoxNode-ux/nullwire-mcp/releases/latest/download
+BASE=[https://github.com/VoxNode-ux/nullwire-mcp/releases/latest/download](https://github.com/VoxNode-ux/nullwire-mcp/releases/latest/download)
 curl -LO "$BASE/nullwire-linux-amd64"
 curl -LO "$BASE/SHA256SUMS.txt"
 grep ' nullwire-linux-amd64$' SHA256SUMS.txt | sha256sum -c -     # macOS: shasum -a 256 -c -
+gh attestation verify nullwire-linux-amd64 --repo VoxNode-ux/nullwire-mcp  # optional: verify signed build provenance
 chmod +x nullwire-linux-amd64
 sudo mv nullwire-linux-amd64 /usr/local/bin/nullwire-mcp
 ```
@@ -228,7 +234,7 @@ Get-FileHash .\nullwire-windows-amd64.exe -Algorithm SHA256   # compare with SHA
 **Option C: build from source**
 
 ```bash
-git clone https://github.com/VoxNode-ux/nullwire-mcp && cd nullwire-mcp
+git clone [https://github.com/VoxNode-ux/nullwire-mcp](https://github.com/VoxNode-ux/nullwire-mcp) && cd nullwire-mcp
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
 ```
 
@@ -249,7 +255,7 @@ The MCP side lives as long as stdin stays open, so for a quick demo feed it a re
   sleep 1 ) | nullwire-mcp -port 8080 &
 
 sleep 1
-curl -s -x http://127.0.0.1:8080 http://example.com/ \
+curl -s -x [http://127.0.0.1:8080](http://127.0.0.1:8080) [http://example.com/](http://example.com/) \
   -H 'Authorization: Bearer my_secret_token_123' \
   -H 'Cookie: sid=my_secret_cookie' \
   -H 'X-Forwarded-For: 198.51.100.1' > /dev/null
@@ -265,7 +271,7 @@ The client launches `nullwire-mcp` as a subprocess and talks JSON-RPC over stdio
 **Claude Code CLI**
 
 ```bash
-claude mcp add nullwire -- nullwire-mcp -port 8080 -target https://api.example.com
+claude mcp add nullwire -- nullwire-mcp -port 8080 -target [https://api.example.com](https://api.example.com)
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`)
@@ -275,7 +281,7 @@ claude mcp add nullwire -- nullwire-mcp -port 8080 -target https://api.example.c
   "mcpServers": {
     "nullwire": {
       "command": "nullwire-mcp",
-      "args": ["-port", "8080", "-target", "https://api.example.com"]
+      "args": ["-port", "8080", "-target", "[https://api.example.com](https://api.example.com)"]
     }
   }
 }
@@ -288,7 +294,7 @@ claude mcp add nullwire -- nullwire-mcp -port 8080 -target https://api.example.c
   "mcpServers": {
     "nullwire": {
       "command": "nullwire-mcp",
-      "args": ["-port", "8080", "-target", "https://api.example.com"]
+      "args": ["-port", "8080", "-target", "[https://api.example.com](https://api.example.com)"]
     }
   }
 }
@@ -301,13 +307,14 @@ claude mcp add nullwire -- nullwire-mcp -port 8080 -target https://api.example.c
   "mcpServers": {
     "nullwire": {
       "command": "nullwire-mcp",
-      "args": ["-port", "8080", "-target", "https://api.example.com"]
+      "args": ["-port", "8080", "-target", "[https://api.example.com](https://api.example.com)"]
     }
   }
 }
 ```
 
 Omit `-target` if you only use forward-proxy mode or the per-request `X-Target-URL` header.
+
 
 
 ---
@@ -458,7 +465,7 @@ Zeroes all 50 slots and resets the scrub counters. Flow ids keep counting upward
 
 ## 🛡️ Security & protocol engineering deep-dive
 
-Every item below is implemented in `main.go` and exercised by `main_test.go`.
+Every item below is implemented in `main.go` and exercised by `main_test.go` and `fuzz_test.go`.
 
 | Measure | What it does | Why |
 |---|---|---|
@@ -508,10 +515,10 @@ We would rather you hear these from us than discover them in production.
 - **The ring is ephemeral.** The 50 most recent flows vanish when the process exits. That is the point.
 - **Your app sees raw traffic.** NullWire protects what the *AI agent* sees, not what your local app sees. It isn't a security boundary for the app itself.
 - **Protocol coverage is what's documented.** Initialization, discovery, ping, `tools/list` and `tools/call` for the 2026-07-28 / 2025-11-25 / 2024-11-05 specs. Resources, prompts and sampling aren't implemented and return `-32601`.
-- **Release binaries are unsigned.** Verify them with `SHA256SUMS.txt`. On macOS you may need `xattr -d com.apple.quarantine ./nullwire-darwin-arm64`.
+- **Release binaries carry signed build provenance, not OS-vendor code-signing certificates.** Verify authenticity with `SHA256SUMS.txt` and `gh attestation verify`. Because they are not signed with an Apple Developer ID or Microsoft Authenticode certificate, on macOS you may need `xattr -d com.apple.quarantine ./nullwire-darwin-arm64`.
 
 
----
+--&
 
 <a id="tested-on"></a>
 
@@ -536,18 +543,22 @@ We would rather you hear these from us than discover them in production.
 ```bash
 go vet ./...
 go test -v ./...
-go test -v -race ./...      # the race detector needs cgo (gcc/clang) on most platforms
+go test -v -race ./...                                    # race detector (needs cgo)
+go test -run='^$' -fuzz=FuzzScrubberNoLeak -fuzztime=30s . # fuzz the DLP scrubber
 ```
 
-The suite uses only the standard library (`net/http/httptest`) and covers:
+The test suite (`main_test.go` and `fuzz_test.go`) uses only the standard library and covers:
 
 - Deterministic tagging: equal secrets share a tag, different secrets don't, nothing leaks, `127.0.0.1` survives.
+- Fuzz testing (`FuzzScrubberNoLeak`, `FuzzScrubberDeterministic`, `FuzzScrubberNoPanic`): feeds randomized tokens and arbitrary byte streams to prove secrets never leak, tags stay deterministic, and malformed inputs never panic.
 - Ring-buffer wrap-around eviction and `Clear()` with monotonic ids.
 - A full reverse-gateway round trip: `Accept-Encoding` stripped, tokens scrubbed in the ring, a valid sanitized `curl` exported.
 - MCP dispatch: `server/discover`, `initialize`, `ping`, `tools/list`, `tools/call`, error codes, and **zero stdout bytes for notifications**.
 
-CI (`.github/workflows/release.yml`) runs `go vet` and `go test -race`, cross-compiles static `CGO_ENABLED=0` binaries for nine targets (Linux amd64/arm64/armv7/riscv64, macOS amd64/arm64, Windows amd64/arm64, FreeBSD amd64), and publishes them with `SHA256SUMS.txt` on `v*` tags.
-
+CI workflows (`.github/workflows/`) run:
+- **Release (`release.yml`):** `go vet`, `go test -race`, cross-compilation of static `CGO_ENABLED=0` binaries across 9 targets, CycloneDX SBOM generation (`nullwire-sbom.cdx.json`), `SHA256SUMS.txt`, and signed GitHub build provenance attestations.
+- **Security (`security.yml` & `scorecard.yml`):** `govulncheck` vulnerability scanning against Go standard library CVEs, automated 2-minute fuzzing runs across all three fuzz targets, and OpenSSF Scorecard supply-chain analysis.
+- **Multi-arch smoke tests (`smoke.yml` & `smoke-extra.yml`):** end-to-end proxy redaction tests across Ubuntu, macOS (Apple Silicon & Intel), Windows (x86-64 & ARM64), FreeBSD VM, and QEMU-emulated Linux ARMv7 and RISC-V 64.
 
 ---
 
@@ -595,7 +606,7 @@ No. The listener is hard-coded to `127.0.0.1` and checked with `IsLoopback()`; t
 
 ## 🤝 Contributing
 
-Issues and PRs are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules, the test commands and the PR checklist. Security reports go through [SECURITY.md](SECURITY.md), not public issues.
+Issues and PRs are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules, the test commands and the PR checklist, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations. Security reports go through [SECURITY.md](SECURITY.md), not public issues.
 
 ---
 
