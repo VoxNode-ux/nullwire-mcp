@@ -15,13 +15,13 @@ Every token, cookie and IP is swapped for a **stable, salted tag**, so the agent
 ![MCP](https://img.shields.io/badge/MCP-2026--07--28%20%7C%202025--11--25%20%7C%202024--11--05-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
-[**Quick start**](#-quick-start-in-60-seconds) ·
-[**How it works**](#-how-it-works) ·
-[**Install**](#-30-second-install) ·
-[**Tools**](#-mcp-tool-reference) ·
-[**Security**](#-security-&-protocol-engineering-deep-dive) ·
+[**Quick start**](#quick-start) ·
+[**How it works**](#how-it-works) ·
+[**Install**](#install) ·
+[**Tools**](#tools) ·
+[**Security**](#security) ·
 [**Limitations**]#-honest-scope-&-known-limitations) ·
-[**FAQ**](#-faq)
+[**FAQ**](#faq)
 
 </div>
 
@@ -48,6 +48,8 @@ Blind `[REDACTED]` protects you but makes the AI useless for auth bugs. NullWire
 | pure Go stdlib | RAM-only 50-flow ring | `main.go` | Linux · macOS · Windows · FreeBSD |
 
 ---
+
+<a id="quick-start"></a>
 
 ## ⚡ Quick start in 60 seconds
 
@@ -78,9 +80,11 @@ Point an AI agent at your network traffic and a typical capture proxy hands it *
 
 Blind `[REDACTED]` stops the leak but kills the debugging. NullWire-MCP redacts every secret **in RAM** and swaps it for a **deterministic, per-process salted tag**: the agent keeps the *identity* of each secret and never sees the *value*.
 
-> The tag is `SHA-256(nonce ‖ secret)[:6]`. The `nonce` is 32 random bytes drawn from `crypto/rand` at startup, kept **only in RAM**, and gone when the process exits. See the [security deep-dive](#-security--protocol-engineering-deep-dive) for why that matters.
+> The tag is `SHA-256(nonce ‖ secret)[:6]`. The `nonce` is 32 random bytes drawn from `crypto/rand` at startup, kept **only in RAM**, and gone when the process exits. See the [security deep-dive](#security) for why that matters.
 
 ---
+
+<a id="how-it-works"></a>
 
 ## 🧭 How it works
 
@@ -185,6 +189,8 @@ The live telemetry bar on `stderr` (redrawn in place with `\r\033[K`):
 <sub>The right-hand column describes the general class of tools that capture traffic with a MITM proxy and hand it to an LLM. It is not a claim about any specific product. We have not published startup benchmarks; the startup row is architectural.</sub>
 
 ---
+
+<a id="install"></a>
 
 ## 🚀 30-second install
 
@@ -319,7 +325,9 @@ curl -x http://127.0.0.1:8080 http://httpbin.org/headers
 HTTP_PROXY=http://127.0.0.1:8080 ./my-service
 ```
 
-> `HTTPS_PROXY` makes clients send `CONNECT`, which is answered `501` by design. See [Honest scope](#-honest-scope--known-limitations). Use Mode 2 for HTTPS.
+> `HTTPS_PROXY` makes clients send `CONNECT`, which is answered `501` by design. See [Honest scope](#limitations). Use Mode 2 for HTTPS.
+
+<a id="mode-2"></a>
 
 ### Mode 2: Reverse gateway (HTTPS upstreams, no MITM certificates)
 
@@ -344,6 +352,8 @@ The upstream `Host` header is set to the target's host, so virtual hosting and T
 
 
 ---
+
+<a id="tools"></a>
 
 ## 🧰 MCP tool reference
 
@@ -442,6 +452,8 @@ Zeroes all 50 slots and resets the scrub counters. Flow ids keep counting upward
 
 ---
 
+<a id="security"></a>
+
 ## 🛡️ Security & protocol engineering deep-dive
 
 Every item below is implemented in `main.go` and exercised by `main_test.go`.
@@ -460,6 +472,8 @@ Every item below is implemented in `main.go` and exercised by `main_test.go`.
 | **Hop-by-hop stripping** | `Connection`, `Proxy-*`, `TE`, `Upgrade`, … are removed in both directions. | Correct proxy behaviour per RFC 9110. |
 | **Panic containment** | Capture and RPC dispatch recover from panics instead of killing the process. | A weird payload can't take your session down. |
 
+<a id="scrubber"></a>
+
 **What gets scrubbed**
 
 | Pattern | Tag |
@@ -475,6 +489,8 @@ Every item below is implemented in `main.go` and exercised by `main_test.go`.
 
 
 ---
+
+<a id="limitations"></a>
 
 ## ⚖️ Honest scope & known limitations
 
@@ -494,6 +510,8 @@ We would rather you hear these from us than discover them in production.
 
 
 ---
+
+<a id="tested-on"></a>
 
 ## 🧪 Tested on
 
@@ -531,24 +549,26 @@ CI (`.github/workflows/release.yml`) runs `go vet` and `go test -race`, cross-co
 
 ---
 
+<a id="faq"></a>
+
 ## ❓ FAQ
 
 <details>
 <summary><b>Does the AI ever see my real token?</b></summary>
 
-Not through NullWire's tools. The agent receives only tags like `[REDACTED_TOKEN#a1b2c3]`. Redaction is pattern-based, so a secret in a shape the scrubber does not recognise could pass through. See [Honest scope](#-honest-scope--known-limitations).
+Not through NullWire's tools. The agent receives only tags like `[REDACTED_TOKEN#a1b2c3]`. Redaction is pattern-based, so a secret in a shape the scrubber does not recognise could pass through. See [Honest scope](#limitations).
 </details>
 
 <details>
 <summary><b>Does it change what my app receives?</b></summary>
 
-Your app gets the real response through a streaming copy, and scrubbing runs on a separate copy in a background goroutine. One small detail: NullWire strips `Accept-Encoding` on the upstream request, so responses normally arrive uncompressed. See [Honest scope](#-honest-scope--known-limitations).
+Your app gets the real response through a streaming copy, and scrubbing runs on a separate copy in a background goroutine. One small detail: NullWire strips `Accept-Encoding` on the upstream request, so responses normally arrive uncompressed. See [Honest scope](#limitations).
 </details>
 
 <details>
 <summary><b>How do I debug HTTPS APIs?</b></summary>
 
-Use [Mode 2, the reverse gateway](#mode-2-reverse-gateway-https-upstreams-no-mitm-certificates): your app talks plain HTTP to `127.0.0.1`, NullWire talks verified TLS to the real server. No root CA, nothing in your trust store. `HTTPS_PROXY` (`CONNECT`) is answered `501` by design.
+Use [Mode 2, the reverse gateway](#mode-2): your app talks plain HTTP to `127.0.0.1`, NullWire talks verified TLS to the real server. No root CA, nothing in your trust store. `HTTPS_PROXY` (`CONNECT`) is answered `501` by design.
 </details>
 
 <details>

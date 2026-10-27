@@ -29,7 +29,7 @@ This is a small, volunteer-run project, so responses are best-effort. You will g
 
 **Report privately:**
 
-- A way for a real secret to reach the agent's view in a shape the [documented scrubber](README.md#-security--protocol-engineering-deep-dive) is supposed to catch
+- A way for a real secret to reach the agent's view in a shape the [documented scrubber](README.md#scrubber) is supposed to catch
 - Any way to make the proxy listen on a non-loopback address
 - Bypassing the DNS-rebinding guard (`403`) or the self-loop guard (`508`)
 - Anything that writes bytes other than JSON-RPC frames to `stdout`, or writes data to disk
@@ -38,7 +38,7 @@ This is a small, volunteer-run project, so responses are best-effort. You will g
 
 **Public issue is fine:**
 
-- A secret *format* the scrubber does not yet recognise (for example a new vendor key prefix). Open a normal issue with a **fake** example of the shape. See [Honest scope](README.md#-honest-scope--known-limitations): redaction is pattern-based by design.
+- A secret *format* the scrubber does not yet recognise (for example a new vendor key prefix). Open a normal issue with a **fake** example of the shape. See [Honest scope](README.md#limitations): redaction is pattern-based by design.
 - Feature requests, such as IPv6 scrubbing or extra client configs
 
 ## Out of scope
