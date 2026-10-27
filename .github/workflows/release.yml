@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Version to publish, e.g. v1.0.0 (leave as is to publish v1.0.0)"
+        description: "Version to publish, e.g. v1.0.1 (leave as is to publish v1.0.1)"
         required: false
-        default: "v1.0.0"
+        default: "v1.0.1"
   push:
     branches: [main]
     tags: ["v*"]
@@ -158,7 +158,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT" = "workflow_dispatch" ]; then
-            TAG="${INPUT_TAG:-v1.0.0}"
+            TAG="${INPUT_TAG:-v1.0.1}"
           elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TAG="$REF_NAME"
           else
@@ -167,7 +167,7 @@ jobs:
           case "$TAG" in
             latest) KIND="rolling" ;;
             v[0-9]*) KIND="stable" ;;
-            *) echo "::error::Tag must be 'latest' or look like v1.0.0 (got: $TAG)"; exit 1 ;;
+            *) echo "::error::Tag must be 'latest' or look like v1.0.1 (got: $TAG)"; exit 1 ;;
           esac
           echo "Publishing $KIND release: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
