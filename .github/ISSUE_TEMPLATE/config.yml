@@ -1,1 +1,5 @@
-
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security problem (private)
+    url: https://github.com/VoxNode-ux/nullwire-mcp/security/advisories/new
+    about: Anything that could expose real secrets or weaken the proxy. Please do not open a public issue.

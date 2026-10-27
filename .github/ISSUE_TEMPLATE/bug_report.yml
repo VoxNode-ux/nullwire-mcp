@@ -1,0 +1,68 @@
+name: Bug report
+description: Something is broken or behaves differently than the README says
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Never paste a real token, cookie or key.** Use fake values.
+        If a real secret could reach the AI agent's view, report it privately through the Security tab instead of here.
+  - type: input
+    id: version
+    attributes:
+      label: NullWire-MCP version
+      description: A release tag such as v1.0.0, or `latest`, or a commit.
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system and architecture
+      options:
+        - Linux x86-64
+        - Linux ARM64
+        - Linux ARMv7
+        - Linux RISC-V 64
+        - macOS Apple Silicon
+        - macOS Intel
+        - Windows x86-64
+        - Windows ARM64
+        - FreeBSD amd64
+        - Android / Termux
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Capture mode
+      options:
+        - Forward proxy
+        - Reverse gateway (-target)
+        - Reverse gateway (X-Target-URL header)
+        - MCP tools only
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact command(s) you ran, with fake secrets.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output or logs
+      description: The stderr status line and any error text. Remove anything real first.
+      render: text

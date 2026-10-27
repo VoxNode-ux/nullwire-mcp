@@ -1,0 +1,50 @@
+name: Platform test report
+description: Tell us it works (or doesn't) on your system. Very welcome on untested platforms.
+title: "[Platform]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports from real hardware are the most useful, especially ARMv7, RISC-V, Windows ARM64, FreeBSD and Android.
+        Use fake secrets only.
+  - type: input
+    id: version
+    attributes:
+      label: NullWire-MCP version
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Device or VM, OS version and architecture.
+      placeholder: "Raspberry Pi 4, Raspberry Pi OS, armv7"
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works as documented
+        - Works with a workaround
+        - Does not work
+    validations:
+      required: true
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: What did you check?
+      options:
+        - label: The server starts and lists its tools
+        - label: Redaction tags appear and no fake secret leaks
+        - label: Forward proxy mode
+        - label: Reverse gateway mode
+        - label: export_sanitized_curl output looks right
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes or output
+      description: Anything useful, such as an error message or the workaround you used.
+      render: text
