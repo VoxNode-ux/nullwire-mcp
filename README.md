@@ -20,7 +20,7 @@ Every token, cookie and IP is swapped for a **stable, salted tag**, so the agent
 [**Install**](#install) ·
 [**Tools**](#tools) ·
 [**Security**](#security) ·
-[**Limitations**]#-honest-scope-&-known-limitations) ·
+[**Limitations**](#limitations) ·
 [**FAQ**](#faq)
 
 </div>
