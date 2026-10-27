@@ -1,11 +1,6 @@
 name: OpenSSF Scorecard
 
 on:
-  branch_protection_rule:
-  schedule:
-    - cron: "30 2 * * 1"   # weekly, Monday 02:30 UTC
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions: read-all
@@ -14,27 +9,21 @@ jobs:
   analysis:
     name: Scorecard analysis
     runs-on: ubuntu-24.04
-    permissions:
-      security-events: write   # upload results to the Security tab
-      id-token: write          # publish the public score and badge
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Run Scorecard
+      - name: Run Scorecard (official image from GitHub Container Registry)
+        env:
+          GITHUB_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          go install github.com/ossf/scorecard/v4/cmd/scorecard@latest
-          "$(go env GOPATH)/bin/scorecard" --repo="$GITHUB_REPOSITORY" --format=sarif > results.sarif || true
+          set -o pipefail
+          docker run --rm -e GITHUB_AUTH_TOKEN \
+            ghcr.io/ossf/scorecard:latest \
+            --repo="github.com/${GITHUB_REPOSITORY}" \
+            --show-details | tee scorecard.txt
 
       - name: Save the Scorecard report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scorecard-results
-          path: results.sarif
+          name: scorecard-report
+          path: scorecard.txt
           retention-days: 30
-
-      - name: Show results in the Security tab
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: results.sarif

@@ -135,6 +135,7 @@ jobs:
           cache: false
       - uses: actions/download-artifact@v4
         with:
+          pattern: nullwire-*
           path: dist
           merge-multiple: true
 
@@ -184,7 +185,7 @@ jobs:
 
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release $TAG already exists: replacing its files."
-            gh release upload "$TAG" dist/nullwire-* dist/SHA256SUMS.txt dist/nullwire-sbom.cdx.json --clobber --repo "$REPO"
+            gh release upload "$TAG" dist/* --clobber --repo "$REPO"
             if [ "$KIND" = "rolling" ]; then
               gh release edit "$TAG" --repo "$REPO" \
                 --title "$ROLL_TITLE" --notes "$ROLL_NOTES" \

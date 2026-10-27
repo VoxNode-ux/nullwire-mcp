@@ -7,8 +7,6 @@ on:
         description: "Also run Windows ARM64 (needs an ARM runner; leave off for private repos)"
         type: boolean
         default: false
-  push:
-    branches: [smoke-extra]
 
 permissions:
   contents: read
