@@ -1,0 +1,54 @@
+name: Security checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"   # weekly, Monday 04:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: Known vulnerabilities (govulncheck)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Scan the code and the Go standard library it uses
+        run: "$(go env GOPATH)/bin/govulncheck ./..."
+
+  fuzz:
+    name: Fuzz the scrubber (${{ matrix.target }})
+    # Only weekly or when started by hand, so normal pushes and PRs stay cheap.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [FuzzScrubberNoLeak, FuzzScrubberDeterministic, FuzzScrubberNoPanic]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false
+      - name: Run fuzzing for 2 minutes
+        run: go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=120s .
+      - name: Keep any failing input for reproduction
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failure-${{ matrix.target }}
+          path: testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 30
