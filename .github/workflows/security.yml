@@ -11,8 +11,8 @@ jobs:
     name: Known vulnerabilities (govulncheck)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
           check-latest: true
@@ -25,7 +25,7 @@ jobs:
           "$(go env GOPATH)/bin/govulncheck" ./... | tee govulncheck.txt
       - name: Save the vulnerability report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: govulncheck-report
           path: govulncheck.txt
@@ -41,8 +41,8 @@ jobs:
       matrix:
         target: [FuzzScrubberNoLeak, FuzzScrubberDeterministic, FuzzScrubberNoPanic]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
           check-latest: true
@@ -53,14 +53,14 @@ jobs:
           go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=120s . | tee fuzz-${{ matrix.target }}.log
       - name: Save the fuzz log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-log-${{ matrix.target }}
           path: fuzz-${{ matrix.target }}.log
           retention-days: 30
       - name: Keep any failing input for reproduction
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-failure-${{ matrix.target }}
           path: testdata/fuzz/
