@@ -202,7 +202,7 @@ The live telemetry bar on `stderr` (redrawn in place with `\r\033[K`):
 **Option A: `go install`** (Go 1.26+)
 
 ```bash
-go install https://github.com/VoxNode-ux/nullwire-mcp@latest
+go install github.com/VoxNode-ux/nullwire-mcp@latest
 ```
 
 **Option B: prebuilt static binary**, verified against `SHA256SUMS.txt` and signed GitHub build provenance from [GitHub Releases](https://github.com/VoxNode-ux/nullwire-mcp/releases) (each release also includes a CycloneDX SBOM `nullwire-sbom.cdx.json`):
