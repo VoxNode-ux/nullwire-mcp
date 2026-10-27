@@ -1,4 +1,4 @@
-version: 2
+version: 3
 updates:
   # Used as an "updates available" notifier. Don't merge its pull requests:
   # copy the change into your own commit instead (see the notes in the README/CONTRIBUTING).
