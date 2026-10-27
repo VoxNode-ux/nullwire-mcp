@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Used as an "updates available" notifier. Don't merge its pull requests:
+  # copy the change into your own commit instead (see the notes in the README/CONTRIBUTING).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 1
+    rebase-strategy: "disabled"
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
