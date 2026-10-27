@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Version to publish, e.g. v1.0.1 (leave as is to publish v1.0.1)"
+        description: "Version to publish, e.g. v1.0.0 (leave as is to publish v1.0.0)"
         required: false
-        default: "v1.0.1"
+        default: "v1.0.0"
   push:
     branches: [main]
     tags: ["v*"]
