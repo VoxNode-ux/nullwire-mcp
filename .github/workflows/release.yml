@@ -27,11 +27,25 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          check-latest: true
           cache: false
       - name: go vet
-        run: go vet ./...
+        run: |
+          set -o pipefail
+          go vet ./... 2>&1 | tee vet.txt
       - name: go test
-        run: go test -v -race ./...
+        run: |
+          set -o pipefail
+          go test -v -race ./... 2>&1 | tee test.txt
+      - name: Save vet and test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: |
+            vet.txt
+            test.txt
+          retention-days: 30
 
   build:
     name: Build ${{ matrix.artifact }}
@@ -74,6 +88,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          check-latest: true
           cache: false
       - name: Cross-compile static binary
         env:

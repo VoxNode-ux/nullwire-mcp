@@ -40,6 +40,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          check-latest: true
           cache: false
 
       - name: Cross-compile the target binary
@@ -125,6 +126,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          check-latest: true
           cache: false
       - uses: actions/setup-python@v5
         with:
