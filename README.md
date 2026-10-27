@@ -104,11 +104,16 @@ Two paths, one rule: **the real bytes go to your app, only a scrubbed copy goes 
 <details>
 <summary><b>Diagram not rendering (mobile, Mermaid disabled)? Open the ASCII version</b></summary>
 
+1. Your app or CLI sends plain HTTP traffic to the local loopback proxy at 127.0.0.1:8080.
+2. The proxy forwards the original bytes untouched to the upstream API while an async copy is scrubbed in RAM.
+3. Your AI agent inspects the sanitized flows over JSON-RPC stdio without ever seeing live tokens or secrets.
+
 ```text
 ╔══ [1] LOCAL APP / CLI ══════════════════════════════════════╗
 ║ curl · SDK · browser · your service                         ║▒
 ║ speaks plain HTTP to 127.0.0.1:8080                         ║▒
 ╚═════════════════════════════════════════════════════════════╝▒
+▒
  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
                                │
                                ▼  plain HTTP, loopback only
