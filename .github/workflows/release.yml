@@ -125,10 +125,24 @@ jobs:
       REF_NAME: ${{ github.ref_name }}
       INPUT_TAG: ${{ inputs.tag }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          check-latest: true
+          cache: false
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      - name: SBOM (list of everything in the build)
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest
+          "$(go env GOPATH)/bin/cyclonedx-gomod" mod -json -output dist/nullwire-sbom.cdx.json .
+          echo "SBOM written:"; ls -l dist/nullwire-sbom.cdx.json
 
       - name: Checksums
         run: cd dist && sha256sum nullwire-* > SHA256SUMS.txt
@@ -170,7 +184,7 @@ jobs:
 
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release $TAG already exists: replacing its files."
-            gh release upload "$TAG" dist/* --clobber --repo "$REPO"
+            gh release upload "$TAG" dist/nullwire-* dist/SHA256SUMS.txt dist/nullwire-sbom.cdx.json --clobber --repo "$REPO"
             if [ "$KIND" = "rolling" ]; then
               gh release edit "$TAG" --repo "$REPO" \
                 --title "$ROLL_TITLE" --notes "$ROLL_NOTES" \
