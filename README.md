@@ -202,7 +202,7 @@ The live telemetry bar on `stderr` (redrawn in place with `\r\033[K`):
 **Option A: `go install`** (Go 1.26+)
 
 ```bash
-go install (https://github.com/VoxNode-ux/nullwire-mcp@latest)
+go install https://github.com/VoxNode-ux/nullwire-mcp@latest
 ```
 
 **Option B: prebuilt static binary**, verified against `SHA256SUMS.txt` and signed GitHub build provenance from [GitHub Releases](https://github.com/VoxNode-ux/nullwire-mcp/releases) (each release also includes a CycloneDX SBOM `nullwire-sbom.cdx.json`):
@@ -217,7 +217,7 @@ go install (https://github.com/VoxNode-ux/nullwire-mcp@latest)
 
 ```bash
 # Linux example (swap the file name for your platform)
-BASE=(https://github.com/VoxNode-ux/nullwire-mcp/releases/latest/download)
+BASE=https://github.com/VoxNode-ux/nullwire-mcp/releases/latest/download
 curl -LO "$BASE/nullwire-linux-amd64"
 curl -LO "$BASE/SHA256SUMS.txt"
 grep ' nullwire-linux-amd64$' SHA256SUMS.txt | sha256sum -c -     # macOS: shasum -a 256 -c -
@@ -234,7 +234,7 @@ Get-FileHash .\nullwire-windows-amd64.exe -Algorithm SHA256   # compare with SHA
 **Option C: build from source**
 
 ```bash
-git clone (https://github.com/VoxNode-ux/nullwire-mcp) && cd nullwire-mcp
+git clone https://github.com/VoxNode-ux/nullwire-mcp && cd nullwire-mcp
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
 ```
 
@@ -255,7 +255,7 @@ The MCP side lives as long as stdin stays open, so for a quick demo feed it a re
   sleep 1 ) | nullwire-mcp -port 8080 &
 
 sleep 1
-curl -s -x (http://127.0.0.1:8080) (http://example.com/) \
+curl -s -x http://127.0.0.1:8080 http://example.com \
   -H 'Authorization: Bearer my_secret_token_123' \
   -H 'Cookie: sid=my_secret_cookie' \
   -H 'X-Forwarded-For: 198.51.100.1' > /dev/null
