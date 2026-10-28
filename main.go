@@ -32,7 +32,7 @@ const (
 	captureLimit  = 64 * 1024
 	truncMarker   = "…[truncated]"
 	serverName    = "nullwire-mcp"
-	serverVersion = "1.0.0"
+	serverVersion = "1.0.2"
 )
 
 // ---------------------------------------------------------------------------
