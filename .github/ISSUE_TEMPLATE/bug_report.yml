@@ -12,8 +12,8 @@ body:
     id: version
     attributes:
       label: NullWire-MCP version
-      description: A release tag such as v1.0.0, or `latest`, or a commit.
-      placeholder: v1.0.1
+      description: A release tag such as v1.0.2, or `latest`, or a commit.
+      placeholder: v1.0.2
     validations:
       required: true
   - type: dropdown
