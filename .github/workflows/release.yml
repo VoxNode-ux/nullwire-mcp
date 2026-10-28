@@ -149,9 +149,21 @@ jobs:
         run: cd dist && sha256sum nullwire-* > SHA256SUMS.txt
 
       - name: Build provenance (signed proof of where each binary came from)
+        id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: "dist/nullwire-*"
+
+      - name: Attach the provenance file to the release
+        # Puts the signed proof next to the binaries as a normal release file,
+        # so tools like OpenSSF Scorecard (and people) can find it.
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          test -s "$BUNDLE"
+          cp "$BUNDLE" dist/nullwire-provenance.intoto.jsonl
+          ls -l dist/nullwire-provenance.intoto.jsonl
 
       - name: Decide which release this is
         id: rel
