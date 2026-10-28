@@ -4,7 +4,7 @@
 
 ### Your AI agent can debug live HTTP traffic.<br>It never sees a single secret.
 
-Every token, cookie and IP is swapped for a **stable, salted tag**, so the agent can still tell<br>
+Every token, cookie and IP is swapped for a **salted tag that stays the same for the whole session**, so the agent can still tell<br>
 *"same token reused"* from *"token rotated"*: the question behind most auth bugs.
 
 [![CI](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml/badge.svg?branch=main&event=push)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml)
@@ -185,9 +185,9 @@ The live telemetry bar on `stderr` (redrawn in place with `\r\033[K`):
 |---|---|---|
 | **Third-party dependencies** | **0** (Go standard library only; `go.mod` has no `require`) | Dozens of transitive Python / Node / JVM packages |
 | **Disk footprint** | **0 B**, RAM-only 50-slot ring; the code contains no file I/O | Flow files / SQLite databases on disk |
-| **Secret redaction** | **Salted SHA-256 correlation tags**, so reuse is provable and the secret is unseen | None, or blind `[REDACTED]` that destroys correlation |
+| **Secret redaction** | **Salted SHA-256 correlation tags**, so reuse is provable and the secret is unseen | Often none, or blind `[REDACTED]` that destroys correlation |
 | **Startup** | Native static binary: no interpreter, no VM, no package resolution | Interpreter / VM cold start |
-| **MCP protocol** | **2026-07-28 stateless + 2025-11-25 / 2024-11-05 legacy** | Usually legacy only |
+| **MCP protocol** | **2026-07-28 stateless + 2025-11-25 / 2024-11-05 legacy** | Varies by tool |
 | **HTTPS upstreams** | Reverse gateway: no root CA, no keychain changes | Install a root CA and intercept TLS |
 | **Supply chain to audit** | One `main.go` | The whole dependency tree |
 
@@ -346,7 +346,7 @@ nullwire-mcp -target https://api.github.com
 curl http://127.0.0.1:8080/users/octocat
 
 # Or choose the upstream per request (the header is removed before forwarding)
-curl -H 'X-Target-URL: https://httpbin.org' http://127.0.0.1:8080/anything?api_key=hunter2hunter2
+curl -H 'X-Target-URL: https://httpbin.org' 'http://127.0.0.1:8080/anything?api_key=hunter2hunter2'
 ```
 
 Point an SDK at it by changing only its base URL:
@@ -555,10 +555,12 @@ The test suite (`main_test.go` and `fuzz_test.go`) uses only the standard librar
 - A full reverse-gateway round trip: `Accept-Encoding` stripped, tokens scrubbed in the ring, a valid sanitized `curl` exported.
 - MCP dispatch: `server/discover`, `initialize`, `ping`, `tools/list`, `tools/call`, error codes, and **zero stdout bytes for notifications**.
 
-CI workflows (`.github/workflows/`) run:
-- **Release (`release.yml`):** `go vet`, `go test -race`, cross-compilation of static `CGO_ENABLED=0` binaries across 9 targets, CycloneDX SBOM generation (`nullwire-sbom.cdx.json`), `SHA256SUMS.txt`, and signed GitHub build provenance attestations.
-- **Security (`security.yml` & `scorecard.yml`):** `govulncheck` vulnerability scanning against Go standard library CVEs, automated 2-minute fuzzing runs across all three fuzz targets, and OpenSSF Scorecard supply-chain analysis.
-- **Multi-arch smoke tests (`smoke.yml` & `smoke-extra.yml`):** end-to-end proxy redaction tests across Ubuntu, macOS (Apple Silicon & Intel), Windows (x86-64 & ARM64), FreeBSD VM, and QEMU-emulated Linux ARMv7 and RISC-V 64.
+GitHub Actions workflows (`.github/workflows/`):
+- **Release (`release.yml`)**, on every push to `main`, every pull request and every tag: `go vet`, `go test -race`, cross-compilation of static `CGO_ENABLED=0` binaries for 9 targets. On pushes and tags (never on pull requests) it also publishes the release with a CycloneDX SBOM (`nullwire-sbom.cdx.json`), `SHA256SUMS.txt` and signed GitHub build provenance.
+- **Run on demand** (Actions → *Run workflow*):
+  - `security.yml`: `govulncheck` against the Go standard library, plus 2-minute fuzz runs of all three scrubber fuzz targets.
+  - `scorecard.yml`: OpenSSF Scorecard supply-chain analysis.
+  - `smoke.yml` and `smoke-extra.yml`: end-to-end proxy redaction tests on Ubuntu, macOS (Apple Silicon and Intel), Windows (x86-64, ARM64 optional), a FreeBSD VM, and QEMU-emulated Linux ARMv7 and RISC-V 64.
 
 ---
 

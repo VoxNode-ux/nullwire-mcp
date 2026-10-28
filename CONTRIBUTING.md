@@ -1,6 +1,6 @@
 # Contributing to NullWire-MCP
 
-Thanks for helping! The whole project is one `main.go` plus `main_test.go`, so it is easy to read end to end before you change anything.
+Thanks for helping! The program is one `main.go`, with tests in `main_test.go` and `fuzz_test.go`, so it is easy to read end to end before you change anything.
 
 ## Quick start
 
@@ -12,7 +12,7 @@ go test -v -race ./...    # needs cgo (gcc/clang) on most platforms
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
 ```
 
-Go 1.23+ is required.
+Go 1.26+ is required.
 
 ## Ground rules
 
@@ -56,6 +56,10 @@ These are the project's core promises. PRs that break them will not be merged.
 - [ ] Commit messages explain the *why*
 
 Keep PRs small and focused; one change per PR is easiest to review.
+
+## Updating GitHub Actions
+
+Dependabot is set up only as an "updates available" notifier. Please don't merge its pull requests directly. Copy the new version into your own commit, run the workflows, and check they still pass before merging.
 
 ## Reporting bugs
 
