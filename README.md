@@ -459,7 +459,7 @@ Zeroes all 50 slots and resets the scrub counters. Flow ids keep counting upward
 
 ---
 
-> **Use v1.0.1 or later.** v1.0.0 was built with Go 1.23, which carries known standard-library vulnerabilities (see the [security workflow](.github/workflows/security.yml)). v1.0.1 is built with Go 1.26, and every release from it includes SHA256 checksums and a signed build provenance attestation you can verify with `gh attestation verify`.
+> **Every release is built with Go 1.26** and includes SHA256 checksums and a signed build provenance attestation you can verify with `gh attestation verify`. The same proof is also attached to each release as `nullwire-provenance.intoto.jsonl`.
 
 <a id="security"></a>
 
