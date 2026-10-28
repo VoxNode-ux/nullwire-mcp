@@ -1,6 +1,6 @@
 # Smoke test results
 
-Automated checks run on each commit. Raw logs for each run are in the `test-results` branch.
+These smoke tests are run by hand (Actions → Run workflow) on the release builds. Unit tests, `go vet` and the cross-builds run automatically on every push.
 
 | Platform | Build + MCP | Notifications silent | End-to-end redaction | Status |
 |---|---|---|---|---|
