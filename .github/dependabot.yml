@@ -1,7 +1,7 @@
 version: 2
 updates:
   # Used as an "updates available" notifier. Don't merge its pull requests:
-  # copy the change into your own commit instead (see the notes in the README/CONTRIBUTING).
+  # copy the change into your own commit instead (see "Updating GitHub Actions" in CONTRIBUTING.md).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
