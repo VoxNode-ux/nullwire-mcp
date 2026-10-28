@@ -1,0 +1,83 @@
+name: Pin helper (looks up versions, changes nothing)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache: false
+
+      - name: Look up commit SHAs for every GitHub Action in the workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          grep -rhoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[A-Za-z0-9_.-]+' .github/workflows \
+            | sed 's/^uses: //' | sort -u > refs.txt
+          while read -r ref; do
+            path="${ref%@*}"
+            tag="${ref#*@}"
+            repo=$(echo "$path" | cut -d/ -f1-2)
+            if echo "$tag" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "already pinned: $ref"
+              continue
+            fi
+            sha=$(gh api "repos/$repo/commits/$tag" --jq .sha 2>/dev/null || true)
+            if [ -z "$sha" ]; then
+              echo "NOT FOUND: $ref"
+            else
+              echo "uses: $path@$sha # $tag"
+            fi
+          done < refs.txt | tee actions-pinned.txt
+
+      - name: Look up exact versions of the Go tools used in workflows
+        run: |
+          {
+            go list -m github.com/CycloneDX/cyclonedx-gomod@latest
+            go list -m golang.org/x/vuln@latest
+          } | tee tools-pinned.txt
+
+      - name: Look up the Scorecard image digest
+        run: |
+          docker pull ghcr.io/ossf/scorecard:latest > /dev/null
+          docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/ossf/scorecard:latest | tee scorecard-image.txt
+
+      - name: Show everything in one readable summary
+        if: always()
+        run: |
+          {
+            echo "## 1. GitHub Actions (replace each uses: line with the matching line below)"
+            echo '```'
+            cat actions-pinned.txt 2>/dev/null || echo "(no result)"
+            echo '```'
+            echo "## 2. Go tools (use these exact versions after the @ in go install)"
+            echo '```'
+            cat tools-pinned.txt 2>/dev/null || echo "(no result)"
+            echo '```'
+            echo "## 3. Scorecard image (use this instead of :latest)"
+            echo '```'
+            cat scorecard-image.txt 2>/dev/null || echo "(no result)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pinned-versions
+          path: |
+            actions-pinned.txt
+            tools-pinned.txt
+            scorecard-image.txt
+          if-no-files-found: ignore
+          retention-days: 30
