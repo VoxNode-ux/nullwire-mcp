@@ -18,7 +18,7 @@ jobs:
           check-latest: true
           cache: false
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - name: Scan the code and the Go standard library it uses
         run: |
           set -o pipefail

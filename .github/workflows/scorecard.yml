@@ -16,7 +16,7 @@ jobs:
         run: |
           set -o pipefail
           docker run --rm -e GITHUB_AUTH_TOKEN \
-            ghcr.io/ossf/scorecard:latest \
+            ghcr.io/ossf/scorecard@sha256:c0a21a1c33a2d8819937d0a8a62e6f4189c800639abd9f0bfbe61c90c71fae90 \
             --repo="github.com/${GITHUB_REPOSITORY}" \
             --show-details | tee scorecard.txt
 

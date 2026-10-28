@@ -141,7 +141,7 @@ jobs:
 
       - name: SBOM (list of everything in the build)
         run: |
-          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
           "$(go env GOPATH)/bin/cyclonedx-gomod" mod -json -output dist/nullwire-sbom.cdx.json .
           echo "SBOM written:"; ls -l dist/nullwire-sbom.cdx.json
 
