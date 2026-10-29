@@ -22,7 +22,7 @@ jobs:
       - name: Scan the code and the Go standard library it uses
         run: |
           set -o pipefail
-          "$(go env GOPATH)/bin/govulncheck" ./... | tee govulncheck.txt
+          "$(go env GOPATH)/bin/govulncheck" ./... 2>&1 | tee govulncheck.txt
       - name: Save the vulnerability report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -47,16 +47,30 @@ jobs:
           go-version: "1.26"
           check-latest: true
           cache: false
+      - name: Show the Go version
+        run: go version
+      - name: Check that the fuzz build compiles (shows the real compiler error)
+        run: |
+          set -o pipefail
+          {
+            echo "== go vet =="; go vet ./... 2>&1
+            echo "== go test -c =="; go test -c -o /dev/null . 2>&1
+            echo "== fuzz build (1 execution) =="
+            go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=1x . 2>&1
+          } | tee fuzz-build-${{ matrix.target }}.log
       - name: Run fuzzing for 2 minutes
         run: |
           set -o pipefail
-          go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=120s . | tee fuzz-${{ matrix.target }}.log
+          go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=120s . 2>&1 | tee fuzz-${{ matrix.target }}.log
       - name: Save the fuzz log
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: fuzz-log-${{ matrix.target }}
-          path: fuzz-${{ matrix.target }}.log
+          path: |
+            fuzz-${{ matrix.target }}.log
+            fuzz-build-${{ matrix.target }}.log
+          if-no-files-found: ignore
           retention-days: 30
       - name: Keep any failing input for reproduction
         if: failure()
