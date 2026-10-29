@@ -439,16 +439,17 @@ func (s *Scrubber) scrubIPv6(in string) (string, int) {
 		for j < len(in) && isV6Byte(in[j]) {
 			j++
 		}
-				if addr, start, end, ok := matchIPv6(in, i, j); ok {
+		if addr, start, end, ok := matchIPv6(in, i, j); ok {
 			b.WriteString(in[last:start])
 			b.WriteString(s.tag("IP", addr.String()))
 			s.IPs.Add(1)
 			count++
 			last = end
-			i = end
-		} else {
-			i = j
+			if end > j {
+				j = end
+			}
 		}
+		i = j
 	}
 	if count == 0 {
 		return in, 0
