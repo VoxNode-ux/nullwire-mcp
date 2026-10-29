@@ -121,7 +121,7 @@ Two paths, one rule: **the real bytes go to your app, only a scrubbed copy goes 
 ║ bound with net.Listen(tcp4) + IsLoopback() check            ║▒
 ║ forward mode : absolute URL  (curl -x)                      ║▒
 ║ reverse mode : -target flag / X-Target-URL header           ║▒
-║ guards : DNS-rebind 403 · self-loop 508 · CONNECT 501       ║▒
+║ guards : DNS-rebind 403 · self-loop 508 · 256 tunnel cap    ║▒
 ╚═════════════════════════════════════════════════════════════╝▒
  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
                                │
@@ -244,6 +244,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
 |---|---|---|
 | `-port` | `8080` | Loopback port. The host is hard-coded to `127.0.0.1`; there is no way to bind elsewhere. `0` picks a free port. |
 | `-target` | *(none)* | Default upstream base URL for reverse-gateway mode, e.g. `https://api.example.com` |
+| `-dns` | `auto` | Upstream DNS. `auto` uses the system resolver, except on Termux/Android where it uses `1.1.1.1` and `9.9.9.9` (static binaries have no resolver config there). `system` always uses the system resolver. A comma list of IPs, e.g. `-dns 192.168.1.1,9.9.9.9:53`, uses exactly those servers. |
 
 ### Try it without an AI client
 
@@ -332,7 +333,7 @@ curl -x http://127.0.0.1:8080 http://httpbin.org/headers
 HTTP_PROXY=http://127.0.0.1:8080 ./my-service
 ```
 
-> `HTTPS_PROXY` makes clients send `CONNECT`, which is answered `501` by design. See [Honest scope](#limitations). Use Mode 2 for HTTPS.
+> `HTTPS_PROXY` makes clients send `CONNECT`. NullWire answers with a **blind TCP tunnel**: the connection works, but the TLS payload is never decrypted, read or stored. The flow appears in the ring as a `CONNECT` entry with the target and byte counts only. To see HTTPS *requests*, use Mode 2. See [Honest scope](#limitations).
 
 <a id="mode-2"></a>
 
@@ -505,12 +506,12 @@ Every item below is implemented in `main.go` and exercised by `main_test.go` and
 
 We would rather you hear these from us than discover them in production.
 
-- **`HTTP CONNECT` returns `501 Not Implemented`, by design.** Inspecting HTTPS through `CONNECT` means man-in-the-middling TLS, which means generating a root CA and getting it into your OS or browser trust store. That is key material and keychain pollution, the opposite of a zero-footprint tool. The **reverse gateway** gets the same visibility without any of that: point your app at `http://127.0.0.1:8080` and let NullWire do the TLS to the upstream.
-- **No WebSocket / `Upgrade` pass-through.** `Upgrade` and `Connection` are treated as hop-by-hop headers and stripped, so upgraded protocols won't work through the proxy. Plain request/response and streaming responses (e.g. SSE) are supported.
-- **Android / Termux:** static Go binaries have no DNS resolver config on Android, so upstream hostnames fail with `502 … lookup … connection refused`. Run inside `termux-chroot` (`pkg install proot`), which provides a resolver. Linux desktops, macOS, Windows and FreeBSD are not expected to be affected.
+- **`HTTP CONNECT` is a blind tunnel, not an inspector.** `HTTPS_PROXY` clients work, but NullWire does not man-in-the-middle TLS: that would need a generated root CA in your OS or browser trust store, which is key material and keychain pollution, the opposite of a zero-footprint tool. A tunnel flow records only the target, timing, byte counts and (scrubbed) request headers; its payload is never read into the ring, so the scrubber has nothing to scrub and the AI sees nothing inside it. The flow is recorded when the tunnel closes. For full HTTPS visibility use the **reverse gateway**: point your app at `http://127.0.0.1:8080` and let NullWire do the TLS to the upstream.
+- **WebSocket / `Upgrade` is passed through, not inspected.** The handshake is recorded (status 101, scrubbed headers) and the connection is then spliced raw, so WebSocket and similar upgraded protocols work through forward or reverse mode. Frames are never captured. The flow is recorded when the connection closes. Tunnels and upgraded connections close after 10 minutes without traffic, and at most 256 can be open at once.
+- **Android / Termux:** static Go binaries have no DNS resolver config on Android. NullWire detects Termux and sends upstream name lookups to `1.1.1.1` / `9.9.9.9` instead, and prints a notice on stderr. That means those resolvers see the hostnames you contact. Use `-dns <your-resolver>` to pick your own, or `-dns system` to turn this off (for example inside `termux-chroot`, which provides a resolver). Other platforms use the system resolver.
 - **Redaction is pattern-based, not magic.** It catches the shapes in the table above. A secret in a format we don't recognise, in a field we don't know, or split across a body boundary can pass through. Treat the scrubber as a strong seatbelt, not a guarantee, and test it with your own traffic. IPv6 addresses are not redacted yet. IPv4-shaped strings that aren't addresses (some version numbers) can be redacted as false positives.
 - **Tags are 24 bits.** Six hex characters are plenty to tell apart the handful of secrets in a 50-slot buffer, but collisions are possible in principle. They are for correlation, not identification.
-- **Bodies are bounded.** Only the first 64 KB of each body is captured, and stored bodies are cut to 8 KB / 16 KB. Responses that arrive with a `Content-Encoding` (e.g. gzip) are stored as a short placeholder rather than decoded. NullWire strips `Accept-Encoding` from forwarded requests so most servers reply uncompressed, but it can't force them to.
+- **Bodies are bounded.** Only the first 64 KB of each body is captured, and stored bodies are cut to 8 KB / 16 KB. `gzip` and `deflate` bodies (requests and responses) are decoded for capture, with a 256 KB inflation cap, and then scrubbed; exported curl commands drop `Content-Encoding` for such bodies because the stored body is plain text. Other encodings (`br`, `zstd`) are stored as a short placeholder. NullWire strips `Accept-Encoding` from forwarded requests so most servers reply uncompressed, but it can't force them to.
 - **"RAM-only" means the program never writes files.** `Disk: 0B` in the status bar is a design invariant (the source has no file I/O), not a measured counter. The OS can still swap memory pages or write crash dumps; NullWire doesn't control that.
 - **The ring is ephemeral.** The 50 most recent flows vanish when the process exits. That is the point.
 - **Your app sees raw traffic.** NullWire protects what the *AI agent* sees, not what your local app sees. It isn't a security boundary for the app itself.
@@ -583,7 +584,7 @@ Your app gets the real response through a streaming copy, and scrubbing runs on 
 <details>
 <summary><b>How do I debug HTTPS APIs?</b></summary>
 
-Use [Mode 2, the reverse gateway](#mode-2): your app talks plain HTTP to `127.0.0.1`, NullWire talks verified TLS to the real server. No root CA, nothing in your trust store. `HTTPS_PROXY` (`CONNECT`) is answered `501` by design.
+Use [Mode 2, the reverse gateway](#mode-2): your app talks plain HTTP to `127.0.0.1`, NullWire talks verified TLS to the real server. No root CA, nothing in your trust store. `HTTPS_PROXY` (`CONNECT`) also works, but only as a blind tunnel: you see the destination and byte counts, not the requests inside.
 </details>
 
 <details>

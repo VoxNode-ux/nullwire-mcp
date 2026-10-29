@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -679,5 +683,252 @@ func TestMCPErrors(t *testing.T) {
 		if m["id"] != c.id {
 			t.Errorf("%s: id = %v, want %v", c.name, m["id"], c.id)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CONNECT tunnels, protocol upgrades, DNS, body decoding
+// ---------------------------------------------------------------------------
+
+func rawProxyConn(t *testing.T, srv *httptest.Server) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	c, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	return c, bufio.NewReader(c)
+}
+
+func startEchoTCP(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func TestConnectBlindTunnel(t *testing.T) {
+	app := newTestApp(t)
+	srv := httptest.NewServer(app)
+	t.Cleanup(srv.Close)
+	echo := startEchoTCP(t)
+
+	c, br := rawProxyConn(t, srv)
+	fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Basic dXNlcjpwYXNzd29yZA==\r\n\r\n", echo, echo)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want 200", resp.StatusCode)
+	}
+	if _, err := c.Write([]byte("ping")); err != nil {
+		t.Fatalf("write through tunnel: %v", err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(br, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("echo through tunnel = %q, %v", buf, err)
+	}
+	_ = c.Close()
+
+	waitForRing(t, app, 1)
+	e := app.ring.ListRecent(1, "CONNECT", "")[0]
+	if e.URL != echo || e.StatusCode != 200 {
+		t.Errorf("flow = %q / %d, want %q / 200", e.URL, e.StatusCode, echo)
+	}
+	if !strings.Contains(e.Note, "blind CONNECT tunnel") || !strings.Contains(e.Note, "4 B client->upstream") {
+		t.Errorf("note = %q", e.Note)
+	}
+	if got := e.RequestHeaders["Proxy-Authorization"]; strings.Contains(got, "dXNlcjpwYXNzd29yZA") {
+		t.Errorf("Proxy-Authorization leaked into the ring: %q", got)
+	}
+	if e.RequestBody != "" || e.ResponseBody != "" {
+		t.Errorf("tunnel payload must never be stored")
+	}
+	text := buildCurl(e)
+	if !strings.Contains(text, "blind CONNECT tunnel") || strings.Contains(text, "curl ") {
+		t.Errorf("CONNECT flows must not produce a curl command, got %q", text)
+	}
+}
+
+func TestConnectUnreachableTarget(t *testing.T) {
+	app := newTestApp(t)
+	srv := httptest.NewServer(app)
+	t.Cleanup(srv.Close)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := ln.Addr().String()
+	_ = ln.Close() // nothing listens here any more
+
+	c, br := rawProxyConn(t, srv)
+	fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", dead, dead)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", resp.StatusCode)
+	}
+	waitForRing(t, app, 1)
+}
+
+func TestConnectGuards(t *testing.T) {
+	app := newTestApp(t)
+
+	req := httptest.NewRequest("CONNECT", "127.0.0.1:1", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusLoopDetected {
+		t.Errorf("self CONNECT status = %d, want 508", rec.Code)
+	}
+
+	req = httptest.NewRequest("CONNECT", "nohostport", nil)
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("CONNECT without port status = %d, want 400", rec.Code)
+	}
+
+	req = httptest.NewRequest("CONNECT", "example.com:99999", nil)
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("CONNECT with bad port status = %d, want 400", rec.Code)
+	}
+}
+
+func TestUpgradePassThrough(t *testing.T) {
+	app := newTestApp(t)
+	srv := httptest.NewServer(app)
+	t.Cleanup(srv.Close)
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "no hijack", http.StatusInternalServerError)
+			return
+		}
+		c, brw, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+		_ = brw.Flush()
+		buf := make([]byte, 5)
+		if _, err := io.ReadFull(brw, buf); err != nil {
+			return
+		}
+		_, _ = c.Write(bytes.ToUpper(buf))
+	}))
+	t.Cleanup(up.Close)
+
+	c, br := rawProxyConn(t, srv)
+	upHost := strings.TrimPrefix(up.URL, "http://")
+	fmt.Fprintf(c, "GET %s/ws HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n", up.URL, upHost)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read handshake: %v", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("handshake status = %d, want 101", resp.StatusCode)
+	}
+	if !strings.EqualFold(resp.Header.Get("Upgrade"), "echo") {
+		t.Errorf("Upgrade header lost: %v", resp.Header)
+	}
+	if _, err := c.Write([]byte("hello")); err != nil {
+		t.Fatalf("write after upgrade: %v", err)
+	}
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(br, buf); err != nil || string(buf) != "HELLO" {
+		t.Fatalf("upgraded echo = %q, %v", buf, err)
+	}
+	_ = c.Close()
+
+	waitForRing(t, app, 1)
+	e := app.ring.ListRecent(1, "GET", "/ws")[0]
+	if e.StatusCode != http.StatusSwitchingProtocols || !strings.Contains(e.Note, "upgraded connection") {
+		t.Errorf("flow = %d / %q", e.StatusCode, e.Note)
+	}
+}
+
+func TestSpliceIdleTimeout(t *testing.T) {
+	a, b := net.Pipe()
+	c, d := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		splice(b, c, 80*time.Millisecond, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("idle tunnel was never closed")
+	}
+	_ = a.Close()
+	_ = d.Close()
+}
+
+func TestParseDNSServers(t *testing.T) {
+	got, err := parseDNSServers("1.1.1.1, [2606:4700:4700::1111]:5353,9.9.9.9:53")
+	if err != nil {
+		t.Fatalf("parseDNSServers: %v", err)
+	}
+	want := []string{"1.1.1.1:53", "[2606:4700:4700::1111]:5353", "9.9.9.9:53"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	for _, bad := range []string{"", "dns.example", "1.1.1.1:0", "1.1.1.1:abc"} {
+		if _, err := parseDNSServers(bad); err == nil {
+			t.Errorf("parseDNSServers(%q) should fail", bad)
+		}
+	}
+}
+
+func TestGzipBodiesAreDecodedAndScrubbed(t *testing.T) {
+	var zb bytes.Buffer
+	zw := gzip.NewWriter(&zb)
+	_, _ = zw.Write([]byte(`{"ok":true,"password":"hunter2hunter2"}`))
+	_ = zw.Close()
+
+	h := http.Header{"Content-Encoding": []string{"gzip"}}
+	text := bodyText(h, zb.Bytes())
+	if !strings.Contains(text, `"ok":true`) {
+		t.Fatalf("gzip body not decoded: %q", text)
+	}
+	if got := bodyText(http.Header{"Content-Encoding": []string{"br"}}, []byte("xx")); !strings.HasPrefix(got, "[encoded body omitted") {
+		t.Errorf("unsupported encoding should stay a placeholder, got %q", got)
+	}
+
+	app := newTestApp(t)
+	out, _ := app.scrub.ScrubText(text)
+	if strings.Contains(out, "hunter2hunter2") {
+		t.Errorf("decoded secret was not scrubbed: %q", out)
+	}
+
+	e := FlowEntry{ID: 1, Method: "POST", URL: "http://x/y",
+		RequestHeaders: map[string]string{"Content-Encoding": "gzip", "Content-Type": "application/json"},
+		RequestBody:    out}
+	if cmd := buildCurl(e); strings.Contains(strings.ToLower(cmd), "content-encoding") {
+		t.Errorf("replay must drop Content-Encoding for a decoded body:\n%s", cmd)
 	}
 }

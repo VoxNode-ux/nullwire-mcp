@@ -7,6 +7,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,10 +23,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -32,8 +40,22 @@ const (
 	captureLimit  = 64 * 1024
 	truncMarker   = "…[truncated]"
 	serverName    = "nullwire-mcp"
-	serverVersion = "1.0.2"
+	serverVersion = "1.1.0"
+
+	// maxTunnels caps concurrent CONNECT tunnels and upgraded (WebSocket)
+	// connections so a runaway client cannot exhaust file descriptors.
+	maxTunnels = 256
+	// tunnelIdle closes a tunnel after this long with no bytes in either
+	// direction.
+	tunnelIdle = 10 * time.Minute
+	// decodedLimit bounds how much a gzip/deflate body may inflate while it is
+	// decoded for capture (decompression-bomb guard).
+	decodedLimit = 256 * 1024
 )
+
+// defaultAndroidDNS is used only on Termux/Android, where a static Go binary
+// has no resolver configuration. Override with -dns, disable with -dns system.
+var defaultAndroidDNS = []string{"1.1.1.1:53", "9.9.9.9:53"}
 
 // ---------------------------------------------------------------------------
 // MODULE 1: RAM ring buffer
@@ -52,6 +74,7 @@ type FlowEntry struct {
 	ResponseBody    string            `json:"response_body"`
 	LatencyMs       int64             `json:"latency_ms"`
 	RedactionCount  int               `json:"redaction_count"`
+	Note            string            `json:"note,omitempty"`
 }
 
 // RingBuffer is a fixed-size, thread-safe circular store of FlowEntry values.
@@ -315,6 +338,9 @@ type App struct {
 	target    *url.URL
 	transport *http.Transport
 
+	tunnels    atomic.Int64  // live CONNECT / upgraded connections
+	tunnelIdle time.Duration // 0 means the tunnelIdle constant
+
 	barMu    sync.Mutex
 	stdoutMu sync.Mutex
 }
@@ -501,6 +527,7 @@ type rawFlow struct {
 	respHeaders http.Header
 	respBody    []byte
 	latencyMs   int64
+	note        string
 }
 
 // ServeHTTP implements both forward-proxy and reverse-gateway modes. The
@@ -509,7 +536,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	if r.Method == http.MethodConnect {
-		http.Error(w, "nullwire-mcp: CONNECT/HTTPS tunnelling is not supported; use a plain http:// URL or the reverse gateway with -target / X-Target-URL", http.StatusNotImplemented)
+		a.handleConnect(w, r, start)
 		return
 	}
 
@@ -541,6 +568,13 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		outReq.Header = copyHeaders(r.Header, "Accept-Encoding")
 	}
+	upgrade := isUpgradeRequest(r.Header)
+	if upgrade {
+		// Upgrade and Connection are hop-by-hop and were stripped above;
+		// re-add exactly what the handshake needs (e.g. WebSocket).
+		outReq.Header.Set("Connection", "Upgrade")
+		outReq.Header.Set("Upgrade", r.Header.Get("Upgrade"))
+	}
 	if _, ok := outReq.Header["User-Agent"]; !ok {
 		outReq.Header["User-Agent"] = []string{""}
 	}
@@ -567,6 +601,12 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	if upgrade && resp.StatusCode == http.StatusSwitchingProtocols {
+		flow.reqBody = reqCap.Bytes()
+		a.handleUpgrade(w, resp, flow)
+		return
+	}
+
 	respCap := &capBuffer{max: captureLimit}
 	dst := w.Header()
 	for k, vs := range copyHeaders(resp.Header) {
@@ -583,11 +623,376 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go a.capture(flow)
 }
 
+// ---------------------------------------------------------------------------
+// CONNECT tunnels and protocol upgrades (WebSocket)
+// ---------------------------------------------------------------------------
+
+type closeWriter interface{ CloseWrite() error }
+
+func (a *App) idle() time.Duration {
+	if a.tunnelIdle > 0 {
+		return a.tunnelIdle
+	}
+	return tunnelIdle
+}
+
+func (a *App) acquireTunnel() bool {
+	if a.tunnels.Add(1) > maxTunnels {
+		a.tunnels.Add(-1)
+		return false
+	}
+	return true
+}
+
+func (a *App) releaseTunnel() { a.tunnels.Add(-1) }
+
+// dial opens an upstream TCP connection with the same dialer (and therefore
+// the same DNS settings) the HTTP transport uses.
+func (a *App) dial(ctx context.Context, addr string) (net.Conn, error) {
+	if a.transport != nil && a.transport.DialContext != nil {
+		return a.transport.DialContext(ctx, "tcp", addr)
+	}
+	d := net.Dialer{Timeout: 10 * time.Second}
+	return d.DialContext(ctx, "tcp", addr)
+}
+
+// isUpgradeRequest reports a "Connection: Upgrade" + "Upgrade: x" handshake.
+func isUpgradeRequest(h http.Header) bool {
+	if h.Get("Upgrade") == "" {
+		return false
+	}
+	for _, v := range h.Values("Connection") {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// splice copies bytes both ways until either side ends or the tunnel has been
+// idle for idle. pre is data already read from the client that must reach the
+// upstream first. It never inspects or stores payload bytes.
+func splice(client, upstream io.ReadWriteCloser, idle time.Duration, pre []byte) (toUpstream, toClient int64) {
+	var sent, recv, last atomic.Int64
+	last.Store(time.Now().UnixNano())
+	closeBoth := func() {
+		_ = client.Close()
+		_ = upstream.Close()
+	}
+	if len(pre) > 0 {
+		n, err := upstream.Write(pre)
+		sent.Add(int64(n))
+		if err != nil {
+			closeBoth()
+			return sent.Load(), 0
+		}
+	}
+
+	var wg sync.WaitGroup
+	pump := func(dst, src io.ReadWriteCloser, ctr *atomic.Int64) {
+		defer wg.Done()
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := src.Read(buf)
+			if n > 0 {
+				last.Store(time.Now().UnixNano())
+				w, werr := dst.Write(buf[:n])
+				ctr.Add(int64(w))
+				if werr != nil {
+					closeBoth()
+					return
+				}
+			}
+			if err != nil {
+				if err == io.EOF {
+					if cw, ok := dst.(closeWriter); ok {
+						_ = cw.CloseWrite() // half-close: let the other direction drain
+					} else {
+						_ = dst.Close()
+					}
+				} else {
+					closeBoth()
+				}
+				return
+			}
+		}
+	}
+
+	stop := make(chan struct{})
+	if idle > 0 {
+		go func() {
+			iv := idle / 4
+			if iv < 5*time.Millisecond {
+				iv = 5 * time.Millisecond
+			}
+			t := time.NewTicker(iv)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					if time.Since(time.Unix(0, last.Load())) > idle {
+						closeBoth()
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	wg.Add(2)
+	go pump(upstream, client, &sent)
+	go pump(client, upstream, &recv)
+	wg.Wait()
+	close(stop)
+	closeBoth()
+	return sent.Load(), recv.Load()
+}
+
+// handleConnect answers HTTP CONNECT with a blind TCP tunnel. There is no TLS
+// interception: no root CA, no key material, nothing to trust. Only metadata
+// (target, byte counts, timing) is recorded; the payload is never read into
+// the ring.
+func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.Time) {
+	authority := r.Host
+	if authority == "" {
+		authority = r.URL.Host
+	}
+	host, portStr, err := net.SplitHostPort(authority)
+	port, perr := strconv.Atoi(portStr)
+	if err != nil || host == "" || perr != nil || port < 1 || port > 65535 {
+		http.Error(w, "nullwire-mcp: CONNECT target must look like host:port", http.StatusBadRequest)
+		return
+	}
+	target := net.JoinHostPort(host, portStr)
+	if a.isSelf(target) {
+		http.Error(w, "nullwire-mcp: refusing to tunnel back to the proxy itself", http.StatusLoopDetected)
+		return
+	}
+	if !a.acquireTunnel() {
+		http.Error(w, "nullwire-mcp: too many concurrent tunnels", http.StatusServiceUnavailable)
+		return
+	}
+	defer a.releaseTunnel()
+
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "nullwire-mcp: connection cannot be hijacked for CONNECT", http.StatusInternalServerError)
+		return
+	}
+
+	flow := rawFlow{
+		started:     start,
+		method:      http.MethodConnect,
+		url:         target,
+		reqHeaders:  r.Header.Clone(),
+		respHeaders: http.Header{},
+	}
+
+	up, err := a.dial(r.Context(), target)
+	if err != nil {
+		msg := "nullwire-mcp: cannot reach " + target + ": " + err.Error()
+		http.Error(w, msg, http.StatusBadGateway)
+		flow.status = http.StatusBadGateway
+		flow.note = msg
+		flow.latencyMs = time.Since(start).Milliseconds()
+		go a.capture(flow)
+		return
+	}
+
+	client, brw, err := hj.Hijack()
+	if err != nil {
+		_ = up.Close()
+		return
+	}
+	_ = client.SetDeadline(time.Time{})
+	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		_ = client.Close()
+		_ = up.Close()
+		return
+	}
+	var pre []byte
+	if n := brw.Reader.Buffered(); n > 0 {
+		if b, _ := brw.Reader.Peek(n); len(b) > 0 {
+			pre = append([]byte(nil), b...)
+		}
+	}
+
+	sent, recv := splice(client, up, a.idle(), pre)
+
+	flow.status = http.StatusOK
+	flow.latencyMs = time.Since(start).Milliseconds()
+	flow.note = fmt.Sprintf("blind CONNECT tunnel: %d B client->upstream, %d B upstream->client; payload not inspected or stored", sent, recv)
+	go a.capture(flow)
+}
+
+// handleUpgrade completes a 101 Switching Protocols handshake (WebSocket and
+// friends) and then splices the raw connection. Only the handshake is recorded.
+func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow rawFlow) {
+	rwc, ok := resp.Body.(io.ReadWriteCloser)
+	hj, hok := w.(http.Hijacker)
+	if !ok || !hok {
+		msg := "nullwire-mcp: protocol upgrade is not supported on this connection"
+		http.Error(w, msg, http.StatusBadGateway)
+		flow.status = http.StatusBadGateway
+		flow.respHeaders = http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}}
+		flow.respBody = []byte(msg)
+		flow.latencyMs = time.Since(flow.started).Milliseconds()
+		go a.capture(flow)
+		return
+	}
+	if !a.acquireTunnel() {
+		http.Error(w, "nullwire-mcp: too many concurrent tunnels", http.StatusServiceUnavailable)
+		return
+	}
+	defer a.releaseTunnel()
+
+	client, brw, err := hj.Hijack()
+	if err != nil {
+		return
+	}
+	_ = client.SetDeadline(time.Time{})
+
+	var head strings.Builder
+	head.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
+	_ = resp.Header.Write(&head)
+	head.WriteString("\r\n")
+	if _, err := client.Write([]byte(head.String())); err != nil {
+		_ = client.Close()
+		return
+	}
+	var pre []byte
+	if n := brw.Reader.Buffered(); n > 0 {
+		if b, _ := brw.Reader.Peek(n); len(b) > 0 {
+			pre = append([]byte(nil), b...)
+		}
+	}
+
+	sent, recv := splice(client, rwc, a.idle(), pre)
+
+	flow.status = http.StatusSwitchingProtocols
+	flow.respHeaders = resp.Header.Clone()
+	flow.latencyMs = time.Since(flow.started).Milliseconds()
+	flow.note = fmt.Sprintf("upgraded connection (%s): %d B client->upstream, %d B upstream->client; frames not inspected or stored",
+		resp.Header.Get("Upgrade"), sent, recv)
+	go a.capture(flow)
+}
+
+// ---------------------------------------------------------------------------
+// DNS selection
+// ---------------------------------------------------------------------------
+
+// parseDNSServers turns "1.1.1.1, [2606:4700:4700::1111]:53" into dialable
+// host:port strings. Only IP literals are accepted (a hostname would need DNS
+// to resolve DNS).
+func parseDNSServers(spec string) ([]string, error) {
+	var out []string
+	for _, raw := range strings.Split(spec, ",") {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		host, port := s, "53"
+		if h, p, err := net.SplitHostPort(s); err == nil {
+			host, port = h, p
+		} else {
+			host = strings.Trim(s, "[]")
+		}
+		if net.ParseIP(host) == nil {
+			return nil, fmt.Errorf("-dns: %q is not an IP address (example: 1.1.1.1 or 9.9.9.9:53)", s)
+		}
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return nil, fmt.Errorf("-dns: bad port in %q", s)
+		}
+		out = append(out, net.JoinHostPort(host, port))
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("-dns: no servers given")
+	}
+	return out, nil
+}
+
+// onTermux detects Termux/Android from the environment (no file access).
+func onTermux() bool {
+	return os.Getenv("TERMUX_VERSION") != "" || strings.Contains(os.Getenv("PREFIX"), "com.termux")
+}
+
+// newDialer returns the upstream dialer. With servers set, name lookups use
+// the pure-Go resolver pointed at those servers instead of the system config.
+func newDialer(servers []string) *net.Dialer {
+	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	if len(servers) > 0 {
+		d.Resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				nd := net.Dialer{Timeout: 5 * time.Second}
+				var last error
+				for _, s := range servers {
+					c, err := nd.DialContext(ctx, network, s)
+					if err == nil {
+						return c, nil
+					}
+					last = err
+				}
+				return nil, last
+			},
+		}
+	}
+	return d
+}
+
+// decodableEncoding reports whether ce is a Content-Encoding NullWire can
+// decode with the standard library alone (gzip and deflate; not br or zstd).
+func decodableEncoding(ce string) bool {
+	switch strings.ToLower(strings.TrimSpace(ce)) {
+	case "gzip", "x-gzip", "deflate":
+		return true
+	}
+	return false
+}
+
+// decodeBody inflates a gzip/deflate body with a hard output limit. The input
+// may itself be truncated (capture is capped), so a partial result is fine.
+func decodeBody(ce string, b []byte) (string, bool) {
+	var rd io.Reader
+	switch strings.ToLower(strings.TrimSpace(ce)) {
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(b))
+		if err != nil {
+			return "", false
+		}
+		rd = zr
+	case "deflate":
+		if zr, err := zlib.NewReader(bytes.NewReader(b)); err == nil {
+			rd = zr
+		} else {
+			rd = flate.NewReader(bytes.NewReader(b)) // raw deflate, sent by some servers
+		}
+	default:
+		return "", false
+	}
+	out, err := io.ReadAll(io.LimitReader(rd, decodedLimit))
+	if len(out) == 0 && err != nil {
+		return "", false
+	}
+	text := string(out)
+	if err != nil || len(out) >= decodedLimit {
+		text += truncMarker
+	}
+	return text, true
+}
+
 func bodyText(h http.Header, b []byte) string {
 	if len(b) == 0 {
 		return ""
 	}
 	if ce := strings.TrimSpace(h.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
+		if text, ok := decodeBody(ce, b); ok {
+			return text
+		}
 		return fmt.Sprintf("[encoded body omitted: Content-Encoding %s, %d bytes captured]", ce, len(b))
 	}
 	return string(b)
@@ -628,6 +1033,7 @@ func (a *App) capture(f rawFlow) {
 		ResponseBody:    truncate(pb, maxRespBody),
 		LatencyMs:       f.latencyMs,
 		RedactionCount:  total,
+		Note:            f.note,
 	})
 	a.Bar()
 }
@@ -847,11 +1253,23 @@ var curlSkipHeaders = map[string]bool{
 }
 
 func buildCurl(e FlowEntry) string {
+	if strings.EqualFold(e.Method, http.MethodConnect) {
+		return fmt.Sprintf("# Flow %d (%s) was a blind CONNECT tunnel to %s.\n"+
+			"# The HTTP inside it was never visible to NullWire, so there is nothing to replay.\n"+
+			"# To capture HTTPS requests in full, use the reverse gateway: -target https://HOST or an X-Target-URL header.\n",
+			e.ID, e.Timestamp, e.URL)
+	}
 	names := make([]string, 0, len(e.RequestHeaders))
 	for k := range e.RequestHeaders {
-		if !curlSkipHeaders[strings.ToLower(k)] {
-			names = append(names, k)
+		lk := strings.ToLower(k)
+		if curlSkipHeaders[lk] {
+			continue
 		}
+		// Bodies are stored decoded, so a replay must not claim they are still encoded.
+		if lk == "content-encoding" && decodableEncoding(e.RequestHeaders[k]) {
+			continue
+		}
+		names = append(names, k)
 	}
 	sortStrings(names)
 
@@ -1043,6 +1461,7 @@ func fatalf(format string, args ...any) {
 func main() {
 	port := flag.Int("port", 8080, "TCP port for the diagnostic proxy (always bound to 127.0.0.1)")
 	target := flag.String("target", "", "default upstream base URL for reverse gateway mode, e.g. https://api.example.com")
+	dnsSpec := flag.String("dns", "auto", "upstream DNS: auto (Termux/Android uses 1.1.1.1 and 9.9.9.9), system, or a comma list of IPs like 1.1.1.1,9.9.9.9:53")
 	flag.Parse()
 
 	if *port < 0 || *port > 65535 {
@@ -1054,6 +1473,23 @@ func main() {
 		fatalf("nullwire-mcp: cannot read random bytes for the hash salt: %v", err)
 	}
 
+	var dnsServers []string
+	dnsNotice := ""
+	switch spec := strings.ToLower(strings.TrimSpace(*dnsSpec)); spec {
+	case "system":
+	case "", "auto":
+		if onTermux() {
+			dnsServers = defaultAndroidDNS
+			dnsNotice = "Termux/Android detected: upstream DNS queries go to 1.1.1.1 / 9.9.9.9 because static binaries have no system resolver. Use -dns to choose your own, or -dns system to disable."
+		}
+	default:
+		dnsServers, err = parseDNSServers(*dnsSpec)
+		if err != nil {
+			fatalf("nullwire-mcp: %v", err)
+		}
+	}
+	dialer := newDialer(dnsServers)
+
 	app := &App{
 		ring:  NewRingBuffer(),
 		scrub: scrub,
@@ -1064,7 +1500,7 @@ func main() {
 			IdleConnTimeout:       60 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 120 * time.Second,
-			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			DialContext:           dialer.DialContext,
 		},
 	}
 	if *target != "" {
@@ -1098,7 +1534,20 @@ func main() {
 		}
 	}()
 
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		app.Logf("signal received; wiping RAM ring buffer and shutting down")
+		app.ring.Clear()
+		_ = srv.Close()
+		os.Exit(0)
+	}()
+
 	app.Bar()
+	if dnsNotice != "" {
+		app.Logf("%s", dnsNotice)
+	}
 	app.Logf("MCP stdio server ready (2026-07-28, 2025-11-25, 2024-11-05); proxy listening on 127.0.0.1:%d", app.port)
 
 	scanner := bufio.NewScanner(os.Stdin)
