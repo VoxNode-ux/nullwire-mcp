@@ -374,13 +374,15 @@ func ipv6Redactable(a netip.Addr) bool {
 
 // matchIPv6 examines the run in[i:j] (all address characters) and returns the
 // canonical address plus the byte range to replace.
-func matchIPv6(in string, i, j int) (addr netip.Addr, start, end int, ok bool) {
+func matchIPv6(in string, i, j, floor int) (addr netip.Addr, start, end int, ok bool) {
 	if strings.Count(in[i:j], ":") < 2 {
 		return netip.Addr{}, 0, 0, false
 	}
 	// A letter g-z or an underscore touching the run means it is part of a
 	// longer identifier ("std::vector" starts mid-word), not an address.
-	if i > 0 && isWordByte(in[i-1]) {
+	// Bytes before floor were already consumed by a previous match (a zone
+	// like "%0" can end in a word byte), so they do not count as a prefix.
+	if i > 0 && i-1 >= floor && isWordByte(in[i-1]) {
 		return netip.Addr{}, 0, 0, false
 	}
 	start = i
@@ -439,7 +441,7 @@ func (s *Scrubber) scrubIPv6(in string) (string, int) {
 		for j < len(in) && isV6Byte(in[j]) {
 			j++
 		}
-		if addr, start, end, ok := matchIPv6(in, i, j); ok {
+		if addr, start, end, ok := matchIPv6(in, i, j, last); ok {
 			b.WriteString(in[last:start])
 			b.WriteString(s.tag("IP", addr.String()))
 			s.IPs.Add(1)
