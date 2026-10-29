@@ -243,7 +243,8 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
 | Flag | Default | Meaning |
 |---|---|---|
 | `-port` | `8080` | Loopback port. The host is hard-coded to `127.0.0.1`; there is no way to bind elsewhere. `0` picks a free port. |
-| `-target` | *(none)* | Default upstream base URL for reverse-gateway mode, e.g. `https://api.example.com` |
+| `-target` | *(none)* | Upstream base URL for reverse-gateway mode, e.g. `https://api.example.com`. Give several named upstreams as `name=URL` pairs, e.g. `openai=https://api.openai.com,anthropic=https://api.anthropic.com`, and pick one by the first path segment. See [multiple upstreams](#multi-upstream). |
+| `-cacert` | *(none)* | Extra CA certificates (a PEM file or a directory of them) to trust for HTTPS upstreams, added to the system store. On Termux/Android a bundle is found automatically, so you rarely need this. Verification is never turned off. |
 | `-dns` | `auto` | Upstream DNS. `auto` uses the system resolver, except on Termux/Android where it uses `1.1.1.1` and `9.9.9.9` (static binaries have no resolver config there). `system` always uses the system resolver. A comma list of IPs, e.g. `-dns 192.168.1.1,9.9.9.9:53`, uses exactly those servers. |
 
 ### Try it without an AI client
@@ -357,6 +358,43 @@ export OPENAI_BASE_URL=http://127.0.0.1:8080/v1   # with: nullwire-mcp -target h
 ```
 
 The upstream `Host` header is set to the target's host, so virtual hosting and TLS SNI behave normally.
+
+<a id="multi-upstream"></a>
+
+#### Multiple upstreams
+
+Agents that call several APIs at once can name each upstream and select it by the first path segment. The segment is removed before forwarding:
+
+```bash
+nullwire-mcp -target openai=https://api.openai.com,anthropic=https://api.anthropic.com
+
+export OPENAI_BASE_URL=http://127.0.0.1:8080/openai/v1
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080/anthropic
+# GET /openai/v1/models     -> https://api.openai.com/v1/models
+# POST /anthropic/v1/messages -> https://api.anthropic.com/v1/messages
+```
+
+Rules:
+
+- Names are 1 to 32 characters (`a-z`, `0-9`, `.`, `_`, `-`), matched case-insensitively, and only on a whole path segment (`/openai/...` matches, `/openaix/...` does not).
+- A bare URL in the list is the **default**, used when no name matches: `-target https://api.example.com,openai=https://api.openai.com`. A single bare URL still works exactly as before.
+- With no default, an unknown prefix gets `404` and a message listing the names (never the URLs, which could contain credentials).
+- An `X-Target-URL` header still wins over any prefix, and the path is then forwarded untouched.
+- The prefix must be written literally; a percent-encoded prefix such as `/%6Fpenai/` is rejected with `400`.
+- Forward-proxy mode (absolute URLs) is unaffected.
+
+#### Termux / Android: `certificate signed by unknown authority`
+
+A static Go binary looks for CA certificates under `/etc/ssl`, which Termux does not have, so every HTTPS upstream used to fail with `x509: certificate signed by unknown authority` while plain-HTTP forward mode kept working. NullWire now looks in `$PREFIX/etc/tls/cert.pem` (installed by the `ca-certificates` package), then `$PREFIX/etc/ssl/certs/ca-certificates.crt`, then Android's system store, and trusts the first one it finds in addition to anything Go already knew. It says which one it used on startup.
+
+```bash
+pkg install ca-certificates     # once, if the startup line says no bundle was found
+nullwire-mcp -target https://api.github.com
+# or point at any bundle yourself:
+nullwire-mcp -cacert /path/to/ca.pem -target https://internal.example
+```
+
+If `SSL_CERT_FILE` or `SSL_CERT_DIR` is already set, NullWire leaves Go's own handling alone. Certificate checking is never disabled; there is deliberately no `-insecure` flag.
 
 
 ---
@@ -492,10 +530,12 @@ Every item below is implemented in `main.go` and exercised by `main_test.go` and
 | `Cookie`, `Set-Cookie` header values (whole header hashed as one unit) | `COOKIE` |
 | JWTs (`eyJ….….…`) | `TOKEN` |
 | API keys: `sk-…`, `ghp_…`, `github_pat_…`, `AIza…`, `xox[baprs]-…`, `AKIA…` | `TOKEN` |
+| Vendor keys: Stripe `sk_live_…` / `rk_live_…`, OpenAI project `sk-proj-…`, Google OAuth `ya29.…`, GitLab `glpat-…`, Hugging Face `hf_…`, npm `npm_…`, SendGrid `SG.….…` (prefixes are case-sensitive; Stripe test keys `sk_test_…` are not treated as secrets) | `TOKEN` |
 | JSON fields: `access_token`, `refresh_token`, `id_token`, `api_key`, `apikey`, `secret`, `client_secret`, `password`, `passwd`, `session_id`, `auth_token` | `TOKEN` |
 | Query / form params: `api_key`, `apikey`, `token`, `access_token`, `refresh_token`, `id_token`, `secret`, `client_secret`, `password`, `passwd`, `key` | `TOKEN` |
 | `user:password@host` in URLs | `TOKEN` |
 | IPv4 addresses (`127.0.0.1` and `0.0.0.0` are left alone) | `IP` |
+| IPv6 addresses in any spelling, including `[addr]:port`, zones (`fe80::1%eth0`) and IPv4-mapped (`::ffff:192.0.2.1`). `::1` and `::` are left alone. Different spellings of one address get the same tag. | `IP` |
 
 
 ---
@@ -509,7 +549,7 @@ We would rather you hear these from us than discover them in production.
 - **`HTTP CONNECT` is a blind tunnel, not an inspector.** `HTTPS_PROXY` clients work, but NullWire does not man-in-the-middle TLS: that would need a generated root CA in your OS or browser trust store, which is key material and keychain pollution, the opposite of a zero-footprint tool. A tunnel flow records only the target, timing, byte counts and (scrubbed) request headers; its payload is never read into the ring, so the scrubber has nothing to scrub and the AI sees nothing inside it. The flow is recorded when the tunnel closes. For full HTTPS visibility use the **reverse gateway**: point your app at `http://127.0.0.1:8080` and let NullWire do the TLS to the upstream.
 - **WebSocket / `Upgrade` is passed through, not inspected.** The handshake is recorded (status 101, scrubbed headers) and the connection is then spliced raw, so WebSocket and similar upgraded protocols work through forward or reverse mode. Frames are never captured. The flow is recorded when the connection closes. Tunnels and upgraded connections close after 10 minutes without traffic, and at most 256 can be open at once.
 - **Android / Termux:** static Go binaries have no DNS resolver config on Android. NullWire detects Termux and sends upstream name lookups to `1.1.1.1` / `9.9.9.9` instead, and prints a notice on stderr. That means those resolvers see the hostnames you contact. Use `-dns <your-resolver>` to pick your own, or `-dns system` to turn this off (for example inside `termux-chroot`, which provides a resolver). Other platforms use the system resolver.
-- **Redaction is pattern-based, not magic.** It catches the shapes in the table above. A secret in a format we don't recognise, in a field we don't know, or split across a body boundary can pass through. Treat the scrubber as a strong seatbelt, not a guarantee, and test it with your own traffic. IPv6 addresses are not redacted yet. IPv4-shaped strings that aren't addresses (some version numbers) can be redacted as false positives.
+- **Redaction is pattern-based, not magic.** It catches the shapes in the table above. A secret in a format we don't recognise, in a field we don't know, or split across a body boundary can pass through. Treat the scrubber as a strong seatbelt, not a guarantee, and test it with your own traffic. IPv4-shaped strings that aren't addresses (some version numbers) can be redacted as false positives. IPv6 is validated with `net/netip`, so hex strings, clock times, MAC addresses and `std::vector`-style paths are left alone; the trade-off is that an address with no digit and fewer than three groups (`dead::beef`) is not redacted, because it looks exactly like a namespace, and an 8-byte colon-separated identifier (an EUI-64) is redacted because it is syntactically an IPv6 address.
 - **Tags are 24 bits.** Six hex characters are plenty to tell apart the handful of secrets in a 50-slot buffer, but collisions are possible in principle. They are for correlation, not identification.
 - **Bodies are bounded.** Only the first 64 KB of each body is captured, and stored bodies are cut to 8 KB / 16 KB. `gzip` and `deflate` bodies (requests and responses) are decoded for capture, with a 256 KB inflation cap, and then scrubbed; exported curl commands drop `Content-Encoding` for such bodies because the stored body is plain text. Other encodings (`br`, `zstd`) are stored as a short placeholder. NullWire strips `Accept-Encoding` from forwarded requests so most servers reply uncompressed, but it can't force them to.
 - **"RAM-only" means the program never writes files.** `Disk: 0B` in the status bar is a design invariant (the source has no file I/O), not a measured counter. The OS can still swap memory pages or write crash dumps; NullWire doesn't control that.

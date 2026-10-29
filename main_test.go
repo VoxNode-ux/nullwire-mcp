@@ -529,7 +529,7 @@ func TestMCPServerDiscover(t *testing.T) {
 	if _, ok := res["capabilities"].(map[string]any)["tools"]; !ok {
 		t.Errorf("capabilities = %v", res["capabilities"])
 	}
-	if info := res["serverInfo"].(map[string]any); info["name"] != "nullwire-mcp" || info["version"] != "1.1.0" {
+	if info := res["serverInfo"].(map[string]any); info["name"] != "nullwire-mcp" || info["version"] != "1.2.0" {
 		t.Errorf("serverInfo = %v", info)
 	}
 }

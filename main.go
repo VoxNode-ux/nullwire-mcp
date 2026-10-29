@@ -14,6 +14,8 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -21,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -40,7 +43,7 @@ const (
 	captureLimit  = 64 * 1024
 	truncMarker   = "…[truncated]"
 	serverName    = "nullwire-mcp"
-	serverVersion = "1.1.0"
+	serverVersion = "1.2.0"
 
 	// maxTunnels caps concurrent CONNECT tunnels and upgraded (WebSocket)
 	// connections so a runaway client cannot exhaust file descriptors.
@@ -181,6 +184,7 @@ type Scrubber struct {
 	reJSONSecret      *regexp.Regexp
 	reQuerySecret     *regexp.Regexp
 	reUserInfo        *regexp.Regexp
+	reVendorKey       *regexp.Regexp
 	reIPv4            *regexp.Regexp
 
 	Tokens  atomic.Uint64
@@ -203,6 +207,16 @@ func NewScrubber() (*Scrubber, error) {
 		reJSONSecret:      regexp.MustCompile(`(?i)("(?:access_token|refresh_token|id_token|api_key|apikey|secret|client_secret|password|passwd|session_id|auth_token)"\s*:\s*")((?:[^"\\]|\\.)+)(")`),
 		reQuerySecret:     regexp.MustCompile(`(?i)((?:^|[?&])(?:api_key|apikey|token|access_token|refresh_token|id_token|secret|client_secret|password|passwd|key)=)([^&\s#]+)`),
 		reUserInfo:        regexp.MustCompile(`(://[^/\s:@]+:)([^@/\s]+)(@)`),
+		// Vendor key shapes: Stripe, OpenAI project, Google OAuth, GitLab,
+		// Hugging Face, npm and SendGrid. Case-sensitive on purpose: the
+		// prefixes are exact, and a case-insensitive match would flag words.
+		reVendorKey: regexp.MustCompile(`\b(?:(?:sk|rk)_live_[A-Za-z0-9]{16,}` +
+			`|sk-proj-[A-Za-z0-9_-]{20,}` +
+			`|ya29\.[A-Za-z0-9_-]{20,}` +
+			`|glpat-[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]+)*` +
+			`|hf_[A-Za-z0-9]{30,}` +
+			`|npm_[A-Za-z0-9]{30,}` +
+			`|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})`),
 		reIPv4:            regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`),
 	}, nil
 }
@@ -277,11 +291,23 @@ func (s *Scrubber) ScrubText(in string) (string, int) {
 		return s.tag("TOKEN", m)
 	})
 
+	out = s.reVendorKey.ReplaceAllStringFunc(out, func(m string) string {
+		count++
+		s.Tokens.Add(1)
+		return s.tag("TOKEN", m)
+	})
+
 	out = s.reAPIKey.ReplaceAllStringFunc(out, func(m string) string {
 		count++
 		s.Tokens.Add(1)
 		return s.tag("TOKEN", m)
 	})
+
+	// IPv6 first, so an IPv4-mapped address (::ffff:192.0.2.1) is redacted as
+	// one unit instead of being split by the IPv4 rule.
+	var n6 int
+	out, n6 = s.scrubIPv6(out)
+	count += n6
 
 	out = s.reIPv4.ReplaceAllStringFunc(out, func(m string) string {
 		if m == "127.0.0.1" || m == "0.0.0.0" {
@@ -293,6 +319,143 @@ func (s *Scrubber) ScrubText(in string) (string, int) {
 	})
 
 	return out, count
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 redaction
+//
+// A single regex cannot do this safely: RE2 has no lookaround, and anything
+// loose enough to catch "fe80::1" also catches "std::vector", MAC addresses
+// and clock times. So the scanner finds runs of address characters and lets
+// net/netip decide whether a run really is an IPv6 address.
+// ---------------------------------------------------------------------------
+
+func isV6Byte(c byte) bool {
+	return c == ':' || c == '.' ||
+		(c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func isWordByte(c byte) bool {
+	return c == '_' ||
+		(c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// ipv6Redactable reports whether a parsed address should be redacted. The
+// loopback and unspecified addresses stay visible, like 127.0.0.1 and
+// 0.0.0.0 do. An address with no decimal digit and fewer than three groups
+// ("a::b", "dead::beef", "::face") is left alone: it is indistinguishable
+// from C++ and Rust namespaces and costs far more in false positives than
+// the near-zero chance that it is a real address.
+func ipv6Redactable(a netip.Addr) bool {
+	if !a.Is6() {
+		return false
+	}
+	if a.Is4In6() {
+		v4 := a.Unmap()
+		if v4 == netip.AddrFrom4([4]byte{127, 0, 0, 1}) || v4 == netip.AddrFrom4([4]byte{}) {
+			return false
+		}
+	}
+	if a == netip.IPv6Loopback() || a == netip.IPv6Unspecified() {
+		return false
+	}
+	text := a.String()
+	if strings.ContainsAny(text, "0123456789") {
+		return true
+	}
+	groups := 0
+	for _, g := range strings.Split(text, ":") {
+		if g != "" {
+			groups++
+		}
+	}
+	return groups >= 3
+}
+
+// matchIPv6 examines the run in[i:j] (all address characters) and returns the
+// canonical address plus the byte range to replace.
+func matchIPv6(in string, i, j int) (addr netip.Addr, start, end int, ok bool) {
+	if strings.Count(in[i:j], ":") < 2 {
+		return netip.Addr{}, 0, 0, false
+	}
+	// A letter g-z or an underscore touching the run means it is part of a
+	// longer identifier ("std::vector" starts mid-word), not an address.
+	if i > 0 && isWordByte(in[i-1]) {
+		return netip.Addr{}, 0, 0, false
+	}
+	start = i
+	for start < j && in[start] == '.' {
+		start++
+	}
+	end = j
+	for end > start {
+		cand := in[start:end]
+		if a, err := netip.ParseAddr(cand); err == nil && a.Is6() {
+			if !ipv6Redactable(a) {
+				return netip.Addr{}, 0, 0, false
+			}
+			// A word character right after an untrimmed run ("dead::beefx")
+			// means the run is part of something longer.
+			if end == j && j < len(in) && isWordByte(in[j]) {
+				return netip.Addr{}, 0, 0, false
+			}
+			// Swallow a zone ("fe80::1%eth0") so the interface name goes too.
+			if end == j && j < len(in) && in[j] == '%' {
+				k := j + 1
+				for k < len(in) && isWordByte(in[k]) {
+					k++
+				}
+				if k > j+1 {
+					end = k
+				}
+			}
+			return a, start, end, true
+		}
+		// Trailing sentence punctuation: "seen at fe80::1." or "fe80::1:".
+		if last := in[end-1]; last == '.' || last == ':' {
+			end--
+			continue
+		}
+		break
+	}
+	return netip.Addr{}, 0, 0, false
+}
+
+// scrubIPv6 replaces every IPv6 address in in with an [REDACTED_IP#...] tag.
+// Different spellings of one address share a tag (the hash uses the
+// canonical form), so correlation still works.
+func (s *Scrubber) scrubIPv6(in string) (string, int) {
+	if strings.Count(in, ":") < 2 {
+		return in, 0
+	}
+	var b strings.Builder
+	count, last := 0, 0
+	for i := 0; i < len(in); {
+		if !isV6Byte(in[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(in) && isV6Byte(in[j]) {
+			j++
+		}
+		if addr, start, end, ok := matchIPv6(in, i, j); ok {
+			b.WriteString(in[last:start])
+			b.WriteString(s.tag("IP", addr.String()))
+			s.IPs.Add(1)
+			count++
+			last = end
+			if end > j {
+				j = end
+			}
+		}
+		i = j
+	}
+	if count == 0 {
+		return in, 0
+	}
+	b.WriteString(in[last:])
+	return b.String(), count
 }
 
 // ScrubHeaders returns a flat, scrubbed copy of h and the redaction count.
@@ -335,7 +498,8 @@ type App struct {
 	ring      *RingBuffer
 	scrub     *Scrubber
 	port      int
-	target    *url.URL
+	target    *url.URL            // default upstream, may be nil
+	upstreams map[string]*url.URL // named upstreams, keyed by lower-case path prefix
 	transport *http.Transport
 
 	tunnels    atomic.Int64  // live CONNECT / upgraded connections
@@ -470,6 +634,91 @@ func (a *App) isSelf(hostport string) bool {
 		h == fmt.Sprintf("[::1]:%d", a.port)
 }
 
+// reUpstreamName is what a named upstream may be called: it becomes the first
+// path segment, so it must be plain and URL-safe.
+var reUpstreamName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`)
+
+// parseTargets parses the -target flag. Entries are comma separated. An entry
+// is either a bare URL (the default upstream, at most one) or name=URL (a
+// named upstream, selected by the first path segment). A single bare URL is
+// the original, still supported form.
+func parseTargets(spec string) (def *url.URL, named map[string]*url.URL, err error) {
+	named = map[string]*url.URL{}
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name, raw := "", part
+		if i := strings.Index(part, "="); i > 0 && reUpstreamName.MatchString(part[:i]) {
+			name, raw = strings.ToLower(part[:i]), part[i+1:]
+		}
+		label := name
+		if label == "" {
+			label = "default"
+		}
+		u, perr := parseTarget(raw)
+		if perr != nil {
+			return nil, nil, fmt.Errorf("upstream %q: %v", label, perr)
+		}
+		if name == "" {
+			if def != nil {
+				return nil, nil, fmt.Errorf("more than one default upstream; name them like openai=https://api.openai.com")
+			}
+			def = u
+			continue
+		}
+		if _, dup := named[name]; dup {
+			return nil, nil, fmt.Errorf("upstream name %q is used twice", name)
+		}
+		named[name] = u
+	}
+	if def == nil && len(named) == 0 {
+		return nil, nil, fmt.Errorf("no upstream given")
+	}
+	return def, named, nil
+}
+
+// upstreamNames returns the named-upstream prefixes, sorted.
+func (a *App) upstreamNames() []string {
+	names := make([]string, 0, len(a.upstreams))
+	for n := range a.upstreams {
+		names = append(names, n)
+	}
+	sortStrings(names)
+	return names
+}
+
+// matchUpstream selects a named upstream by the first path segment and returns
+// the path with that segment removed. found is false when no name matches (the
+// caller then falls back to the default upstream). The prefix must appear
+// literally: a percent-encoded prefix is rejected rather than guessed at.
+func (a *App) matchUpstream(p, rawPath string) (base *url.URL, rest, rawRest string, found bool, err error) {
+	if len(a.upstreams) == 0 || !strings.HasPrefix(p, "/") {
+		return nil, "", "", false, nil
+	}
+	seg, tail := p[1:], ""
+	if i := strings.IndexByte(seg, '/'); i >= 0 {
+		seg, tail = seg[:i], seg[i:]
+	}
+	b, ok := a.upstreams[strings.ToLower(seg)]
+	if !ok {
+		return nil, "", "", false, nil
+	}
+	if rawPath != "" {
+		pre := "/" + seg
+		if len(rawPath) < len(pre) || !strings.EqualFold(rawPath[:len(pre)], pre) ||
+			(len(rawPath) > len(pre) && rawPath[len(pre)] != '/') {
+			return nil, "", "", false, fmt.Errorf("the upstream prefix %q must not be percent-encoded", seg)
+		}
+		rawRest = rawPath[len(pre):]
+	}
+	if tail == "" {
+		tail = "/"
+	}
+	return b, tail, rawRest, true, nil
+}
+
 // resolveUpstream decides between forward-proxy and reverse-gateway mode and
 // returns the full upstream URL. On failure it returns an HTTP status.
 func (a *App) resolveUpstream(r *http.Request) (*url.URL, bool, int, error) {
@@ -489,14 +738,27 @@ func (a *App) resolveUpstream(r *http.Request) (*url.URL, bool, int, error) {
 		return nil, true, http.StatusForbidden, fmt.Errorf("reverse gateway only answers loopback Host headers")
 	}
 	base := a.target
+	rest, restRaw := r.URL.Path, r.URL.RawPath
 	if raw := strings.TrimSpace(r.Header.Get("X-Target-URL")); raw != "" {
 		parsed, err := parseTarget(raw)
 		if err != nil {
 			return nil, true, http.StatusBadRequest, err
 		}
 		base = parsed
+	} else {
+		nb, nrest, nraw, found, err := a.matchUpstream(r.URL.Path, r.URL.RawPath)
+		if err != nil {
+			return nil, true, http.StatusBadRequest, err
+		}
+		if found {
+			base, rest, restRaw = nb, nrest, nraw
+		}
 	}
 	if base == nil {
+		if names := a.upstreamNames(); len(names) > 0 {
+			return nil, true, http.StatusNotFound,
+				fmt.Errorf("unknown upstream: start the path with one of /%s/", strings.Join(names, "/, /"))
+		}
 		return nil, true, http.StatusBadRequest,
 			fmt.Errorf("no upstream: send an absolute URL (forward mode), an X-Target-URL header, or start with -target")
 	}
@@ -504,10 +766,10 @@ func (a *App) resolveUpstream(r *http.Request) (*url.URL, bool, int, error) {
 		return nil, true, http.StatusLoopDetected, fmt.Errorf("refusing to proxy a request back to the proxy itself")
 	}
 	u := *base
-	u.Path = strings.TrimRight(base.Path, "/") + r.URL.Path
+	u.Path = strings.TrimRight(base.Path, "/") + rest
 	u.RawPath = ""
-	if r.URL.RawPath != "" {
-		u.RawPath = strings.TrimRight(base.EscapedPath(), "/") + r.URL.RawPath
+	if restRaw != "" {
+		u.RawPath = strings.TrimRight(base.EscapedPath(), "/") + restRaw
 	}
 	if r.URL.RawQuery != "" {
 		u.RawQuery = r.URL.RawQuery
@@ -913,6 +1175,100 @@ func parseDNSServers(spec string) ([]string, error) {
 		return nil, fmt.Errorf("-dns: no servers given")
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// TLS trust roots
+//
+// A static Go binary on Termux/Android finds no CA bundle: Go only looks in
+// /etc/ssl and friends, and Termux keeps its bundle under $PREFIX. Without one
+// every HTTPS upstream fails with "x509: certificate signed by unknown
+// authority" (plain-HTTP forward mode keeps working, which makes it confusing).
+// ---------------------------------------------------------------------------
+
+// termuxCAPaths lists where a Termux/Android device keeps trusted roots, best
+// first. Entries may be PEM bundle files or directories of PEM files.
+func termuxCAPaths() []string {
+	var out []string
+	if p := os.Getenv("PREFIX"); p != "" {
+		out = append(out, p+"/etc/tls/cert.pem", p+"/etc/ssl/certs/ca-certificates.crt")
+	}
+	return append(out,
+		"/data/data/com.termux/files/usr/etc/tls/cert.pem",
+		"/system/etc/security/cacerts", // Android system store (directory)
+	)
+}
+
+// addPEMPath adds every certificate in the file, or in every file of the
+// directory, at path to pool. It reports whether at least one PEM block was
+// accepted. A missing path is not an error here; the caller decides.
+func addPEMPath(pool *x509.CertPool, path string) (bool, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	if !fi.IsDir() {
+		pem, err := os.ReadFile(path)
+		if err != nil {
+			return false, err
+		}
+		return pool.AppendCertsFromPEM(pem), nil
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false, err
+	}
+	got := false
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		pem, err := os.ReadFile(path + "/" + e.Name())
+		if err != nil {
+			continue
+		}
+		if pool.AppendCertsFromPEM(pem) {
+			got = true
+		}
+	}
+	return got, nil
+}
+
+// buildRootCAs returns the pool to verify upstream servers with, and a short
+// description of where it came from.
+//
+//   - cacert != "": the system pool plus that file or directory. A bad path is
+//     an error, because the user asked for it explicitly.
+//   - Termux/Android with no SSL_CERT_FILE / SSL_CERT_DIR: the system pool plus
+//     the first bundle found in termuxCAPaths.
+//   - Anything else: (nil, "", nil), which keeps Go's default behaviour.
+//
+// Certificate verification is never switched off.
+func buildRootCAs(cacert string, termux bool) (*x509.CertPool, string, error) {
+	explicit := cacert != ""
+	if !explicit && (!termux || os.Getenv("SSL_CERT_FILE") != "" || os.Getenv("SSL_CERT_DIR") != "") {
+		return nil, "", nil
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if explicit {
+		ok, err := addPEMPath(pool, cacert)
+		if err != nil {
+			return nil, "", fmt.Errorf("-cacert %s: %v", cacert, err)
+		}
+		if !ok {
+			return nil, "", fmt.Errorf("-cacert %s: no PEM certificates found", cacert)
+		}
+		return pool, cacert, nil
+	}
+	for _, p := range termuxCAPaths() {
+		if ok, _ := addPEMPath(pool, p); ok {
+			return pool, p, nil
+		}
+	}
+	return pool, "", nil
 }
 
 // onTermux detects Termux/Android from the environment (no file access).
@@ -1460,7 +1816,8 @@ func fatalf(format string, args ...any) {
 
 func main() {
 	port := flag.Int("port", 8080, "TCP port for the diagnostic proxy (always bound to 127.0.0.1)")
-	target := flag.String("target", "", "default upstream base URL for reverse gateway mode, e.g. https://api.example.com")
+	target := flag.String("target", "", "upstream base URL(s) for reverse gateway mode: https://api.example.com, or named: openai=https://api.openai.com,anthropic=https://api.anthropic.com (selected by the first path segment); a bare URL in the list is the default")
+	cacert := flag.String("cacert", "", "extra CA certificates (PEM file or directory) to trust for HTTPS upstreams; on Termux/Android a bundle is found automatically")
 	dnsSpec := flag.String("dns", "auto", "upstream DNS: auto (Termux/Android uses 1.1.1.1 and 9.9.9.9), system, or a comma list of IPs like 1.1.1.1,9.9.9.9:53")
 	flag.Parse()
 
@@ -1490,6 +1847,15 @@ func main() {
 	}
 	dialer := newDialer(dnsServers)
 
+	rootCAs, caSource, err := buildRootCAs(*cacert, onTermux())
+	if err != nil {
+		fatalf("nullwire-mcp: %v", err)
+	}
+	var tlsCfg *tls.Config
+	if rootCAs != nil {
+		tlsCfg = &tls.Config{RootCAs: rootCAs, MinVersion: tls.VersionTLS12}
+	}
+
 	app := &App{
 		ring:  NewRingBuffer(),
 		scrub: scrub,
@@ -1501,14 +1867,16 @@ func main() {
 			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 120 * time.Second,
 			DialContext:           dialer.DialContext,
+			TLSClientConfig:       tlsCfg,
 		},
 	}
 	if *target != "" {
-		u, err := parseTarget(*target)
+		def, named, err := parseTargets(*target)
 		if err != nil {
 			fatalf("nullwire-mcp: -target: %v", err)
 		}
-		app.target = u
+		app.target = def
+		app.upstreams = named
 	}
 
 	// Strict loopback bind: the host is hard-coded and re-verified.
@@ -1547,6 +1915,15 @@ func main() {
 	app.Bar()
 	if dnsNotice != "" {
 		app.Logf("%s", dnsNotice)
+	}
+	switch {
+	case caSource != "":
+		app.Logf("TLS roots: system store plus %s", caSource)
+	case onTermux() && rootCAs != nil:
+		app.Logf("warning: no CA bundle found, so HTTPS upstreams will fail with \"certificate signed by unknown authority\". Run: pkg install ca-certificates   (or pass -cacert /path/to/cert.pem)")
+	}
+	if names := app.upstreamNames(); len(names) > 0 {
+		app.Logf("named upstreams: /%s/", strings.Join(names, "/, /"))
 	}
 	app.Logf("MCP stdio server ready (2026-07-28, 2025-11-25, 2024-11-05); proxy listening on 127.0.0.1:%d", app.port)
 
