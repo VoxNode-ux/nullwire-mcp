@@ -373,69 +373,44 @@ func ipv6Redactable(a netip.Addr) bool {
 }
 
 // matchIPv6 examines the run in[i:j] (all address characters) and returns the
-// leftmost longest valid IPv6 address plus the byte range to replace.
+// canonical address plus the byte range to replace.
 func matchIPv6(in string, i, j int) (addr netip.Addr, start, end int, ok bool) {
 	if strings.Count(in[i:j], ":") < 2 {
 		return netip.Addr{}, 0, 0, false
 	}
-	// A letter/underscore touching the run means it is part of a longer
-	// identifier ("std::vector"), not an address.
+	// A letter g-z or an underscore touching the run means it is part of a
+	// longer identifier ("std::vector" starts mid-word), not an address.
 	if i > 0 && isWordByte(in[i-1]) {
 		return netip.Addr{}, 0, 0, false
 	}
-
-	// Try every possible start offset inside the run, preferring longer matches.
-	// This is what makes the scrubber complete and therefore stable under a
-	// second pass.
-	bestLen := 0
-	var best netip.Addr
-	bestStart, bestEnd := 0, 0
-
-	for s := i; s < j; s++ {
-		// Skip pure leading dots
-		if in[s] == '.' {
-			continue
-		}
-		for e := j; e > s+2; e-- { // need at least "x::" roughly
-			cand := in[s:e]
-			if strings.Count(cand, ":") < 2 {
-				continue
-			}
-			a, err := netip.ParseAddr(cand)
-			if err != nil || !a.Is6() || !ipv6Redactable(a) {
-				continue
-			}
-			// Reject if a word character is glued to the end of an untrimmed run
-			if e == j && j < len(in) && isWordByte(in[j]) {
-				continue
-			}
-			if e-s > bestLen {
-				bestLen = e - s
-				best = a
-				bestStart, bestEnd = s, e
-			}
-			break // longest from this start is enough; move to next start
-		}
+	start = i
+	for start < j && in[start] == '.' {
+		start++
 	}
-
-	if bestLen == 0 {
-		return netip.Addr{}, 0, 0, false
-	}
-
-	// Swallow a trailing zone identifier: fe80::1%eth0
-	end = bestEnd
-	if end < len(in) && in[end] == '%' {
-		k := end + 1
-		for k < len(in) && isWordByte(in[k]) {
-			k++
+	end = j
+	for end > start {
+		cand := in[start:end]
+		if a, err := netip.ParseAddr(cand); err == nil && a.Is6() {
+			if !ipv6Redactable(a) {
+				return netip.Addr{}, 0, 0, false
+			}
+			// A word character right after an untrimmed run ("dead::beefx")
+			// means the run is part of something longer.
+			if end == j && j < len(in) && isWordByte(in[j]) {
+				return netip.Addr{}, 0, 0, false
+			}
+			// Swallow a zone ("fe80::1%eth0") so the interface name goes too.
+			if end == j && j < len(in) && in[j] == '%' {
+				k := j + 1
+				for k < len(in) && isWordByte(in[k]) {
+					k++
+				}
+				if k > j+1 {
+					end = k
+				}
+			}
+			return a, start, end, true
 		}
-		if k > end+1 {
-			end = k
-		}
-	}
-
-	return best, bestStart, end, true
-}
 		// Trailing sentence punctuation: "seen at fe80::1." or "fe80::1:".
 		if last := in[end-1]; last == '.' || last == ':' {
 			end--
@@ -464,7 +439,7 @@ func (s *Scrubber) scrubIPv6(in string) (string, int) {
 		for j < len(in) && isV6Byte(in[j]) {
 			j++
 		}
-		if addr, start, end, ok := matchIPv6(in, i, j); ok {
+				if addr, start, end, ok := matchIPv6(in, i, j); ok {
 			b.WriteString(in[last:start])
 			b.WriteString(s.tag("IP", addr.String()))
 			s.IPs.Add(1)
