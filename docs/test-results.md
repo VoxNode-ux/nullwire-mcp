@@ -15,3 +15,7 @@ These smoke tests are run by hand (Actions → Run workflow) on the release buil
 | Linux ARM64 (Android / Termux) | pass | pass | pass | verified on device, needs `termux-chroot` |
 
 Emulated = run under QEMU, not on real hardware.
+
+## v1.2.0 changes
+
+The vendor-key, IPv6, named-upstream and TLS-root tests run with `go test` on every push. The new fuzz targets (`FuzzVendorKeysNoLeak`, `FuzzIPv6NoLeak`, `FuzzIPv6Stable`) run from the manual security workflow. The Termux CA-bundle fix still needs a run on a real device before it is marked verified in the table above.
