@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Version to publish, e.g. v1.2.0 (leave as is to publish v1.2.0)"
+        description: "Version to publish, e.g. v1.2.0"
         required: false
         default: "v1.2.0"
   push:
@@ -23,29 +23,15 @@ jobs:
     name: Vet and test
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: "1.26"
-          check-latest: true
           cache: false
-      - name: go vet
-        run: |
-          set -o pipefail
-          go vet ./... 2>&1 | tee vet.txt
-      - name: go test
-        run: |
-          set -o pipefail
-          go test -v -race ./... 2>&1 | tee test.txt
-      - name: Save vet and test logs
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: test-logs
-          path: |
-            vet.txt
-            test.txt
-          retention-days: 30
+      - run: go vet ./...
+      - run: go test -v -race ./...
 
   build:
     name: Build ${{ matrix.artifact }}
@@ -61,13 +47,6 @@ jobs:
           - goos: linux
             goarch: arm64
             artifact: nullwire-linux-arm64
-          - goos: linux
-            goarch: arm
-            goarm: "7"
-            artifact: nullwire-linux-armv7
-          - goos: linux
-            goarch: riscv64
-            artifact: nullwire-linux-riscv64
           - goos: darwin
             goarch: amd64
             artifact: nullwire-darwin-amd64
@@ -77,146 +56,113 @@ jobs:
           - goos: windows
             goarch: amd64
             artifact: nullwire-windows-amd64.exe
-          - goos: windows
-            goarch: arm64
-            artifact: nullwire-windows-arm64.exe
-          - goos: freebsd
-            goarch: amd64
-            artifact: nullwire-freebsd-amd64
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: "1.26"
-          check-latest: true
           cache: false
-      - name: Cross-compile static binary
+      - name: Build static binary
         env:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm }}
+          ARTIFACT: ${{ matrix.artifact }}
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.artifact }}" .
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+          go build -trimpath -ldflags="-s -w" -o "dist/${ARTIFACT}" .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: ${{ matrix.artifact }}
           path: dist/*
-          if-no-files-found: error
+
+  docker:
+    name: Build and push Docker image
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    # Plain docker commands instead of third-party actions: the Dockerfile
+    # cross-compiles, so no emulation is needed and nothing extra has to be pinned.
+    env:
+      IMAGE: ghcr.io/voxnode-ux/nullwire-mcp
+      EVENT: ${{ github.event_name }}
+      REF_TYPE: ${{ github.ref_type }}
+      REF_NAME: ${{ github.ref_name }}
+      SHA: ${{ github.sha }}
+      ACTOR: ${{ github.actor }}
+      REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build, and push outside pull requests
+        run: |
+          set -euo pipefail
+          docker buildx create --name nullwire --driver docker-container --use
+          args=(--platform linux/amd64,linux/arm64 --tag "${IMAGE}:${SHA}")
+          if [ "${EVENT}" = "pull_request" ]; then
+            echo "Pull request: building without pushing."
+          else
+            echo "${REGISTRY_TOKEN}" | docker login ghcr.io -u "${ACTOR}" --password-stdin
+            args+=(--tag "${IMAGE}:latest")
+            if [ "${REF_TYPE}" = "tag" ]; then
+              args+=(--tag "${IMAGE}:${REF_NAME}")
+            fi
+            args+=(--push)
+          fi
+          docker buildx build "${args[@]}" .
 
   release:
     name: Publish release
-    needs: build
-    # Runs after tests + all 9 builds pass, on every push, tag and manual run.
-    # Never on pull requests, so untrusted code can't touch your releases.
+    needs: [build, docker]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      id-token: write
-      attestations: write
-    concurrency:
-      group: publish-release
-      cancel-in-progress: false
-    env:
-      GH_TOKEN: ${{ github.token }}
-      EVENT: ${{ github.event_name }}
-      REF_NAME: ${{ github.ref_name }}
-      INPUT_TAG: ${{ inputs.tag }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version: "1.26"
-          check-latest: true
-          cache: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: nullwire-*
           path: dist
           merge-multiple: true
-
-      - name: SBOM (list of everything in the build)
-        run: |
-          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
-          "$(go env GOPATH)/bin/cyclonedx-gomod" mod -json -output dist/nullwire-sbom.cdx.json .
-          echo "SBOM written:"; ls -l dist/nullwire-sbom.cdx.json
-
       - name: Checksums
         run: cd dist && sha256sum nullwire-* > SHA256SUMS.txt
-
-      - name: Build provenance (signed proof of where each binary came from)
-        id: attest
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
-        with:
-          subject-path: "dist/nullwire-*"
-
-      - name: Attach the provenance file to the release
-        # Puts the signed proof next to the binaries as a normal release file,
-        # so tools like OpenSSF Scorecard (and people) can find it.
-        env:
-          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
-        run: |
-          set -euo pipefail
-          test -s "$BUNDLE"
-          cp "$BUNDLE" dist/nullwire-provenance.intoto.jsonl
-          ls -l dist/nullwire-provenance.intoto.jsonl
-
       - name: Decide which release this is
         id: rel
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" = "workflow_dispatch" ]; then
+          if [ "${EVENT}" = "workflow_dispatch" ]; then
             TAG="${INPUT_TAG:-v1.2.0}"
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            TAG="$REF_NAME"
+          elif [ "${REF_TYPE}" = "tag" ]; then
+            TAG="${REF_NAME}"
           else
             TAG="latest"
           fi
-          case "$TAG" in
-            latest) KIND="rolling" ;;
-            v[0-9]*) KIND="stable" ;;
-            *) echo "::error::Tag must be 'latest' or look like v1.2.0 (got: $TAG)"; exit 1 ;;
+          case "${TAG}" in
+            latest|v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Tag must be 'latest' or look like v1.2.0 (got: ${TAG})"; exit 1 ;;
           esac
-          echo "Publishing $KIND release: $TAG"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "kind=$KIND" >> "$GITHUB_OUTPUT"
-
-      - name: Create or update the release
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+      - name: Create release
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.rel.outputs.tag }}
-          KIND: ${{ steps.rel.outputs.kind }}
         run: |
           set -euo pipefail
-          REPO="$GITHUB_REPOSITORY"
-          ROLL_TITLE="NullWire-MCP Latest Build (main)"
-          ROLL_NOTES="Automatic build of the latest commit on main (${GITHUB_SHA::7}). Tests and all 9 platform builds passed. Use a numbered release for a stable version."
-
-          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            echo "Release $TAG already exists: replacing its files."
-            gh release upload "$TAG" dist/* --clobber --repo "$REPO"
-            if [ "$KIND" = "rolling" ]; then
-              gh release edit "$TAG" --repo "$REPO" \
-                --title "$ROLL_TITLE" --notes "$ROLL_NOTES" \
-                --prerelease --latest=false
-              # Move the tag to the newest commit (create it if it vanished).
-              gh api -X PATCH "repos/$REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true \
-                || gh api -X POST "repos/$REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" \
-                || echo "::warning::Could not move the $TAG tag; files were still updated."
-            fi
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/* --clobber
           else
-            echo "Creating release $TAG."
-            if [ "$KIND" = "rolling" ]; then
-              gh release create "$TAG" dist/* --repo "$REPO" \
-                --target "$GITHUB_SHA" \
-                --title "$ROLL_TITLE" --notes "$ROLL_NOTES" \
-                --prerelease --latest=false
-            else
-              gh release create "$TAG" dist/* --repo "$REPO" \
-                --target "$GITHUB_SHA" \
-                --title "$TAG" --generate-notes
-            fi
+            gh release create "${TAG}" dist/* --target "${GITHUB_SHA}" --generate-notes
           fi
