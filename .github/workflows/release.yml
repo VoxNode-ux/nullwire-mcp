@@ -36,6 +36,13 @@ jobs:
           sh -n scripts/install.sh
           sh -n packaging/render.sh
           node --check npm/bin/nullwire-mcp.js
+      - name: Check the Homebrew and Scoop templates render
+        run: |
+          for a in nullwire-linux-amd64 nullwire-linux-arm64 nullwire-darwin-amd64 nullwire-darwin-arm64 nullwire-windows-amd64.exe nullwire-windows-arm64.exe; do
+            printf '%s' "$a" | sha256sum | sed "s/  -/  $a/"
+          done > "$RUNNER_TEMP/SHA256SUMS.txt"
+          sh packaging/render.sh -v v0.0.0 -s "$RUNNER_TEMP/SHA256SUMS.txt" -o "$RUNNER_TEMP/pkg"
+          python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$RUNNER_TEMP/pkg/nullwire-mcp.json"
       - name: go vet
         run: |
           set -o pipefail
