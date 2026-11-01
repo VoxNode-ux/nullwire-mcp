@@ -52,7 +52,7 @@ NullWire sits between your app and the network. It records what passes through, 
 
 ### 1. Install it
 
-Pick whichever fits your machine. Every method checks the download against the release's `SHA256SUMS.txt` and installs nothing if it doesn't match.
+Pick whichever fits your machine. Every method checks the download against the release's `SHA256SUMS.txt` and installs nothing if it doesn't match. Release binaries also carry signed GitHub build provenance, and each release includes a CycloneDX SBOM (`nullwire-sbom.cdx.json`).
 
 <details open>
 <summary><b>With Node.js (no install step): <code>npx</code></b></summary>
@@ -98,15 +98,16 @@ Both packages are generated from the templates in [`packaging/`](packaging/READM
 
 | Platform | File |
 |---|---|
-| Linux x86-64 | `nullwire-linux-amd64` |
-| Linux ARM64 (Raspberry Pi, Termux) | `nullwire-linux-arm64` |
-| macOS Intel | `nullwire-darwin-amd64` |
-| macOS Apple Silicon | `nullwire-darwin-arm64` |
-| Windows x86-64 | `nullwire-windows-amd64.exe` |
+| Linux x86-64 / ARM64 (Raspberry Pi 4+, Termux) | `nullwire-linux-amd64` / `nullwire-linux-arm64` |
+| Linux ARMv7 (older Raspberry Pi) / RISC-V 64 | `nullwire-linux-armv7` / `nullwire-linux-riscv64` |
+| macOS Intel / Apple Silicon | `nullwire-darwin-amd64` / `nullwire-darwin-arm64` |
+| Windows x86-64 / ARM64 | `nullwire-windows-amd64.exe` / `nullwire-windows-arm64.exe` |
+| FreeBSD x86-64 | `nullwire-freebsd-amd64` |
 
 ```bash
 chmod +x nullwire-linux-amd64
-sha256sum -c SHA256SUMS.txt --ignore-missing   # verify the download
+sha256sum -c SHA256SUMS.txt --ignore-missing   # verify the download (macOS: shasum -a 256 -c)
+gh attestation verify nullwire-linux-amd64 --repo VoxNode-ux/nullwire-mcp   # optional: verify signed build provenance
 ```
 </details>
 
@@ -491,6 +492,7 @@ NullWire is a *diagnostic* tool. Be clear-eyed about what it does and does not p
 - Live traffic is never rewritten, so what you debug is what runs.
 
 **What it does not do**
+- **Release binaries carry signed build provenance, not OS-vendor code-signing certificates.** Verify authenticity with `SHA256SUMS.txt` and `gh attestation verify`. Because they are not signed with an Apple Developer ID or Microsoft Authenticode certificate, on macOS you may need `xattr -d com.apple.quarantine ./nullwire-darwin-arm64`.
 - **It is not a TLS interceptor.** `CONNECT` tunnels show only the destination and byte counts. Use the reverse gateway when you need HTTPS content.
 - **Redaction is pattern and heuristic based.** A secret in a shape nobody anticipated, and low in randomness, can slip through. The randomness detector can also redact a harmless long identifier. Add your own patterns in the config for secrets you know about.
 - **Brotli and Zstd bodies are never decoded** (the standard library can't, and pulling in a package would break the zero-dependency rule). They are refused (requests) or flagged (responses).
@@ -502,6 +504,24 @@ If you find a secret NullWire missed, please open an issue with a *fake* sample 
 
 ---
 
+## ✅ Tested on
+
+| Platform | Status | What was run |
+|---|---|---|
+| Linux x86-64 (Ubuntu 24.04) | ✅ verified | `go vet`, unit tests with `-race`, smoke test, end-to-end redaction |
+| macOS 15 (Apple Silicon) | ✅ verified | smoke test, silent notifications, end-to-end redaction |
+| macOS 15 (Intel) | ✅ verified | smoke test, silent notifications, end-to-end redaction |
+| Windows x86-64 | ✅ verified | smoke test, silent notifications, end-to-end redaction |
+| Windows ARM64 | ✅ verified | smoke test, silent notifications, end-to-end redaction |
+| FreeBSD amd64 (VM) | ✅ verified | smoke test, silent notifications, end-to-end redaction |
+| Linux ARMv7 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
+| Linux RISC-V 64 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
+| Linux ARM64 (Android / Termux) | ✅ verified on device | live upstream proxy, redaction tags, `export_sanitized_curl`, reverse gateway, guards (needs `termux-chroot`) |
+
+🟡 *emulated* means run under QEMU, not on real hardware. Details are in [docs/test-results.md](docs/test-results.md).
+
+---
+
 ## 🧪 Development
 
 ```bash
@@ -510,8 +530,9 @@ go test -race ./...
 ```
 
 - **Zero dependencies:** `go.mod` has no `require` lines, and CI keeps it that way.
+- **Release transparency:** every release is built with Go 1.26 and includes `SHA256SUMS.txt`, a CycloneDX SBOM (`nullwire-sbom.cdx.json`) and a signed build provenance attestation, which you can verify with `gh attestation verify`. The same proof is attached to each release as `nullwire-provenance.intoto.jsonl`. The `go vet` and `go test -race` logs of every CI run are saved as a `test-logs` artifact for 30 days. Pushes to `main` update a rolling `latest` pre-release; numbered tags produce stable releases. Pull requests never publish anything.
 - **Fuzzing:** the scrubber, the IPv6 and vendor-key matchers and the WebSocket frame reader have fuzz targets. They check that no secret survives scrubbing, that results don't depend on how input is chunked, and that nothing panics.
-- **CI:** checks the shell and Node installers for syntax errors, builds for Linux, macOS and Windows, runs the race detector, and publishes a multi-arch Docker image. Security checks run `govulncheck` and the fuzz targets. GitHub Actions are pinned to full commit hashes.
+- **CI:** checks the shell and Node installers for syntax errors, runs `go vet` and the race detector, cross-compiles static binaries for all 9 platforms (Linux x86-64, ARM64, ARMv7 and RISC-V 64; macOS Intel and Apple Silicon; Windows x86-64 and ARM64; FreeBSD x86-64), and publishes a multi-arch Docker image (amd64 and arm64). `smoke.yml` and `smoke-extra.yml` run on demand (Actions → Run workflow): end-to-end redaction tests on Ubuntu, macOS (Apple Silicon and Intel), Windows (x86-64 and ARM64), a FreeBSD VM, and QEMU-emulated Linux ARMv7 and RISC-V 64. Security checks run `govulncheck` and the fuzz targets. GitHub Actions are pinned to full commit hashes.
 
 <details>
 <summary><b>Project layout</b></summary>
