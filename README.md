@@ -37,7 +37,7 @@ NullWire sits between your app and the network. It records what passes through, 
 | | |
 |---|---|
 | 🪶 **Zero dependencies** | Go standard library only. One static binary, nothing to install. |
-| 🧠 **RAM only** | The last 50 flows live in memory. The program never writes a file, and a stop signal wipes the buffer. |
+| 🧠 **RAM only** | The last 50 flows live in memory. The server never writes a file, and a stop signal wipes the buffer. (`install` edits your MCP client configs, but only when you run it.) |
 | 🔒 **Loopback only** | The proxy binds to `127.0.0.1`. A DNS-rebinding guard answers only loopback `Host` headers. |
 | 🧽 **Layered redaction** | Private keys, JSON/XML/query secrets, JWTs, 50+ vendor key formats, IPs, secrets hiding in base64, and a randomness detector for keys nobody has seen before. |
 | 🛡️ **Fail-closed shields** | Bodies that can't be inspected are refused or flagged, never silently passed to the model. |
@@ -50,10 +50,51 @@ NullWire sits between your app and the network. It records what passes through, 
 
 ## 🚀 Quick start
 
-### 1. Get the binary
+### 1. Install it
+
+Pick whichever fits your machine. Every method checks the download against the release's `SHA256SUMS.txt` and installs nothing if it doesn't match.
 
 <details open>
-<summary><b>Download a release</b></summary>
+<summary><b>With Node.js (no install step): <code>npx</code></b></summary>
+
+```bash
+npx -y nullwire-mcp install --client all
+```
+Nothing to download by hand: the launcher fetches and verifies the binary on first run and keeps it in a cache folder. Your MCP clients are then set to run `npx -y nullwire-mcp`.
+</details>
+
+<details>
+<summary><b>macOS, Linux and Termux: install script</b></summary>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/main/scripts/install.sh | sh -s -- --setup
+```
+Installs to `~/.local/bin` (or `$PREFIX/bin` on Termux). `--setup` also registers NullWire with your MCP clients. Drop it to install only. `--uninstall` removes everything again.
+</details>
+
+<details>
+<summary><b>Windows: install script</b></summary>
+
+```powershell
+irm https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/main/scripts/install.ps1 | iex
+nullwire-mcp install --client all
+```
+Installs to `%LOCALAPPDATA%\Programs\nullwire-mcp` and adds it to your user PATH. To pass options, run it as `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/main/scripts/install.ps1))) -Setup`.
+</details>
+
+<details>
+<summary><b>Homebrew and Scoop</b></summary>
+
+```bash
+brew install VoxNode-ux/nullwire/nullwire-mcp                                   # macOS, Linux
+scoop bucket add nullwire https://github.com/VoxNode-ux/scoop-nullwire           # Windows
+scoop install nullwire-mcp
+```
+Both packages are generated from the templates in [`packaging/`](packaging/README.md).
+</details>
+
+<details>
+<summary><b>Download a release by hand</b></summary>
 
 | Platform | File |
 |---|---|
@@ -90,7 +131,16 @@ docker run -i --rm ghcr.io/voxnode-ux/nullwire-mcp
 The server speaks MCP over stdio, so run it with `-i`. The proxy listens on the container's own loopback by design, so a published port (`-p`) cannot reach it. On Linux, add `--network host` to use it from the host's `127.0.0.1`.
 </details>
 
-### 2. Add it to your MCP client
+### 2. Add it to your MCP clients
+
+One command registers NullWire with every supported client it finds on your machine:
+
+```bash
+nullwire-mcp install --client all --dry-run   # look first: nothing is written
+nullwire-mcp install --client all             # then do it, and restart the client
+```
+
+It covers Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, Cline, Roo Code, Gemini CLI and Codex CLI. See [Connect your MCP clients](#-connect-your-mcp-clients-install) for details, or add it by hand:
 
 ```bash
 # Claude Code
@@ -316,6 +366,53 @@ Patterns use Go's RE2 syntax, which runs in linear time, so a bad pattern cannot
 
 ---
 
+## 🔌 Connect your MCP clients: `install`
+
+`install` writes NullWire into your MCP clients' config files, and removes it again, so you never have to hunt for the right file or JSON key.
+
+```bash
+nullwire-mcp install --list                          # supported clients and whether they are here
+nullwire-mcp install --client all --dry-run          # preview every change
+nullwire-mcp install --client cursor,vscode          # just these two
+nullwire-mcp install --client cursor -- -port 8081   # save server flags with the entry (after --)
+nullwire-mcp install --uninstall --client all        # take it back out
+nullwire-mcp install --print                         # a snippet to paste into clients that aren't supported
+```
+
+| Client | `--client` | What it edits |
+|---|---|---|
+| Claude Desktop | `claude-desktop` | `claude_desktop_config.json` in your user config folder |
+| Claude Code | `claude-code` | runs `claude mcp add --scope user` (needs the `claude` command) |
+| Cursor | `cursor` | `~/.cursor/mcp.json` |
+| Windsurf | `windsurf` | `~/.codeium/windsurf/mcp_config.json` |
+| VS Code (Copilot) | `vscode` | your user `mcp.json` |
+| Cline | `cline` | `cline_mcp_settings.json` |
+| Roo Code | `roo` | `mcp_settings.json` |
+| Gemini CLI | `gemini` | `~/.gemini/settings.json` |
+| Codex CLI | `codex` | `~/.codex/config.toml` (`[mcp_servers.nullwire]`) |
+
+Other clients (Zed, Continue, JetBrains and more) are not edited. Use `--print` and paste the snippet where that client keeps its MCP servers.
+
+**How it stays safe**
+
+- With `--client all` it only touches clients it finds on your machine. Name a client explicitly to create its config.
+- The first time it changes a file it keeps a copy next to it as `<file>.nullwire-bak`. That copy is never overwritten, so it always holds the original.
+- Files are written through a temporary file and renamed, and symlinked dotfiles stay symlinks.
+- Your other servers, settings, numbers and extra fields on the NullWire entry (such as `env`) are kept. JSON keys may be re-ordered.
+- A config it can't parse as plain JSON (for example one with comments) is left alone, with a clear message.
+- Running it twice changes nothing the second time.
+
+| Option | Meaning |
+|---|---|
+| `--client` | Comma-separated client ids, or `all` (default). |
+| `--name` | Name to register the server under (default `nullwire`). |
+| `--binary PATH` | Register this binary instead of the one that is running. |
+| `--npx` | Register `npx -y nullwire-mcp` (used automatically when you started it through npx). |
+| `--dry-run`, `--uninstall`, `--list`, `--print` | As described above. |
+| `-- …` | Everything after `--` is saved as the server's own flags. |
+
+---
+
 ## 🔎 Scan your machine: `scan` and `protect`
 
 Secrets leak long before traffic does: a token in an MCP config, a password in `.env`. NullWire can find them. Scanning **never writes to disk and never prints a secret**: findings are shown already scrubbed, and shell history text is never shown at all.
@@ -353,6 +450,7 @@ It accepts the server options (`--port`, `--target`, `--cacert`, `--dns`, `--sec
 nullwire-mcp [flags]                 run the MCP server and the proxy
 nullwire-mcp scan [options] [PATH…]  look for secrets in files
 nullwire-mcp protect [options]       scan, then run the server
+nullwire-mcp install [options]       register NullWire with your MCP clients
 ```
 
 | Flag | Default | Meaning |
@@ -387,7 +485,7 @@ sleep infinity | ./nullwire-linux-arm64   # keep stdin open; use a second sessio
 NullWire is a *diagnostic* tool. Be clear-eyed about what it does and does not promise.
 
 **What it guarantees**
-- Nothing is written to disk by the server, and a stop signal wipes memory.
+- Nothing is written to disk by the server, and a stop signal wipes memory. The `install` command edits MCP client configs only when you run it, and backs each file up first.
 - The proxy is reachable only from your own machine.
 - The model never sees the live traffic, only the scrubbed copy.
 - Live traffic is never rewritten, so what you debug is what runs.
@@ -413,7 +511,7 @@ go test -race ./...
 
 - **Zero dependencies:** `go.mod` has no `require` lines, and CI keeps it that way.
 - **Fuzzing:** the scrubber, the IPv6 and vendor-key matchers and the WebSocket frame reader have fuzz targets. They check that no secret survives scrubbing, that results don't depend on how input is chunked, and that nothing panics.
-- **CI:** builds for Linux, macOS and Windows, runs the race detector, and publishes a multi-arch Docker image. Security checks run `govulncheck` and the fuzz targets. GitHub Actions are pinned to full commit hashes.
+- **CI:** checks the shell and Node installers for syntax errors, builds for Linux, macOS and Windows, runs the race detector, and publishes a multi-arch Docker image. Security checks run `govulncheck` and the fuzz targets. GitHub Actions are pinned to full commit hashes.
 
 <details>
 <summary><b>Project layout</b></summary>
@@ -427,6 +525,10 @@ go test -race ./...
 | `vendors.go` | Vendor prefix tiers |
 | `scan.go`, `env_scan.go`, `toml_scan.go`, `yaml_scan.go`, `zip_scan.go`, `history_scan.go` | The `scan` command |
 | `protect.go`, `protect_helpers.go` | The `protect` command |
+| `install.go` | The `install` command (client config editing) |
+| `scripts/install.sh`, `scripts/install.ps1` | Installers for macOS, Linux, Termux and Windows |
+| `npm/` | The `npx` launcher (no dependencies, no install script) |
+| `packaging/` | Homebrew and Scoop templates and `render.sh` |
 | `feature_test.go` | Tests for the features above |
 
 </details>
@@ -442,6 +544,7 @@ go test -race ./...
 | **`403 reverse gateway only answers loopback Host headers`** | Reach the gateway as `127.0.0.1`, `localhost` or `[::1]` on the proxy port. |
 | **`certificate signed by unknown authority` (Termux or a corporate network)** | Add the CA with `-cacert`. |
 | **A harmless value shows as `[REDACTED_TOKEN#…]`** | The randomness detector matched a long random-looking identifier. Add its URL to `ignore_url_substrings` or tell us the shape. |
+| **`install` says a config is "not plain JSON"** | The file has comments or a syntax error, so it was left untouched. Fix it, or use `install --print` and paste the entry yourself. |
 | **`address already in use`** | Another NullWire (or program) uses the port. Pick another with `-port`. |
 | **The assistant sees no flows** | Check the status bar's `RAM Ring: n/50`. If it stays at 0, your traffic isn't going through the proxy. |
 
