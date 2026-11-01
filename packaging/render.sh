@@ -90,7 +90,7 @@ render() {
   fi
 }
 
-render "$here/nullwire-mcp.rb.tmpl"   "$out/nullwire-mcp.rb"
-render "$here/nullwire-mcp.json.tmpl" "$out/nullwire-mcp.json"
+render "$here/homebrew/nullwire-mcp.rb.tmpl"   "$out/nullwire-mcp.rb"
+render "$here/scoop/nullwire-mcp.json.tmpl" "$out/nullwire-mcp.json"
 
 printf 'Rendered %s for %s:\n  %s\n  %s\n' "$version" "$tag" "$out/nullwire-mcp.rb" "$out/nullwire-mcp.json"
