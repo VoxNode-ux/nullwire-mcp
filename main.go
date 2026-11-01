@@ -441,7 +441,7 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 			return g[1] + s.tag("TOKEN", g[2])
 		})
 	}
-	if strings.Contains(in, "</") && containsAny(lower, xmlSecretHints) {
+	if strings.Contains(in, "<") && containsAny(lower, xmlSecretHints) {
 		out = s.scrubXMLSecrets(out, &count)
 	}
 	if preUserInfo {

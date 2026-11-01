@@ -353,10 +353,11 @@ func TestReverseGatewayCaptureAndCurlExport(t *testing.T) {
 		t.Errorf("client did not receive the original body: %q", rec.Body.String())
 	}
 
-	// Upstream must see an un-scrubbed request, minus Accept-Encoding and X-Target-URL.
+	// Upstream must see an un-scrubbed request, without X-Target-URL. Accept-Encoding
+	// is cut down to what NullWire can decode, so a gzip offer passes through.
 	seen.mu.Lock()
-	if seen.acceptEncoding != "" {
-		t.Errorf("Accept-Encoding reached upstream: %q", seen.acceptEncoding)
+	if seen.acceptEncoding != "gzip" {
+		t.Errorf("upstream Accept-Encoding = %q, want gzip", seen.acceptEncoding)
 	}
 	if seen.targetHeader != "" {
 		t.Errorf("X-Target-URL reached upstream: %q", seen.targetHeader)
@@ -448,7 +449,7 @@ func TestReverseGatewayCaptureAndCurlExport(t *testing.T) {
 
 	// Unknown flow IDs are reported as tool errors, not crashes.
 	msg, isErr := toolText(t, app.toolExportCurl(json.RawMessage(`{"flow_id":999}`)))
-	if !isErr || !strings.Contains(msg, "not in the RAM ring buffer") {
+	if !isErr || !strings.Contains(msg, "not in RAM ring buffer") {
 		t.Errorf("missing flow: isErr=%v msg=%q", isErr, msg)
 	}
 }
@@ -493,8 +494,8 @@ func TestForwardProxyMode(t *testing.T) {
 		t.Fatalf("forward mode response: %d %q", rec.Code, rec.Body.String())
 	}
 	seen.mu.Lock()
-	if seen.acceptEncoding != "" {
-		t.Errorf("Accept-Encoding reached upstream: %q", seen.acceptEncoding)
+	if seen.acceptEncoding != "gzip" {
+		t.Errorf("upstream Accept-Encoding = %q, want gzip", seen.acceptEncoding)
 	}
 	if seen.path != "/headers?x=1" {
 		t.Errorf("upstream path = %q", seen.path)

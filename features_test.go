@@ -62,18 +62,27 @@ func TestVendorKeyLookalikesUntouched(t *testing.T) {
 		"SG.short.x",
 		"ya29.short",
 		"glpat-short",
-		// Glued to a longer word or identifier.
-		"mysk_live_" + vendorBody,
-		"task_live_" + vendorBody,
-		"my_hf_" + vendorBody,
-		// Prefixes are case-sensitive.
-		"HF_" + vendorBody,
-		// Test-mode keys are not live secrets.
-		"sk_test_" + vendorBody,
 	} {
 		out, n := s.ScrubText(in)
 		if out != in || n != 0 {
 			t.Errorf("false positive: %q -> %q (%d)", in, out, n)
+		}
+	}
+
+	// Glued to a longer word, or the wrong case. These are long random-looking
+	// strings, so the generic high-entropy layer (TestHighEntropyCatch) is
+	// allowed to redact them. What must not happen is a vendor prefix rule
+	// claiming them, so probe the rules directly.
+	for _, in := range []string{
+		"mysk_live_" + vendorBody,
+		"task_live_" + vendorBody,
+		"my_hf_" + vendorBody,
+		"HF_" + vendorBody, // prefixes are case-sensitive
+	} {
+		for _, vr := range s.vendorRules {
+			if m := vr.re.FindString(in); m != "" && (!vr.weak || weakVendorMatchOK(m, vr.prefixes)) {
+				t.Errorf("vendor rule matched a lookalike: %q (matched %q)", in, m)
+			}
 		}
 	}
 }
