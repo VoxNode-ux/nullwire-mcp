@@ -2,527 +2,509 @@
 
 # ⚡ NullWire-MCP
 
-### Your AI agent can debug live HTTP traffic.<br>It never sees a single secret.
+### See the traffic. Never the secrets.
 
-Every token, cookie and IP is swapped for a **salted tag that stays the same for the whole session**, so the agent can still tell<br>
-*"same token reused"* from *"token rotated"*: the question behind most auth bugs.
+**A zero-dependency, RAM-only network inspector that lets your AI assistant debug HTTP, HTTPS and WebSocket traffic, with every secret scrubbed before the model ever sees it.**
 
-[![CI](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml/badge.svg?branch=main&event=push)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml)
-[![Release](https://img.shields.io/github/v/release/VoxNode-ux/nullwire-mcp?color=blue)](https://github.com/VoxNode-ux/nullwire-mcp/releases)
-![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)
-![Dependencies: 0](https://img.shields.io/badge/dependencies-0%20(pure%20Go%20stdlib)-brightgreen)
-![Disk writes: 0 bytes](https://img.shields.io/badge/disk%20writes-0%20bytes%20(RAM--only)-brightgreen)
-![MCP](https://img.shields.io/badge/MCP-2026--07--28%20%7C%202025--11--25%20%7C%202024--11--05-blue)
-[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![CI and Release](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml)
+[![Security checks](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/security.yml/badge.svg)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/security.yml)
+![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
+![Dependencies: none](https://img.shields.io/badge/dependencies-none-2ea44f)
+![Disk writes: 0](https://img.shields.io/badge/disk%20writes-0-2ea44f)
+![MCP](https://img.shields.io/badge/MCP-stdio-7c3aed)
 
-[**Quick start**](#quick-start) ·
-[**How it works**](#how-it-works) ·
-[**Install**](#install) ·
-[**Tools**](#tools) ·
-[**Security**](#security) ·
-[**Limitations**](#limitations) ·
-[**FAQ**](#faq)
+[Quick start](#-quick-start) · [How it works](#-how-it-works) · [What gets redacted](#-what-gets-redacted) · [MCP tools](#-mcp-tools) · [Configuration](#-configuration) · [CLI reference](#-cli-reference) · [Security model](#-security-model-and-honest-limits)
 
 </div>
 
-<!-- Tip: record a 10-15s terminal GIF (curl with a secret, then the agent's view) and place it here:
-<p align="center"><img src="docs/demo.gif" width="760" alt="NullWire-MCP demo"></p> -->
-
 ---
 
-## 👀 See the difference
+## 🧠 Why NullWire exists
+
+Your AI assistant is great at debugging an API call, until the request it needs to read carries an `Authorization` header, a session cookie, a database URL or a customer's email. Pasting raw traffic into a chat means pasting your secrets with it.
+
+NullWire sits between your app and the network. It records what passes through, **scrubs every secret out of the recorded copy**, and hands that clean copy to your assistant through the [Model Context Protocol](https://modelcontextprotocol.io). Your app keeps working exactly as before, because the live traffic is never touched.
 
 ```text
- You send        Authorization: Bearer sk-live-51Hk3...
- Your AI sees    Authorization: Bearer [REDACTED_TOKEN#a1b2c3]
-
- Request #1      Bearer [REDACTED_TOKEN#a1b2c3]
- Request #2      Bearer [REDACTED_TOKEN#a1b2c3]   ◄── same token, reused ✔
- Request #3      Bearer [REDACTED_TOKEN#7f09de]   ◄── different token, it rotated ✔
+  your app ──► NullWire (127.0.0.1) ──► the real server
+                    │
+                    ├─ forwards every byte, unmodified
+                    └─ keeps a scrubbed copy in RAM ──► your AI assistant (MCP)
 ```
 
-Blind `[REDACTED]` protects you but makes the AI useless for auth bugs. NullWire keeps the *identity* of each secret and throws away the *value*.
+## ✨ At a glance
 
-| 📦 **0** dependencies | 💾 **0** bytes written to disk | 🔍 **1** source file to audit | 🖥️ **9** release targets |
-|:---:|:---:|:---:|:---:|
-| pure Go stdlib | RAM-only 50-flow ring | `main.go` | Linux · macOS · Windows · FreeBSD |
+| | |
+|---|---|
+| 🪶 **Zero dependencies** | Go standard library only. One static binary, nothing to install. |
+| 🧠 **RAM only** | The last 50 flows live in memory. The server never writes a file, and a stop signal wipes the buffer. (`install` edits your MCP client configs, but only when you run it.) |
+| 🔒 **Loopback only** | The proxy binds to `127.0.0.1`. A DNS-rebinding guard answers only loopback `Host` headers. |
+| 🧽 **Layered redaction** | Private keys, JSON/XML/query secrets, JWTs, 50+ vendor key formats, IPs, secrets hiding in base64, and a randomness detector for keys nobody has seen before. |
+| 🛡️ **Fail-closed shields** | Bodies that can't be inspected are refused or flagged, never silently passed to the model. |
+| 🔌 **HTTP, HTTPS and WebSocket** | Plain proxying, blind `CONNECT` tunnels, a reverse gateway for full HTTPS visibility, and WebSocket text capture in both directions. |
+| 🔁 **Safe replay** | Export any captured request as a `curl` command with secrets swapped for environment variables. |
+| 🔎 **Secret scanner** | `scan` and `protect` look for secrets in your MCP configs, `.env`, TOML, YAML and ZIP files before they leak. |
+| 📱 **Runs anywhere** | Linux, macOS, Windows, Docker and Termux on Android. |
 
 ---
 
-<a id="quick-start"></a>
+## 🚀 Quick start
 
-## ⚡ Quick start in 60 seconds
+### 1. Install it
+
+Pick whichever fits your machine. Every method checks the download against the release's `SHA256SUMS.txt` and installs nothing if it doesn't match. Release binaries also carry signed GitHub build provenance, and each release includes a CycloneDX SBOM (`nullwire-sbom.cdx.json`).
+
+<details open>
+<summary><b>With Node.js (no install step): <code>npx</code></b></summary>
 
 ```bash
-# 1. install (Go 1.26+), or grab a prebuilt binary from Releases
-go install github.com/VoxNode-ux/nullwire-mcp@latest
-
-# 2. register it with your AI client (Claude Code shown; Cursor/Windsurf/Desktop configs below)
-claude mcp add nullwire -- nullwire-mcp -port 8080 -target https://api.example.com
-
-# 3. point your app at the proxy instead of the real API
-curl http://127.0.0.1:8080/v1/orders -H "Authorization: Bearer $MY_TOKEN"
+npx -y nullwire-mcp install --client all
 ```
-
-Then just ask your agent:
-
-> *"Why is `/v1/orders` returning 401? Compare the auth headers of the last 5 requests."*
-> *"Did request 3 and 4 use the same token, or did it rotate?"*
-> *"Give me a curl to replay the failing call."*
-
-Your app always gets the **real, untouched response**. Only the agent's view is scrubbed.
-
----
-
-## 🔥 Why this exists
-
-Point an AI agent at your network traffic and a typical capture proxy hands it **everything**: live bearer tokens, session cookies, internal IPs. All of it lands in a cloud LLM context window, and often in a capture file left on disk.
-
-Blind `[REDACTED]` stops the leak but kills the debugging. NullWire-MCP redacts every secret **in RAM** and swaps it for a **deterministic, per-process salted tag**: the agent keeps the *identity* of each secret and never sees the *value*.
-
-> The tag is `SHA-256(nonce ‖ secret)[:6]`. The `nonce` is 32 random bytes drawn from `crypto/rand` at startup, kept **only in RAM**, and gone when the process exits. See the [security deep-dive](#security) for why that matters.
-
----
-
-<a id="how-it-works"></a>
-
-## 🧭 How it works
-
-```mermaid
-flowchart LR
-    APP["Your app / curl / SDK"] -->|"plain HTTP to 127.0.0.1"| PROXY["NullWire proxy<br/>loopback only"]
-    PROXY -->|"original request, untouched"| UP["Upstream API<br/>http or https"]
-    UP -->|"original response"| PROXY
-    PROXY -->|"original response, untouched"| APP
-    PROXY -.->|"async copy"| DLP["DLP scrubber<br/>regex, then SHA-256 tag"]
-    DLP --> RING[("RAM ring<br/>50 flows")]
-    RING -->|"MCP over stdio<br/>scrubbed data only"| AGENT["AI agent<br/>Claude · Cursor · Windsurf"]
-```
-
-Two paths, one rule: **the real bytes go to your app, only a scrubbed copy goes to the AI.** Nothing touches the disk.
-
-<details>
-<summary><b>Diagram not rendering (mobile, Mermaid disabled)? Open the ASCII version</b></summary>
-
-1. Your app or CLI sends plain HTTP traffic to the local loopback proxy at 127.0.0.1:8080.
-2. The proxy forwards the original bytes untouched to the upstream API while an async copy is scrubbed in RAM.
-3. Your AI agent inspects the sanitized flows over JSON-RPC stdio without ever seeing live tokens or secrets.
-
-```text
-
-╔══ [1] LOCAL APP / CLI ══════════════════════════════════════╗
-║ curl · SDK · browser · your service                         ║▒
-║ speaks plain HTTP to 127.0.0.1:8080                         ║▒
-╚═════════════════════════════════════════════════════════════╝▒
- ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-                               │
-                               ▼  plain HTTP, loopback only
-╔══ [2] NULLWIRE PROXY  127.0.0.1:8080 ═══════════════════════╗
-║ bound with net.Listen(tcp4) + IsLoopback() check            ║▒
-║ forward mode : absolute URL  (curl -x)                      ║▒
-║ reverse mode : -target flag / X-Target-URL header           ║▒
-║ guards : DNS-rebind 403 · self-loop 508 · CONNECT 501       ║▒
-╚═════════════════════════════════════════════════════════════╝▒
- ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-                               │
-                               ▼  io.TeeReader split
-               ┌───────────────┴────────────────┐
-               ▼                                ▼
-╔══ [3a] ROUNDTRIP ══════════╗   ╔══ [3b] DLP SCRUBBER ═══════╗
-║ http.Transport (isolated)  ║▒  ║ async copy, capped at 64KB ║▒
-║ Accept-Encoding stripped   ║▒  ║ regex scrub, THEN truncate ║▒
-║ Host = upstream host       ║▒  ║ SHA-256(nonce|secret)[:6]  ║▒
-║ bytes forwarded untouched  ║▒  ║ 32-byte crypto/rand nonce  ║▒
-╚════════════════════════════╝▒  ╚════════════════════════════╝▒
- ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-               │                                │
-               ▼                                ▼
-┌── UPSTREAM API ────────────┐   ╔══ [4] RAM RING ════════════╗
-│ http:// or https://        │▒  ║ 50 slots · sync.RWMutex    ║▒
-│ TLS handled by Go, no MITM │▒  ║ req 8KB / resp 16KB max    ║▒
-└────────────────────────────┘▒  ║ newest-first reads         ║▒
- ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒  ║ disk writes: none          ║▒
-               │                 ╚════════════════════════════╝▒
-◄──┘ original response            ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-    returns to the app                          │
-                                                ▼
-╔══ [5] JSON-RPC 2.0 MCP (2026-07-28 + legacy) ═══════════════╗
-║ initialize · discover · ping · tools/list · call            ║▒
-║ inspect_traffic · export_sanitized_curl · clear_ram_buffer  ║▒
-║ notifications → zero bytes written                          ║▒
-╚═════════════════════════════════════════════════════════════╝▒
- ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-               │                                │
-               ▼                                ▼
-╔══ STDOUT ▓▓▓ ══════════════╗   ┌── STDERR ░░░ ──────────────┐
-║ one compact JSON line      ║▒  │ ANSI status bar,           │▒
-║ per frame, ends in \n      ║▒  │ banners, errors            │▒
-║ NOTHING else, ever         ║▒  │ (human telemetry)          │▒
-╚════════════════════════════╝▒  └────────────────────────────┘▒
- ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-               │                                │
-               ▼                                ▼
-╔══ AI AGENT (MCP) ══════════╗   ┌── HUMAN ───────────────────┐
-║ Claude Code · Desktop      ║▒  │ you, in a terminal         │▒
-║ Cursor · Windsurf          ║▒  └────────────────────────────┘▒
-╚════════════════════════════╝▒   ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
- ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-```
-
-**Your app always gets the real, untouched response.** Only the AI agent's view is scrubbed.
-
-The live telemetry bar on `stderr` (redrawn in place with `\r\033[K`):
-
-```text
-⚡ [NullWire-MCP] Proxy 127.0.0.1:8080 | RAM Ring: 14/50 | Scrubbed: 9 Tokens, 4 Cookies, 6 IPs | Disk: 0B
-```
-
+Nothing to download by hand: the launcher fetches and verifies the binary on first run and keeps it in a cache folder. Your MCP clients are then set to run `npx -y nullwire-mcp`.
 </details>
 
-## 📊 NullWire-MCP vs. traditional MITM MCP wrappers
-
-| | **⚡ NullWire-MCP** | Typical MITM-based MCP wrapper |
-|---|---|---|
-| **Third-party dependencies** | **0** (Go standard library only; `go.mod` has no `require`) | Dozens of transitive Python / Node / JVM packages |
-| **Disk footprint** | **0 B**, RAM-only 50-slot ring; the code contains no file I/O | Flow files / SQLite databases on disk |
-| **Secret redaction** | **Salted SHA-256 correlation tags**, so reuse is provable and the secret is unseen | Often none, or blind `[REDACTED]` that destroys correlation |
-| **Startup** | Native static binary: no interpreter, no VM, no package resolution | Interpreter / VM cold start |
-| **MCP protocol** | **2026-07-28 stateless + 2025-11-25 / 2024-11-05 legacy** | Varies by tool |
-| **HTTPS upstreams** | Reverse gateway: no root CA, no keychain changes | Install a root CA and intercept TLS |
-| **Supply chain to audit** | One `main.go` | The whole dependency tree |
-
-<sub>The right-hand column describes the general class of tools that capture traffic with a MITM proxy and hand it to an LLM. It is not a claim about any specific product. We have not published startup benchmarks; the startup row is architectural.</sub>
-
----
-
-<a id="install"></a>
-
-## 🚀 30-second install
-
-**Option A: `go install`** (Go 1.26+)
+<details>
+<summary><b>macOS, Linux and Termux: install script</b></summary>
 
 ```bash
-go install github.com/VoxNode-ux/nullwire-mcp@latest
+curl -fsSL https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/main/scripts/install.sh | sh -s -- --setup
 ```
+Installs to `~/.local/bin` (or `$PREFIX/bin` on Termux). `--setup` also registers NullWire with your MCP clients. Drop it to install only. `--uninstall` removes everything again.
+</details>
 
-**Option B: prebuilt static binary**, verified against `SHA256SUMS.txt` and signed GitHub build provenance from [GitHub Releases](https://github.com/VoxNode-ux/nullwire-mcp/releases) (each release also includes a CycloneDX SBOM `nullwire-sbom.cdx.json`):
+<details>
+<summary><b>Windows: install script</b></summary>
+
+```powershell
+irm https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/main/scripts/install.ps1 | iex
+nullwire-mcp install --client all
+```
+Installs to `%LOCALAPPDATA%\Programs\nullwire-mcp` and adds it to your user PATH. To pass options, run it as `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/main/scripts/install.ps1))) -Setup`.
+</details>
+
+<details>
+<summary><b>Homebrew and Scoop</b></summary>
+
+```bash
+brew install VoxNode-ux/nullwire/nullwire-mcp                                   # macOS, Linux
+scoop bucket add nullwire https://github.com/VoxNode-ux/scoop-nullwire           # Windows
+scoop install nullwire-mcp
+```
+Both packages are generated from the templates in [`packaging/`](packaging/README.md).
+</details>
+
+<details>
+<summary><b>Download a release by hand</b></summary>
 
 | Platform | File |
 |---|---|
-| Linux x86-64 / ARM64 | `nullwire-linux-amd64` / `nullwire-linux-arm64` |
-| Linux ARMv7 (Raspberry Pi etc.) / RISC-V 64 | `nullwire-linux-armv7` / `nullwire-linux-riscv64` |
+| Linux x86-64 / ARM64 (Raspberry Pi 4+, Termux) | `nullwire-linux-amd64` / `nullwire-linux-arm64` |
+| Linux ARMv7 (older Raspberry Pi) / RISC-V 64 | `nullwire-linux-armv7` / `nullwire-linux-riscv64` |
 | macOS Intel / Apple Silicon | `nullwire-darwin-amd64` / `nullwire-darwin-arm64` |
 | Windows x86-64 / ARM64 | `nullwire-windows-amd64.exe` / `nullwire-windows-arm64.exe` |
 | FreeBSD x86-64 | `nullwire-freebsd-amd64` |
 
 ```bash
-# Linux example (swap the file name for your platform)
-BASE=https://github.com/VoxNode-ux/nullwire-mcp/releases/latest/download
-curl -LO "$BASE/nullwire-linux-amd64"
-curl -LO "$BASE/SHA256SUMS.txt"
-grep ' nullwire-linux-amd64$' SHA256SUMS.txt | sha256sum -c -     # macOS: shasum -a 256 -c -
-gh attestation verify nullwire-linux-amd64 --repo VoxNode-ux/nullwire-mcp  # optional: verify signed build provenance
 chmod +x nullwire-linux-amd64
-sudo mv nullwire-linux-amd64 /usr/local/bin/nullwire-mcp
+sha256sum -c SHA256SUMS.txt --ignore-missing   # verify the download (macOS: shasum -a 256 -c)
+gh attestation verify nullwire-linux-amd64 --repo VoxNode-ux/nullwire-mcp   # optional: verify signed build provenance
 ```
+</details>
 
-```powershell
-# Windows (PowerShell)
-Get-FileHash .\nullwire-windows-amd64.exe -Algorithm SHA256   # compare with SHA256SUMS.txt
-```
-
-**Option C: build from source**
+<details>
+<summary><b>Build from source</b></summary>
 
 ```bash
+go install github.com/VoxNode-ux/nullwire-mcp@latest
+# or
 git clone https://github.com/VoxNode-ux/nullwire-mcp && cd nullwire-mcp
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
 ```
+Go 1.26 or newer. There is nothing to `go get`: the module has no dependencies.
+</details>
 
-### Flags
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `-port` | `8080` | Loopback port. The host is hard-coded to `127.0.0.1`; there is no way to bind elsewhere. `0` picks a free port. |
-| `-target` | *(none)* | Default upstream base URL for reverse-gateway mode, e.g. `https://api.example.com` |
-
-### Try it without an AI client
-
-The MCP side lives as long as stdin stays open, so for a quick demo feed it a request on a timer:
+<details>
+<summary><b>Docker</b></summary>
 
 ```bash
-( sleep 2
-  echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"inspect_traffic","arguments":{"limit":5}}}'
-  sleep 1 ) | nullwire-mcp -port 8080 &
-
-sleep 1
-curl -s -x http://127.0.0.1:8080 http://example.com \
-  -H 'Authorization: Bearer my_secret_token_123' \
-  -H 'Cookie: sid=my_secret_cookie' \
-  -H 'X-Forwarded-For: 198.51.100.1' > /dev/null
-wait
+docker run -i --rm ghcr.io/voxnode-ux/nullwire-mcp
 ```
+The server speaks MCP over stdio, so run it with `-i`. The proxy listens on the container's own loopback by design, so a published port (`-p`) cannot reach it. On Linux, add `--network host` to use it from the host's `127.0.0.1`.
+</details>
 
-You'll see the live status bar on stderr and, on stdout, a flow whose headers read `Bearer [REDACTED_TOKEN#…]`, `[REDACTED_COOKIE#…]` and `[REDACTED_IP#…]`.
+### 2. Add it to your MCP clients
 
-### Plug it into your AI client
-
-The client launches `nullwire-mcp` as a subprocess and talks JSON-RPC over stdio. Your app then sends its traffic to `127.0.0.1:8080`. (Config file locations change between client releases, so check your client's docs if a path below is out of date.)
-
-**Claude Code CLI**
+One command registers NullWire with every supported client it finds on your machine:
 
 ```bash
-claude mcp add nullwire -- nullwire-mcp -port 8080 -target https://api.example.com
+nullwire-mcp install --client all --dry-run   # look first: nothing is written
+nullwire-mcp install --client all             # then do it, and restart the client
 ```
 
-**Claude Desktop** (`claude_desktop_config.json`)
+It covers Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, Cline, Roo Code, Gemini CLI and Codex CLI. See [Connect your MCP clients](#-connect-your-mcp-clients-install) for details, or add it by hand:
 
-```json
+```bash
+# Claude Code
+claude mcp add nullwire -- /path/to/nullwire-mcp
+```
+
+```jsonc
+// Claude Desktop, Cursor, Windsurf, Cline and other JSON-configured clients
 {
   "mcpServers": {
     "nullwire": {
-      "command": "nullwire-mcp",
-      "args": ["-port", "8080", "-target", "https://api.example.com"]
+      "command": "/path/to/nullwire-mcp",
+      "args": ["-port", "8080"]
     }
   }
 }
 ```
 
-**Cursor** (`~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project)
+The client starts NullWire, and NullWire starts the proxy in the same process. A live status bar on stderr shows what is happening:
 
-```json
-{
-  "mcpServers": {
-    "nullwire": {
-      "command": "nullwire-mcp",
-      "args": ["-port", "8080", "-target", "https://api.example.com"]
-    }
-  }
-}
+```text
+⚡ [NullWire-MCP] Proxy 127.0.0.1:8080 | RAM Ring: 3/50 | Scrubbed: 7 Tokens, 2 Cookies, 1 IPs | Disk: 0B
 ```
 
-**Windsurf** (`~/.codeium/windsurf/mcp_config.json`)
-
-```json
-{
-  "mcpServers": {
-    "nullwire": {
-      "command": "nullwire-mcp",
-      "args": ["-port", "8080", "-target", "https://api.example.com"]
-    }
-  }
-}
-```
-
-Omit `-target` if you only use forward-proxy mode or the per-request `X-Target-URL` header.
-
-
-
----
-
-## 🔀 Two capture modes
-
-### Mode 1: Forward proxy (plain HTTP)
-
-Send a full URL through the proxy. The request is forwarded as-is and a scrubbed copy lands in the ring.
+### 3. Send some traffic through it
 
 ```bash
+# Plain HTTP through the proxy
 curl -x http://127.0.0.1:8080 http://httpbin.org/headers
 
-# or for any app that honours the standard variable
-HTTP_PROXY=http://127.0.0.1:8080 ./my-service
+# HTTPS through the proxy (a blind tunnel, see "How it works")
+curl -x http://127.0.0.1:8080 https://example.com
+
+# HTTPS with full request visibility: the reverse gateway
+nullwire-mcp -target https://api.example.com
+curl http://127.0.0.1:8080/v1/things -H "Authorization: Bearer sk-live-..."
 ```
 
-> `HTTPS_PROXY` makes clients send `CONNECT`, which is answered `501` by design. See [Honest scope](#limitations). Use Mode 2 for HTTPS.
+### 4. Ask your assistant
 
-<a id="mode-2"></a>
-
-### Mode 2: Reverse gateway (HTTPS upstreams, no MITM certificates)
-
-Talk plain HTTP to NullWire; NullWire speaks TLS to the real server using Go's normal certificate verification. Nothing to install in your trust store.
-
-```bash
-# Fixed upstream for the whole session
-nullwire-mcp -target https://api.github.com
-curl http://127.0.0.1:8080/users/octocat
-
-# Or choose the upstream per request (the header is removed before forwarding)
-curl -H 'X-Target-URL: https://httpbin.org' 'http://127.0.0.1:8080/anything?api_key=hunter2hunter2'
-```
-
-Point an SDK at it by changing only its base URL:
-
-```bash
-export OPENAI_BASE_URL=http://127.0.0.1:8080/v1   # with: nullwire-mcp -target https://api.openai.com
-```
-
-The upstream `Host` header is set to the target's host, so virtual hosting and TLS SNI behave normally.
-
+> *"Use `inspect_traffic` to show my last 5 requests and tell me why the third one returned 401."*
 
 ---
 
-<a id="tools"></a>
+## 🔭 How it works
 
-## 🧰 MCP tool reference
+```mermaid
+flowchart LR
+    A[Your app or curl] -->|HTTP_PROXY / base URL| P[NullWire proxy<br/>127.0.0.1:8080]
+    P -->|unmodified bytes| S[(Real server)]
+    S -->|unmodified bytes| P
+    P --> C[Capture copy]
+    C --> R[Redaction layers]
+    R --> B[(RAM ring<br/>50 flows)]
+    B -->|MCP over stdio| M[AI assistant]
+```
 
-All three tools return `{"resultType":"complete","content":[{"type":"text","text":"…"}],"isError":false}`. Tool-level problems (for example an unknown flow id) set `isError` to `true` instead of failing the RPC.
+The key idea: **the model reads a scrubbed copy, your app talks to the real server.** Nothing the proxy forwards is rewritten, so debugging never changes the behaviour you are debugging.
 
-### `inspect_traffic`
+### Four ways to capture traffic
 
-Recent scrubbed flows, newest first.
+| Mode | How you use it | What the assistant sees |
+|---|---|---|
+| **Forward proxy** | `HTTP_PROXY=http://127.0.0.1:8080` and `http://` URLs | Full request and response, scrubbed |
+| **HTTPS tunnel** | `HTTPS_PROXY=http://127.0.0.1:8080` (`CONNECT`) | Only the target `host:port`, timing and byte counts. The encrypted payload is never opened. |
+| **Reverse gateway** | Point your app's base URL at `http://127.0.0.1:8080` and start with `-target https://…` (or send an `X-Target-URL` header) | Full HTTPS request and response, scrubbed. NullWire makes the TLS connection to the real server. |
+| **WebSocket** | Any `Upgrade: websocket` request through either proxy mode | Text messages in both directions, scrubbed, as one flow recorded when the connection closes. Frames are forwarded unmodified. |
+
+> **Why no HTTPS interception?** Reading HTTPS from a forward proxy would require a custom root certificate installed on your machine. That is key material and a trust-store change, the opposite of a zero-footprint tool. The reverse gateway gets you the same visibility with no certificate games.
+
+### Several APIs at once
+
+Give each upstream a name. The first path segment picks the upstream and is removed before forwarding:
+
+```bash
+nullwire-mcp -target openai=https://api.openai.com,anthropic=https://api.anthropic.com
+
+export OPENAI_BASE_URL=http://127.0.0.1:8080/openai/v1       # → https://api.openai.com/v1
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080/anthropic    # → https://api.anthropic.com
+```
+
+Names are letters, digits, `.`, `_` and `-` (up to 32 characters, case-insensitive). One unnamed URL may be added as the default for paths that match no name. An `X-Target-URL` header overrides everything for a single request.
+
+---
+
+## 🧰 MCP tools
+
+NullWire exposes three tools over stdio. It speaks MCP protocol versions `2026-07-28`, `2025-11-25` and `2024-11-05`, and accepts JSON-RPC batches.
+
+| Tool | What it does | Arguments |
+|---|---|---|
+| `inspect_traffic` | Returns recent scrubbed flows. | `limit` (1 to 50, default 10), `method`, `url_filter` |
+| `export_sanitized_curl` | Rebuilds a captured request as a `curl` command. Redacted values become environment variables you fill in yourself. | `flow_id` (required) |
+| `clear_ram_buffer` | Wipes all 50 slots and resets the counters. | none |
+
+A flow looks like this (illustrative):
 
 ```json
 {
-  "name": "inspect_traffic",
-  "inputSchema": {
-    "type": "object",
-    "properties": {
-      "limit":      { "type": "integer", "default": 10, "minimum": 1, "maximum": 50 },
-      "method":     { "type": "string",  "description": "HTTP method filter, case-insensitive" },
-      "url_filter": { "type": "string",  "description": "Substring of the scrubbed URL, case-insensitive" }
-    },
-    "additionalProperties": false
-  }
+  "id": 7,
+  "timestamp": "2026-10-31T09:14:02Z",
+  "method": "POST",
+  "url": "https://api.example.com/v1/charge",
+  "request_headers": { "Authorization": "[REDACTED_TOKEN#a1b2c3]", "Content-Type": "application/json" },
+  "request_body": "{\"card_token\":\"[REDACTED_TOKEN#9f3e21]\",\"amount\":4200}",
+  "status_code": 401,
+  "response_body": "{\"error\":\"invalid_api_key\"}",
+  "latency_ms": 143,
+  "redaction_count": 2
 }
 ```
 
-Example result text:
+**Tags are stable and correlatable.** `[REDACTED_TOKEN#a1b2c3]` is a short salted hash, so the same secret gets the same tag everywhere in one run. Your assistant can see that two requests used the *same* token without learning it. The salt is random per run, so tags can't be compared across restarts or reversed.
+
+Tag kinds: `TOKEN`, `COOKIE`, `IP` and `KEY` (private keys).
+
+`export_sanitized_curl` produces something like:
+
+```bash
+# Replay of flow 7
+# Set environment variables first:
+# export NULLWIRE_AUTH_TOKEN=...   # was [REDACTED_TOKEN#a1b2c3]
+curl -X POST 'https://api.example.com/v1/charge' \
+  -H "Authorization: $NULLWIRE_AUTH_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data-raw '…'
+```
+
+Placeholders are `NULLWIRE_AUTH_TOKEN`, `NULLWIRE_COOKIE`, `NULLWIRE_IP` and `NULLWIRE_PRIVATE_KEY`. `CONNECT` tunnels have no replayable request, and NullWire says so.
+
+---
+
+## 🧽 What gets redacted
+
+Every URL, header, request body and response body passes through these layers, in this order:
+
+| # | Layer | Catches | Example |
+|---|---|---|---|
+| 1 | **Private keys** | PEM blocks: RSA, EC, OpenSSH, encrypted, PGP; JSON-escaped ones; blocks cut off by a size limit | `-----BEGIN PRIVATE KEY-----…` |
+| 2 | **Secret fields** | JSON string values and **arrays**, and query parameters, for names like `password`, `api_key`, `access_token`, `secret`, `session_id` | `"password": ["a","b"]`, `?api_key=…` |
+| 3 | **XML elements** | Element text for secret-looking names, with namespaces and CDATA; the tags themselves stay intact | `<wsse:Password>…</wsse:Password>` |
+| 4 | **URL credentials** | `user:password@host` in any URL or connection string | `postgres://app:pw@db/prod` |
+| 5 | **Auth schemes** | `Bearer`, `Basic` and `Token` credentials | `Authorization: Bearer …` |
+| 6 | **JWTs** | Three-part `eyJ…` tokens | |
+| 7 | **Vendor keys** | 50+ formats in three tiers (below) | `AKIA…`, `ghp_…`, `sk-ant-…`, `SG.…` |
+| 8 | **Secret-named fields** | `key: value` or `key=value` pairs where the *name* says secret and the value is 12 to 256 characters | `x-custom-auth: …`, `session=…` |
+| 9 | **Your patterns** | Regexes from the [config file](#-configuration) | |
+| 10 | **IP addresses** | IPv4 (strictly validated) and IPv6, except loopback and unspecified | `203.0.113.9` |
+| 11 | **Base64** | Base64 or URL-safe base64 whose *decoded* text contains a secret. Images and other binary data are left alone. | `eyJhcGlfa2V5…` |
+| 12 | **Randomness detector** | 16 to 128 character tokens that look machine-generated: mixed case or digits, high Shannon entropy, few vowels. UUIDs are exempt. | an unknown vendor's key |
+
+**Headers.** `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, `Api-Key`, `X-Auth-Token` and `Proxy-Authorization` are always redacted, plus any you add.
+
+**Vendor tiers.** Matching all prefixes the same way would redact ordinary words, so they are tiered:
+
+| Tier | Needs after the prefix | Examples |
+|---|---|---|
+| **Strong** | 16+ token characters | `sk-ant-`, `sk-proj-`, `AKIA`, `ASIA`, `ghp_`, `github_pat_`, `glpat-`, `xoxb-`, `sk_live_`, `sk_test_`, `rk_live_`, `npm_`, `SG.`, `AIza`, `ya29.`, `pplx-` |
+| **Weak** (also occur in normal words) | 20+ characters, plus a digit, a capital or 24+ characters | `hf_`, `r8_`, `secret_`, `api_key_`, `access_token_`, `bearer `, `token ` |
+| **Connection strings** | 8+ characters | `postgres://`, `mysql://`, `mongodb+srv://`, `redis://`, `amqp://` |
+
+Prefixes are matched case-sensitively, so `asiapacific_region` is left alone.
+
+**Bodies are decoded before scrubbing.** `gzip` and `deflate` (up to 1 MiB expanded, a decompression-bomb guard). `multipart/form-data` forms are split into fields; file parts keep only the field name, file name and size.
+
+---
+
+## 🛡️ Safety shields
+
+| Shield | Behaviour |
+|---|---|
+| **Request shield** | A request body with a `Content-Encoding` NullWire can't read (`br`, `zstd`, stacked encodings) is **refused with `415`**, because a body that can't be scrubbed must not reach the model. `-allow-uninspectable` forwards such requests anyway. |
+| **Response shield** | The client's `Accept-Encoding` is cut down to `gzip` and `deflate` before it reaches the server, so servers never answer in Brotli or Zstd. A client that offers nothing usable gets `identity`. |
+| **Unreadable bodies** | Any other encoded body is stored as a short placeholder with a visible warning in the flow's `note`. |
+| **Protobuf and gRPC** | Binary bodies are not stored. Only their size is recorded. |
+| **Size limits** | See the table below. A secret that straddles a limit is still scrubbed first, thanks to an 8 KiB scrub window. |
+| **Loopback only** | The proxy binds to `127.0.0.1`. The reverse gateway answers only loopback `Host` headers (`403` otherwise) and refuses to proxy to itself (`508`). |
+| **Tunnel limits** | At most 256 concurrent tunnels and upgraded connections, each closed after 10 minutes idle. |
+| **Wipe on exit** | `SIGINT` and `SIGTERM` clear the ring buffer before the process exits. |
+
+### Limits
+
+| What | Limit |
+|---|---|
+| Flows kept in RAM | 50 |
+| Stored request body | 32 KiB |
+| Stored response body | 256 KiB |
+| In-flight capture buffer | 64 KiB request, 512 KiB response |
+| Scrub window past the stored size | 8 KiB |
+| Decoded gzip/deflate | 1 MiB |
+| Randomness detector | 16 to 128 characters |
+
+---
+
+## ⚙️ Configuration
+
+Pass `-secrets-config path/to/file.json` to tune redaction without recompiling. Every field is optional.
 
 ```json
 {
-  "ring_size": 3,
-  "ring_capacity": 50,
-  "returned": 1,
-  "scrubbed_totals": { "tokens": 5, "cookies": 1, "ips": 1 },
-  "flows": [
-    {
-      "id": 3,
-      "timestamp": "2026-10-25T14:03:11Z",
-      "method": "POST",
-      "url": "http://[REDACTED_IP#98f1a2]:9000/v1/orders?api_key=[REDACTED_TOKEN#3c9a1e]",
-      "request_headers": {
-        "Authorization": "Bearer [REDACTED_TOKEN#a1b2c3]",
-        "Content-Type": "application/json",
-        "Cookie": "[REDACTED_COOKIE#d4e5f6]"
-      },
-      "request_body": "{\"item\":\"widget\",\"client_secret\":\"[REDACTED_TOKEN#5b7e20]\"}",
-      "status_code": 401,
-      "response_headers": { "Content-Type": "application/json" },
-      "response_body": "{\"error\":\"token expired\"}",
-      "latency_ms": 42,
-      "redaction_count": 5
-    }
+  "sensitive_headers":     ["X-Company-Auth", "X-Api-Signature"],
+  "ignore_url_substrings": ["/healthz", "/metrics"],
+  "ignore_headers":        ["User-Agent"],
+  "custom_vendors": [
+    { "name": "Internal DB", "prefix": "db_prod_", "pattern": "" },
+    { "name": "Acme Auth",   "prefix": "acme_",    "pattern": "acme_[a-zA-Z0-9]{32}" }
+  ],
+  "extra_regex_patterns": [
+    { "name": "app_key", "pattern": "app_k_[a-zA-Z0-9]{24}" }
   ]
 }
 ```
 
-### `export_sanitized_curl`
+| Field | Effect |
+|---|---|
+| `sensitive_headers` | Header values that are always redacted, like `Authorization`. `-scrub-headers a,b` adds more from the command line. |
+| `ignore_url_substrings` | Flows whose URL contains one of these are **never recorded** (health checks, metrics). |
+| `ignore_headers` | Header values that are left as they are. |
+| `custom_vendors` | `prefix` redacts anything with 8+ token characters after it. `pattern` is an optional full regex. |
+| `extra_regex_patterns` | Extra regexes; every match is redacted. |
 
-Rebuilds a runnable POSIX `curl` command for one flow. Every redaction tag becomes an environment-variable placeholder, and a comment legend maps each placeholder back to the tag it replaced, so you can tell which real value belongs where.
+Patterns use Go's RE2 syntax, which runs in linear time, so a bad pattern cannot freeze the proxy.
 
-```json
-{
-  "name": "export_sanitized_curl",
-  "inputSchema": {
-    "type": "object",
-    "properties": {
-      "flow_id": { "type": "integer", "minimum": 1, "description": "An id returned by inspect_traffic" }
-    },
-    "required": ["flow_id"],
-    "additionalProperties": false
-  }
-}
-```
+---
 
-Example result text for flow `3` above:
+## 🔌 Connect your MCP clients: `install`
+
+`install` writes NullWire into your MCP clients' config files, and removes it again, so you never have to hunt for the right file or JSON key.
 
 ```bash
-# Replay of flow 3 (2026-10-25T14:03:11Z)
-# Set these environment variables first (distinct tags share one placeholder):
-# export NULLWIRE_IP=...   # was [REDACTED_IP#98f1a2]
-# export NULLWIRE_AUTH_TOKEN=...   # was [REDACTED_TOKEN#3c9a1e]
-# export NULLWIRE_AUTH_TOKEN=...   # was [REDACTED_TOKEN#5b7e20]
-# export NULLWIRE_AUTH_TOKEN=...   # was [REDACTED_TOKEN#a1b2c3]
-# export NULLWIRE_COOKIE=...   # was [REDACTED_COOKIE#d4e5f6]
-curl -X 'POST' 'http://'"$NULLWIRE_IP"':9000/v1/orders?api_key='"$NULLWIRE_AUTH_TOKEN" \
-  -H 'Authorization: Bearer '"$NULLWIRE_AUTH_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -H 'Cookie: '"$NULLWIRE_COOKIE" \
-  --data-raw '{"item":"widget","client_secret":"'"$NULLWIRE_AUTH_TOKEN"'"}'
+nullwire-mcp install --list                          # supported clients and whether they are here
+nullwire-mcp install --client all --dry-run          # preview every change
+nullwire-mcp install --client cursor,vscode          # just these two
+nullwire-mcp install --client cursor -- -port 8081   # save server flags with the entry (after --)
+nullwire-mcp install --uninstall --client all        # take it back out
+nullwire-mcp install --print                         # a snippet to paste into clients that aren't supported
 ```
 
-Hop-by-hop headers, `Host`, `Content-Length` and `Accept-Encoding` are left out so `curl` can set them itself. Truncated or encoded request bodies get a `# WARNING:` line instead of silently replaying something incomplete.
-
-### `clear_ram_buffer`
-
-Zeroes all 50 slots and resets the scrub counters. Flow ids keep counting upward, so an old id can never point at a new flow. Takes no arguments (`{"type":"object","properties":{},"additionalProperties":false}`).
-
-
----
-
-> **Every release is built with Go 1.26** and includes SHA256 checksums and a signed build provenance attestation you can verify with `gh attestation verify`. The same proof is also attached to each release as `nullwire-provenance.intoto.jsonl`.
-
-<a id="security"></a>
-
-## 🛡️ Security & protocol engineering deep-dive
-
-Every item below is implemented in `main.go` and exercised by `main_test.go` and `fuzz_test.go`.
-
-| Measure | What it does | Why |
+| Client | `--client` | What it edits |
 |---|---|---|
-| **Strict loopback bind** | The listener address is hard-coded `127.0.0.1`, opened with `net.Listen("tcp4", …)`, then re-checked with `TCPAddr.IP.IsLoopback()`. The process exits if the check fails. There is no `-host` flag. | Nothing on your LAN can reach a proxy that sees your tokens. |
-| **DNS-rebinding guard** | In reverse mode, any request whose `Host` header is not `127.0.0.1`, `localhost` or `::1` gets `403 Forbidden`. | A malicious web page that rebinds its domain to `127.0.0.1` can't use your gateway as an authenticated relay. |
-| **Self-loop protection** | A target that resolves to the proxy's own `host:port` gets `508 Loop Detected`. | Prevents a request storm from a misconfigured `-target`. |
-| **Scrub-before-truncate** | Up to **64 KB** of each body is captured, fully regex-scrubbed, and only *then* cut to **8 KB** (request) / **16 KB** (response). | A secret straddling the 8 KB boundary is already a tag by the time we cut. Truncating first would keep half a token. |
-| **Per-process ephemeral nonce** | 32 bytes from `crypto/rand`, held only in RAM. Tag = first 6 hex chars of `SHA-256(nonce ‖ secret)`. | Without a salt, a hash of a low-entropy secret (a short PIN, a guessable password) can be brute-forced or rainbow-tabled from a leaked transcript. With a secret nonce nobody can precompute anything, and tags can't be linked across restarts. |
-| **Strict `stdout` discipline** | `stdout` carries only single-line JSON-RPC frames ending in `\n`, written under a mutex. Banners, errors and the status bar go to `stderr`. | One stray byte on `stdout` corrupts the MCP stream. |
-| **Silent notifications** | A message with no `id` (or `id: null` with a `notifications/*` method), such as `notifications/initialized`, writes **0 bytes**. | JSON-RPC forbids replying to notifications, and strict clients disconnect if you do. |
-| **Original traffic untouched** | The app receives the real response through a streaming, flushing copy. Scrubbing happens on a separate copy in a background goroutine. | The proxy must never break the thing you're debugging. |
-| **Isolated transport** | A dedicated `http.Transport` with no proxy, no compression and no redirect-following. | No accidental proxy chains; redirects reach your app unchanged. |
-| **Hop-by-hop stripping** | `Connection`, `Proxy-*`, `TE`, `Upgrade`, … are removed in both directions. | Correct proxy behaviour per RFC 9110. |
-| **Panic containment** | Capture and RPC dispatch recover from panics instead of killing the process. | A weird payload can't take your session down. |
+| Claude Desktop | `claude-desktop` | `claude_desktop_config.json` in your user config folder |
+| Claude Code | `claude-code` | runs `claude mcp add --scope user` (needs the `claude` command) |
+| Cursor | `cursor` | `~/.cursor/mcp.json` |
+| Windsurf | `windsurf` | `~/.codeium/windsurf/mcp_config.json` |
+| VS Code (Copilot) | `vscode` | your user `mcp.json` |
+| Cline | `cline` | `cline_mcp_settings.json` |
+| Roo Code | `roo` | `mcp_settings.json` |
+| Gemini CLI | `gemini` | `~/.gemini/settings.json` |
+| Codex CLI | `codex` | `~/.codex/config.toml` (`[mcp_servers.nullwire]`) |
 
-<a id="scrubber"></a>
+Other clients (Zed, Continue, JetBrains and more) are not edited. Use `--print` and paste the snippet where that client keeps its MCP servers.
 
-**What gets scrubbed**
+**How it stays safe**
 
-| Pattern | Tag |
+- With `--client all` it only touches clients it finds on your machine. Name a client explicitly to create its config.
+- The first time it changes a file it keeps a copy next to it as `<file>.nullwire-bak`. That copy is never overwritten, so it always holds the original.
+- Files are written through a temporary file and renamed, and symlinked dotfiles stay symlinks.
+- Your other servers, settings, numbers and extra fields on the NullWire entry (such as `env`) are kept. JSON keys may be re-ordered.
+- A config it can't parse as plain JSON (for example one with comments) is left alone, with a clear message.
+- Running it twice changes nothing the second time.
+
+| Option | Meaning |
 |---|---|
-| `Authorization`, `Proxy-Authorization`, `X-API-Key`, `API-Key`, `X-Auth-Token` header values; `Bearer` / `Basic` / `Token` credentials anywhere | `TOKEN` |
-| `Cookie`, `Set-Cookie` header values (whole header hashed as one unit) | `COOKIE` |
-| JWTs (`eyJ….….…`) | `TOKEN` |
-| API keys: `sk-…`, `ghp_…`, `github_pat_…`, `AIza…`, `xox[baprs]-…`, `AKIA…` | `TOKEN` |
-| JSON fields: `access_token`, `refresh_token`, `id_token`, `api_key`, `apikey`, `secret`, `client_secret`, `password`, `passwd`, `session_id`, `auth_token` | `TOKEN` |
-| Query / form params: `api_key`, `apikey`, `token`, `access_token`, `refresh_token`, `id_token`, `secret`, `client_secret`, `password`, `passwd`, `key` | `TOKEN` |
-| `user:password@host` in URLs | `TOKEN` |
-| IPv4 addresses (`127.0.0.1` and `0.0.0.0` are left alone) | `IP` |
-
+| `--client` | Comma-separated client ids, or `all` (default). |
+| `--name` | Name to register the server under (default `nullwire`). |
+| `--binary PATH` | Register this binary instead of the one that is running. |
+| `--npx` | Register `npx -y nullwire-mcp` (used automatically when you started it through npx). |
+| `--dry-run`, `--uninstall`, `--list`, `--print` | As described above. |
+| `-- …` | Everything after `--` is saved as the server's own flags. |
 
 ---
 
-<a id="limitations"></a>
+## 🔎 Scan your machine: `scan` and `protect`
 
-## ⚖️ Honest scope & known limitations
+Secrets leak long before traffic does: a token in an MCP config, a password in `.env`. NullWire can find them. Scanning **never writes to disk and never prints a secret**: findings are shown already scrubbed, and shell history text is never shown at all.
 
-We would rather you hear these from us than discover them in production.
+```bash
+nullwire-mcp scan --discover                 # known MCP client configs, ~/.env, ~/.codex/config.toml, …
+nullwire-mcp scan .mcp.json .env             # specific files
+nullwire-mcp scan --deep ./my-project --toml --yaml --zip
+nullwire-mcp scan --history                  # opt-in: count secrets in shell history
+```
 
-- **`HTTP CONNECT` returns `501 Not Implemented`, by design.** Inspecting HTTPS through `CONNECT` means man-in-the-middling TLS, which means generating a root CA and getting it into your OS or browser trust store. That is key material and keychain pollution, the opposite of a zero-footprint tool. The **reverse gateway** gets the same visibility without any of that: point your app at `http://127.0.0.1:8080` and let NullWire do the TLS to the upstream.
-- **No WebSocket / `Upgrade` pass-through.** `Upgrade` and `Connection` are treated as hop-by-hop headers and stripped, so upgraded protocols won't work through the proxy. Plain request/response and streaming responses (e.g. SSE) are supported.
-- **Android / Termux:** static Go binaries have no DNS resolver config on Android, so upstream hostnames fail with `502 … lookup … connection refused`. Run inside `termux-chroot` (`pkg install proot`), which provides a resolver. Linux desktops, macOS, Windows and FreeBSD are not expected to be affected.
-- **Redaction is pattern-based, not magic.** It catches the shapes in the table above. A secret in a format we don't recognise, in a field we don't know, or split across a body boundary can pass through. Treat the scrubber as a strong seatbelt, not a guarantee, and test it with your own traffic. IPv6 addresses are not redacted yet. IPv4-shaped strings that aren't addresses (some version numbers) can be redacted as false positives.
-- **Tags are 24 bits.** Six hex characters are plenty to tell apart the handful of secrets in a 50-slot buffer, but collisions are possible in principle. They are for correlation, not identification.
-- **Bodies are bounded.** Only the first 64 KB of each body is captured, and stored bodies are cut to 8 KB / 16 KB. Responses that arrive with a `Content-Encoding` (e.g. gzip) are stored as a short placeholder rather than decoded. NullWire strips `Accept-Encoding` from forwarded requests so most servers reply uncompressed, but it can't force them to.
-- **"RAM-only" means the program never writes files.** `Disk: 0B` in the status bar is a design invariant (the source has no file I/O), not a measured counter. The OS can still swap memory pages or write crash dumps; NullWire doesn't control that.
-- **The ring is ephemeral.** The 50 most recent flows vanish when the process exits. That is the point.
-- **Your app sees raw traffic.** NullWire protects what the *AI agent* sees, not what your local app sees. It isn't a security boundary for the app itself.
-- **Protocol coverage is what's documented.** Initialization, discovery, ping, `tools/list` and `tools/call` for the 2026-07-28 / 2025-11-25 / 2024-11-05 specs. Resources, prompts and sampling aren't implemented and return `-32601`.
+| Option | Meaning |
+|---|---|
+| `--discover` | Check the usual config locations under your home and config directories. |
+| `--deep DIR` | Walk a directory for MCP config JSON and `.env` files. Skips `node_modules`, `.git`, `dist`, `build`, `vendor` and similar by exact folder name. |
+| `--toml`, `--yaml`, `--zip` | Also scan `*.toml`, `*.yaml`/`*.yml` and ZIP archives. Off by default so a deep scan doesn't open every CI file. |
+| `--history` | Count lines with secrets in bash, zsh, fish and PowerShell history. Text is never printed. |
+| exit codes | `0` done, `1` every file failed to scan, `2` bad usage |
+
+File types are recognised by name, so `nullwire-mcp scan some.env config.toml settings.yaml bundle.zip` routes each to the right scanner. Files over 4 MiB are skipped. ZIP archives are read in memory under a **zip-bomb shield**: entries over 1 MiB, archives over 20 MiB of content or 1000 entries are skipped and reported.
+
+**`protect`** runs a quick scan of the usual places, then starts the normal server:
+
+```bash
+nullwire-mcp protect --target https://api.example.com --deep .
+```
+
+It accepts the server options (`--port`, `--target`, `--cacert`, `--dns`, `--secrets-config`, `--scrub-headers`, `--allow-uninspectable`) plus `--deep DIR`, `--history` and `--no-scan`. The scan report goes to stderr, so the MCP channel on stdout stays clean, and stop signals are passed on to the server.
+
+---
+
+## 📟 CLI reference
+
+```text
+nullwire-mcp [flags]                 run the MCP server and the proxy
+nullwire-mcp scan [options] [PATH…]  look for secrets in files
+nullwire-mcp protect [options]       scan, then run the server
+nullwire-mcp install [options]       register NullWire with your MCP clients
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-port` | `8080` | Proxy port. Always bound to `127.0.0.1`. |
+| `-target` | none | Reverse-gateway upstream: a URL and/or `name=URL` entries, comma-separated. |
+| `-cacert` | none | Extra CA certificates (a PEM file or a directory) for upstream HTTPS. |
+| `-dns` | `auto` | Upstream DNS: `auto`, `system`, or a comma list of IPs such as `1.1.1.1,9.9.9.9:53`. |
+| `-secrets-config` | none | Path to the [JSON config](#-configuration). |
+| `-scrub-headers` | none | Extra header names to always redact. |
+| `-allow-uninspectable` | off | Forward request bodies that can't be inspected instead of refusing them with `415`. |
+
+---
+
+## 📱 Platform notes
+
+**Termux and Android.** Static Go binaries have no system DNS settings or CA certificates on Android. NullWire detects Termux and uses `1.1.1.1` and `9.9.9.9` for lookups, printing a notice (those resolvers will see the hostnames you contact). Choose your own with `-dns <resolver>`, or `-dns system` to turn this off. Upstream HTTPS uses the CA certificates found in Termux's standard locations; add more with `-cacert`.
+
+```bash
+chmod +x nullwire-linux-arm64
+sleep infinity | ./nullwire-linux-arm64   # keep stdin open; use a second session for curl
+```
+
+**Corporate networks.** If your company re-signs HTTPS traffic, add its root with `-cacert /path/to/company-root.pem`.
+
+**Windows.** Use the `.exe` and the same flags. `scan --history` also checks PowerShell's PSReadLine history.
+
+---
+
+## 🔐 Security model and honest limits
+
+NullWire is a *diagnostic* tool. Be clear-eyed about what it does and does not promise.
+
+**What it guarantees**
+- Nothing is written to disk by the server, and a stop signal wipes memory. The `install` command edits MCP client configs only when you run it, and backs each file up first.
+- The proxy is reachable only from your own machine.
+- The model never sees the live traffic, only the scrubbed copy.
+- Live traffic is never rewritten, so what you debug is what runs.
+
+**What it does not do**
 - **Release binaries carry signed build provenance, not OS-vendor code-signing certificates.** Verify authenticity with `SHA256SUMS.txt` and `gh attestation verify`. Because they are not signed with an Apple Developer ID or Microsoft Authenticode certificate, on macOS you may need `xattr -d com.apple.quarantine ./nullwire-darwin-arm64`.
+- **It is not a TLS interceptor.** `CONNECT` tunnels show only the destination and byte counts. Use the reverse gateway when you need HTTPS content.
+- **Redaction is pattern and heuristic based.** A secret in a shape nobody anticipated, and low in randomness, can slip through. The randomness detector can also redact a harmless long identifier. Add your own patterns in the config for secrets you know about.
+- **Brotli and Zstd bodies are never decoded** (the standard library can't, and pulling in a package would break the zero-dependency rule). They are refused (requests) or flagged (responses).
+- **WebSocket flows appear when the connection closes.** Messages compressed with `permessage-deflate` can't be read, so NullWire drops the client's extension offer to keep frames readable.
+- **An XML secret element that contains nested markup** is not covered by the XML layer.
+- **Upstream connections use HTTP/1.1.** HTTP/2 and gRPC bodies are not captured.
 
+If you find a secret NullWire missed, please open an issue with a *fake* sample that has the same shape. Never post a real one.
 
 ---
 
-<a id="tested-on"></a>
-
-## 🧪 Tested on
+## ✅ Tested on
 
 | Platform | Status | What was run |
 |---|---|---|
@@ -530,94 +512,69 @@ We would rather you hear these from us than discover them in production.
 | macOS 15 (Apple Silicon) | ✅ verified | smoke test, silent notifications, end-to-end redaction |
 | macOS 15 (Intel) | ✅ verified | smoke test, silent notifications, end-to-end redaction |
 | Windows x86-64 | ✅ verified | smoke test, silent notifications, end-to-end redaction |
+| Windows ARM64 | ✅ verified | smoke test, silent notifications, end-to-end redaction |
 | FreeBSD amd64 (VM) | ✅ verified | smoke test, silent notifications, end-to-end redaction |
 | Linux ARMv7 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
 | Linux RISC-V 64 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
 | Linux ARM64 (Android / Termux) | ✅ verified on device | live upstream proxy, redaction tags, `export_sanitized_curl`, reverse gateway, guards (needs `termux-chroot`) |
-| Windows ARM64 | ✅ verified | smoke test, silent notifications, end-to-end redaction |
 
-🟡 *emulated* means run under QEMU, not on real hardware. Full logs for each run are linked from [docs/test-results.md](docs/test-results.md) and the [Actions tab](https://github.com/VoxNode-ux/nullwire-mcp/actions).
+🟡 *emulated* means run under QEMU, not on real hardware. Details are in [docs/test-results.md](docs/test-results.md).
 
-## ✅ Verification & testing
+---
+
+## 🧪 Development
 
 ```bash
 go vet ./...
-go test -v ./...
-go test -v -race ./...                                    # race detector (needs cgo)
-go test -run='^$' -fuzz=FuzzScrubberNoLeak -fuzztime=30s . # fuzz the DLP scrubber
+go test -race ./...
 ```
 
-The test suite (`main_test.go` and `fuzz_test.go`) uses only the standard library and covers:
-
-- Deterministic tagging: equal secrets share a tag, different secrets don't, nothing leaks, `127.0.0.1` survives.
-- Fuzz testing (`FuzzScrubberNoLeak`, `FuzzScrubberDeterministic`, `FuzzScrubberNoPanic`): feeds randomized tokens and arbitrary byte streams to prove secrets never leak, tags stay deterministic, and malformed inputs never panic.
-- Ring-buffer wrap-around eviction and `Clear()` with monotonic ids.
-- A full reverse-gateway round trip: `Accept-Encoding` stripped, tokens scrubbed in the ring, a valid sanitized `curl` exported.
-- MCP dispatch: `server/discover`, `initialize`, `ping`, `tools/list`, `tools/call`, error codes, and **zero stdout bytes for notifications**.
-
-GitHub Actions workflows (`.github/workflows/`):
-- **Release (`release.yml`)**, on every push to `main`, every pull request and every tag: `go vet`, `go test -race`, cross-compilation of static `CGO_ENABLED=0` binaries for 9 targets. On pushes and tags (never on pull requests) it also publishes the release with a CycloneDX SBOM (`nullwire-sbom.cdx.json`), `SHA256SUMS.txt` and signed GitHub build provenance.
-- **Run on demand** (Actions → *Run workflow*):
-  - `security.yml`: `govulncheck` against the Go standard library, plus 2-minute fuzz runs of all three scrubber fuzz targets.
-  - `scorecard.yml`: OpenSSF Scorecard supply-chain analysis.
-  - `smoke.yml` and `smoke-extra.yml`: end-to-end proxy redaction tests on Ubuntu, macOS (Apple Silicon and Intel), Windows (x86-64, ARM64 optional), a FreeBSD VM, and QEMU-emulated Linux ARMv7 and RISC-V 64.
-
----
-
-<a id="faq"></a>
-
-## ❓ FAQ
+- **Zero dependencies:** `go.mod` has no `require` lines, and CI keeps it that way.
+- **Release transparency:** every release is built with Go 1.26 and includes `SHA256SUMS.txt`, a CycloneDX SBOM (`nullwire-sbom.cdx.json`) and a signed build provenance attestation, which you can verify with `gh attestation verify`. The same proof is attached to each release as `nullwire-provenance.intoto.jsonl`. The `go vet` and `go test -race` logs of every CI run are saved as a `test-logs` artifact for 30 days. Pushes to `main` update a rolling `latest` pre-release; numbered tags produce stable releases. Pull requests never publish anything.
+- **Fuzzing:** the scrubber, the IPv6 and vendor-key matchers and the WebSocket frame reader have fuzz targets. They check that no secret survives scrubbing, that results don't depend on how input is chunked, and that nothing panics.
+- **CI:** checks the shell and Node installers for syntax errors, runs `go vet` and the race detector, cross-compiles static binaries for all 9 platforms (Linux x86-64, ARM64, ARMv7 and RISC-V 64; macOS Intel and Apple Silicon; Windows x86-64 and ARM64; FreeBSD x86-64), and publishes a multi-arch Docker image (amd64 and arm64). `smoke.yml` and `smoke-extra.yml` run on demand (Actions → Run workflow): end-to-end redaction tests on Ubuntu, macOS (Apple Silicon and Intel), Windows (x86-64 and ARM64), a FreeBSD VM, and QEMU-emulated Linux ARMv7 and RISC-V 64. Security checks run `govulncheck` and the fuzz targets. GitHub Actions are pinned to full commit hashes.
 
 <details>
-<summary><b>Does the AI ever see my real token?</b></summary>
+<summary><b>Project layout</b></summary>
 
-Not through NullWire's tools. The agent receives only tags like `[REDACTED_TOKEN#a1b2c3]`. Redaction is pattern-based, so a secret in a shape the scrubber does not recognise could pass through. See [Honest scope](#limitations).
-</details>
+| File | Purpose |
+|---|---|
+| `main.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
+| `ws.go` | WebSocket frame reader and capture (read-only taps) |
+| `inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
+| `scrub_extra.go` | JSON array, XML and base64 redaction |
+| `vendors.go` | Vendor prefix tiers |
+| `scan.go`, `env_scan.go`, `toml_scan.go`, `yaml_scan.go`, `zip_scan.go`, `history_scan.go` | The `scan` command |
+| `protect.go`, `protect_helpers.go` | The `protect` command |
+| `install.go` | The `install` command (client config editing) |
+| `scripts/install.sh`, `scripts/install.ps1` | Installers for macOS, Linux, Termux and Windows |
+| `npm/` | The `npx` launcher (no dependencies, no install script) |
+| `packaging/` | Homebrew and Scoop templates and `render.sh` |
+| `feature_test.go` | Tests for the features above |
 
-<details>
-<summary><b>Does it change what my app receives?</b></summary>
-
-Your app gets the real response through a streaming copy, and scrubbing runs on a separate copy in a background goroutine. One small detail: NullWire strips `Accept-Encoding` on the upstream request, so responses normally arrive uncompressed. See [Honest scope](#limitations).
-</details>
-
-<details>
-<summary><b>How do I debug HTTPS APIs?</b></summary>
-
-Use [Mode 2, the reverse gateway](#mode-2): your app talks plain HTTP to `127.0.0.1`, NullWire talks verified TLS to the real server. No root CA, nothing in your trust store. `HTTPS_PROXY` (`CONNECT`) is answered `501` by design.
-</details>
-
-<details>
-<summary><b>Can the agent replay a request without knowing the secrets?</b></summary>
-
-Yes. `export_sanitized_curl` rebuilds a runnable `curl` where every tag becomes an environment variable such as `$NULLWIRE_AUTH_TOKEN`. You set the real values; the agent never has them.
-</details>
-
-<details>
-<summary><b>Where is my traffic stored?</b></summary>
-
-In a 50-slot RAM ring. It disappears when the process exits, and `clear_ram_buffer` wipes it on demand. The program contains no file I/O.
-</details>
-
-<details>
-<summary><b>Can I expose it on my network?</b></summary>
-
-No. The listener is hard-coded to `127.0.0.1` and checked with `IsLoopback()`; there is no flag to bind elsewhere.
 </details>
 
 ---
 
-## 🤝 Contributing
+## ❓ Troubleshooting
 
-Issues and PRs are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules, the test commands and the PR checklist, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations. Security reports go through [SECURITY.md](SECURITY.md), not public issues.
+| Symptom | Cause and fix |
+|---|---|
+| **HTTPS shows only a `CONNECT` entry** | That is the blind tunnel. Use the reverse gateway (`-target`) to see HTTPS requests. |
+| **`415 Unsupported Media Type` from NullWire** | Your client sent a request body compressed with `br` or `zstd`. Send it uncompressed or gzipped, or start with `-allow-uninspectable`. |
+| **`403 reverse gateway only answers loopback Host headers`** | Reach the gateway as `127.0.0.1`, `localhost` or `[::1]` on the proxy port. |
+| **`certificate signed by unknown authority` (Termux or a corporate network)** | Add the CA with `-cacert`. |
+| **A harmless value shows as `[REDACTED_TOKEN#…]`** | The randomness detector matched a long random-looking identifier. Add its URL to `ignore_url_substrings` or tell us the shape. |
+| **`install` says a config is "not plain JSON"** | The file has comments or a syntax error, so it was left untouched. Fix it, or use `install --print` and paste the entry yourself. |
+| **`address already in use`** | Another NullWire (or program) uses the port. Pick another with `-port`. |
+| **The assistant sees no flows** | Check the status bar's `RAM Ring: n/50`. If it stays at 0, your traffic isn't going through the proxy. |
 
 ---
-
-## 📄 License
-
-[MIT](LICENSE) © 2026 VoxNode-ux
 
 <div align="center">
 
-**If NullWire saved you from pasting a live token into a chat window, a ⭐ helps other engineers find it.**
+Built by [VoxNode-ux](https://github.com/VoxNode-ux) · Version 1.2.0 · License: see the repository's `LICENSE` file
+
+**If NullWire saved you from pasting a secret into a chat, a ⭐ helps others find it.**
 
 </div>

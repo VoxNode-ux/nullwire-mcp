@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Version to publish, e.g. v1.0.2 (leave as is to publish v1.0.2)"
+        description: "Version to publish, e.g. v1.2.0 (leave as is to publish v1.2.0)"
         required: false
-        default: "v1.0.2"
+        default: "v1.2.0"
   push:
     branches: [main]
     tags: ["v*"]
@@ -24,11 +24,25 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.26"
           check-latest: true
           cache: false
+      - name: Check the installers for syntax errors
+        run: |
+          sh -n scripts/install.sh
+          sh -n packaging/render.sh
+          node --check npm/bin/nullwire-mcp.js
+      - name: Check the Homebrew and Scoop templates render
+        run: |
+          for a in nullwire-linux-amd64 nullwire-linux-arm64 nullwire-darwin-amd64 nullwire-darwin-arm64 nullwire-windows-amd64.exe nullwire-windows-arm64.exe; do
+            printf '%s' "$a" | sha256sum | sed "s/  -/  $a/"
+          done > "$RUNNER_TEMP/SHA256SUMS.txt"
+          sh packaging/render.sh -v v0.0.0 -s "$RUNNER_TEMP/SHA256SUMS.txt" -o "$RUNNER_TEMP/pkg"
+          python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$RUNNER_TEMP/pkg/nullwire-mcp.json"
       - name: go vet
         run: |
           set -o pipefail
@@ -85,6 +99,8 @@ jobs:
             artifact: nullwire-freebsd-amd64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: "1.26"
@@ -105,10 +121,48 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  docker:
+    name: Build and push Docker image
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    # Plain docker commands instead of third-party actions: the Dockerfile
+    # cross-compiles, so no emulation is needed and nothing extra has to be pinned.
+    env:
+      IMAGE: ghcr.io/voxnode-ux/nullwire-mcp
+      EVENT: ${{ github.event_name }}
+      REF_TYPE: ${{ github.ref_type }}
+      REF_NAME: ${{ github.ref_name }}
+      SHA: ${{ github.sha }}
+      ACTOR: ${{ github.actor }}
+      REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build, and push outside pull requests
+        run: |
+          set -euo pipefail
+          docker buildx create --name nullwire --driver docker-container --use
+          args=(--platform linux/amd64,linux/arm64 --tag "${IMAGE}:${SHA}")
+          if [ "${EVENT}" = "pull_request" ]; then
+            echo "Pull request: building without pushing."
+          else
+            echo "${REGISTRY_TOKEN}" | docker login ghcr.io -u "${ACTOR}" --password-stdin
+            args+=(--tag "${IMAGE}:latest")
+            if [ "${REF_TYPE}" = "tag" ]; then
+              args+=(--tag "${IMAGE}:${REF_NAME}")
+            fi
+            args+=(--push)
+          fi
+          docker buildx build "${args[@]}" .
+
   release:
     name: Publish release
-    needs: build
-    # Runs after tests + all 9 builds pass, on every push, tag and manual run.
+    needs: [build, docker]
+    # Runs after tests, all 9 builds and the Docker image pass, on every push, tag and manual run.
     # Never on pull requests, so untrusted code can't touch your releases.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
@@ -170,7 +224,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT" = "workflow_dispatch" ]; then
-            TAG="${INPUT_TAG:-v1.0.2}"
+            TAG="${INPUT_TAG:-v1.2.0}"
           elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TAG="$REF_NAME"
           else
@@ -178,8 +232,8 @@ jobs:
           fi
           case "$TAG" in
             latest) KIND="rolling" ;;
-            v[0-9]*) KIND="stable" ;;
-            *) echo "::error::Tag must be 'latest' or look like v1.0.2 (got: $TAG)"; exit 1 ;;
+            v[0-9]*.[0-9]*.[0-9]*) KIND="stable" ;;
+            *) echo "::error::Tag must be 'latest' or look like v1.2.0 (got: $TAG)"; exit 1 ;;
           esac
           echo "Publishing $KIND release: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,49 @@
+# Homebrew formula for NullWire-MCP, generated from packaging/nullwire-mcp.rb.tmpl
+# by packaging/render.sh. Do not edit the generated file by hand.
+class NullwireMcp < Formula
+  desc "RAM-only traffic inspector for AI assistants that scrubs secrets first"
+  homepage "https://github.com/VoxNode-ux/nullwire-mcp"
+  version "@@VERSION@@"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/VoxNode-ux/nullwire-mcp/releases/download/@@TAG@@/nullwire-darwin-arm64"
+      sha256 "@@SHA_DARWIN_ARM64@@"
+    end
+    on_intel do
+      url "https://github.com/VoxNode-ux/nullwire-mcp/releases/download/@@TAG@@/nullwire-darwin-amd64"
+      sha256 "@@SHA_DARWIN_AMD64@@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/VoxNode-ux/nullwire-mcp/releases/download/@@TAG@@/nullwire-linux-arm64"
+      sha256 "@@SHA_LINUX_ARM64@@"
+    end
+    on_intel do
+      url "https://github.com/VoxNode-ux/nullwire-mcp/releases/download/@@TAG@@/nullwire-linux-amd64"
+      sha256 "@@SHA_LINUX_AMD64@@"
+    end
+  end
+
+  def install
+    # The release asset is a single static binary, not an archive.
+    bin.install Dir["nullwire-*"].first => "nullwire-mcp"
+  end
+
+  def caveats
+    <<~EOS
+      Register NullWire with your MCP clients (look first, nothing is written):
+        nullwire-mcp install --client all --dry-run
+        nullwire-mcp install --client all
+      `brew uninstall nullwire-mcp` does not touch your client configs.
+      Run `nullwire-mcp install --uninstall --client all` first to remove the entries.
+    EOS
+  end
+
+  test do
+    system bin/"nullwire-mcp", "install", "--list"
+  end
+end

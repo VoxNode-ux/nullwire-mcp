@@ -1,0 +1,33 @@
+{
+  "name": "nullwire-mcp",
+  "version": "1.2.0",
+  "description": "Zero-dependency, RAM-only traffic inspector for AI assistants: see HTTP, HTTPS and WebSocket traffic with every secret scrubbed first.",
+  "bin": {
+    "nullwire-mcp": "bin/nullwire-mcp.js"
+  },
+  "files": [
+    "bin/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "proxy",
+    "dlp",
+    "secrets",
+    "redaction",
+    "debugging",
+    "ai"
+  ],
+  "homepage": "https://github.com/VoxNode-ux/nullwire-mcp#readme",
+  "bugs": "https://github.com/VoxNode-ux/nullwire-mcp/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VoxNode-ux/nullwire-mcp.git",
+    "directory": "npm"
+  },
+  "nullwireRelease": "v1.2.0"
+}
