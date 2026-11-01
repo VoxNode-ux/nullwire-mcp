@@ -2112,6 +2112,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "protect" {
 		os.Exit(runProtect(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "install" {
+		os.Exit(runInstall(os.Args[2:]))
+	}
 
 	port := flag.Int("port", 8080, "TCP port for the diagnostic proxy (always bound to 127.0.0.1)")
 	target := flag.String("target", "", "upstream base URL(s)")
