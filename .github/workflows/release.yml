@@ -30,6 +30,11 @@ jobs:
         with:
           go-version: "1.26"
           cache: false
+      - name: Check the installers for syntax errors
+        run: |
+          sh -n scripts/install.sh
+          sh -n packaging/render.sh
+          node --check npm/bin/nullwire-mcp.js
       - run: go vet ./...
       - run: go test -v -race ./...
 
