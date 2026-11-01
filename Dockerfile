@@ -9,7 +9,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/nullwire-mcp .
 
-FROM gcr.io/distroless/static-nonroot
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/nullwire-mcp /usr/local/bin/nullwire-mcp
 USER nonroot:nonroot
 # This is an MCP server on stdio: run it with `docker run -i`. The diagnostic
