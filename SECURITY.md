@@ -38,7 +38,7 @@ Please include:
 
 **Public issue is fine:**
 
-- A secret *format* the scrubber does not yet recognise (for example a new vendor key prefix). Open a normal issue with a **fake** example of the shape. See [Honest scope](https://github.com/VoxNode-ux/nullwire-mcp#security-model-and-honest-limits): redaction is pattern-based by design.
+- A secret *format* the scrubber does not yet recognise (for example a new vendor key prefix). Open a normal issue with a **fake** example of the shape. See [Honest scope](https://github.com/VoxNode-ux/nullwire-mcp#-security-model-and-honest-limits)): redaction is pattern-based by design.
 - Feature requests, such as IPv6 scrubbing or extra client configs
 
 ## Out of scope
