@@ -29,7 +29,7 @@ Please include:
 
 **Report privately:**
 
-- A way for a real secret to reach the agent's view in a shape the [documented scrubber](https://github.com/VoxNode-ux/nullwire-mcp#security-model-and-honest-limits) is supposed to catch
+- A way for a real secret to reach the agent's view in a shape the [documented scrubber](https://github.com/VoxNode-ux/nullwire-mcp#-what-gets-redacted) is supposed to catch
 - Any way to make the proxy listen on a non-loopback address
 - Bypassing the DNS-rebinding guard (`403`) or the self-loop guard (`508`)
 - Anything that writes bytes other than JSON-RPC frames to `stdout`, or writes data to disk
