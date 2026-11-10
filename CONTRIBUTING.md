@@ -24,7 +24,7 @@ These are the project's core promises. PRs that break them will not be merged.
 4. **Loopback only.** No flag or option may bind the proxy to a non-loopback address.
 5. **Scrub before truncate.** Secrets must be redacted before any body is cut to its size limit.
 6. **Notifications stay silent.** Messages without an `id` must write zero bytes.
-7. **Be honest in docs.** If a change adds a limitation, update the README's "Honest scope" section.
+7. **Be honest in docs.** If a change adds a limitation, update the README's "Security model and honest limits" section.
 
 ## Good first contributions
 
