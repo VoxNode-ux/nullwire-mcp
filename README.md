@@ -13,7 +13,7 @@
 ![Disk writes: 0](https://img.shields.io/badge/disk%20writes-0-2ea44f)
 ![MCP](https://img.shields.io/badge/MCP-stdio-7c3aed)
 
-[Quick start](#-quick-start) · [How it works](#-how-it-works) · [What gets redacted](#-what-gets-redacted) · [MCP tools](#-mcp-tools) · [Configuration](#-configuration) · [CLI reference](#-cli-reference) · [Security model](#-security-model-and-honest-limits)
+[Quick start](#quick-start) · [How it works](#how-it-works) · [What gets redacted](#what-gets-redacted) · [MCP tools](#mcp-tools) · [Configuration](#configuration) · [CLI reference](#cli-reference) · [Security model](#security-model-and-honest-limits) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -28,7 +28,7 @@ NullWire sits between your app and the network. It records what passes through, 
 ```text
   your app ──► NullWire (127.0.0.1) ──► the real server
                     │
-                    ├─ forwards every byte, unmodified
+                    ├─ forwards your traffic as-is (bodies untouched)
                     └─ keeps a scrubbed copy in RAM ──► your AI assistant (MCP)
 ```
 
@@ -37,7 +37,7 @@ NullWire sits between your app and the network. It records what passes through, 
 | | |
 |---|---|
 | 🪶 **Zero dependencies** | Go standard library only. One static binary, nothing to install. |
-| 🧠 **RAM only** | The last 50 flows live in memory. The server never writes a file, and a stop signal wipes the buffer. (`install` edits your MCP client configs, but only when you run it.) |
+| 🧠 **RAM only** | The last 50 flows live in memory. The server never writes a file, and a stop signal clears the buffer. (`install` edits your MCP client configs, but only when you run it.) |
 | 🔒 **Loopback only** | The proxy binds to `127.0.0.1`. A DNS-rebinding guard answers only loopback `Host` headers. |
 | 🧽 **Layered redaction** | Private keys, JSON/XML/query secrets, JWTs, 50+ vendor key formats, IPs, secrets hiding in base64, and a randomness detector for keys nobody has seen before. |
 | 🛡️ **Fail-closed shields** | Bodies that can't be inspected are refused or flagged, never silently passed to the model. |
@@ -47,6 +47,8 @@ NullWire sits between your app and the network. It records what passes through, 
 | 📱 **Runs anywhere** | Linux, macOS, Windows, Docker and Termux on Android. |
 
 ---
+
+<a id="quick-start"></a>
 
 ## 🚀 Quick start
 
@@ -141,7 +143,7 @@ nullwire-mcp install --client all --dry-run   # look first: nothing is written
 nullwire-mcp install --client all             # then do it, and restart the client
 ```
 
-It covers Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, Cline, Roo Code, Gemini CLI and Codex CLI. See [Connect your MCP clients](#-connect-your-mcp-clients-install) for details, or add it by hand:
+It covers Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, Cline, Roo Code, Gemini CLI and Codex CLI. See [Connect your MCP clients](#connect-your-mcp-clients) for details, or add it by hand:
 
 ```bash
 # Claude Code
@@ -186,20 +188,22 @@ curl http://127.0.0.1:8080/v1/things -H "Authorization: Bearer sk-live-..."
 
 ---
 
+<a id="how-it-works"></a>
+
 ## 🔭 How it works
 
 ```mermaid
 flowchart LR
     A[Your app or curl] -->|HTTP_PROXY / base URL| P[NullWire proxy<br/>127.0.0.1:8080]
-    P -->|unmodified bytes| S[(Real server)]
-    S -->|unmodified bytes| P
+    P -->|bodies untouched| S[(Real server)]
+    S -->|bodies untouched| P
     P --> C[Capture copy]
     C --> R[Redaction layers]
     R --> B[(RAM ring<br/>50 flows)]
     B -->|MCP over stdio| M[AI assistant]
 ```
 
-The key idea: **the model reads a scrubbed copy, your app talks to the real server.** Nothing the proxy forwards is rewritten, so debugging never changes the behaviour you are debugging.
+The key idea: **the model reads a scrubbed copy, your app talks to the real server.** Request and response bodies are never rewritten. Only a few negotiation headers are adjusted (see [Safety shields](#safety-shields)), so debugging barely changes the behaviour you are debugging.
 
 ### Four ways to capture traffic
 
@@ -227,6 +231,8 @@ Names are letters, digits, `.`, `_` and `-` (up to 32 characters, case-insensiti
 
 ---
 
+<a id="mcp-tools"></a>
+
 ## 🧰 MCP tools
 
 NullWire exposes three tools over stdio. It speaks MCP protocol versions `2026-07-28`, `2025-11-25` and `2024-11-05`, and accepts JSON-RPC batches.
@@ -235,7 +241,7 @@ NullWire exposes three tools over stdio. It speaks MCP protocol versions `2026-0
 |---|---|---|
 | `inspect_traffic` | Returns recent scrubbed flows. | `limit` (1 to 50, default 10), `method`, `url_filter` |
 | `export_sanitized_curl` | Rebuilds a captured request as a `curl` command. Redacted values become environment variables you fill in yourself. | `flow_id` (required) |
-| `clear_ram_buffer` | Wipes all 50 slots and resets the counters. | none |
+| `clear_ram_buffer` | Clears all 50 slots and resets the counters. | none |
 
 A flow looks like this (illustrative):
 
@@ -274,6 +280,8 @@ Placeholders are `NULLWIRE_AUTH_TOKEN`, `NULLWIRE_COOKIE`, `NULLWIRE_IP` and `NU
 
 ---
 
+<a id="what-gets-redacted"></a>
+
 ## 🧽 What gets redacted
 
 Every URL, header, request body and response body passes through these layers, in this order:
@@ -288,7 +296,7 @@ Every URL, header, request body and response body passes through these layers, i
 | 6 | **JWTs** | Three-part `eyJ…` tokens | |
 | 7 | **Vendor keys** | 50+ formats in three tiers (below) | `AKIA…`, `ghp_…`, `sk-ant-…`, `SG.…` |
 | 8 | **Secret-named fields** | `key: value` or `key=value` pairs where the *name* says secret and the value is 12 to 256 characters | `x-custom-auth: …`, `session=…` |
-| 9 | **Your patterns** | Regexes from the [config file](#-configuration) | |
+| 9 | **Your patterns** | Regexes from the [config file](#configuration) | |
 | 10 | **IP addresses** | IPv4 (strictly validated) and IPv6, except loopback and unspecified | `203.0.113.9` |
 | 11 | **Base64** | Base64 or URL-safe base64 whose *decoded* text contains a secret. Images and other binary data are left alone. | `eyJhcGlfa2V5…` |
 | 12 | **Randomness detector** | 16 to 128 character tokens that look machine-generated: mixed case or digits, high Shannon entropy, few vowels. UUIDs are exempt. | an unknown vendor's key |
@@ -309,6 +317,8 @@ Prefixes are matched case-sensitively, so `asiapacific_region` is left alone.
 
 ---
 
+<a id="safety-shields"></a>
+
 ## 🛡️ Safety shields
 
 | Shield | Behaviour |
@@ -320,7 +330,7 @@ Prefixes are matched case-sensitively, so `asiapacific_region` is left alone.
 | **Size limits** | See the table below. A secret that straddles a limit is still scrubbed first, thanks to an 8 KiB scrub window. |
 | **Loopback only** | The proxy binds to `127.0.0.1`. The reverse gateway answers only loopback `Host` headers (`403` otherwise) and refuses to proxy to itself (`508`). |
 | **Tunnel limits** | At most 256 concurrent tunnels and upgraded connections, each closed after 10 minutes idle. |
-| **Wipe on exit** | `SIGINT` and `SIGTERM` clear the ring buffer before the process exits. |
+| **Clear on exit** | `SIGINT` and `SIGTERM` clear the ring buffer before the process exits. |
 
 ### Limits
 
@@ -335,6 +345,8 @@ Prefixes are matched case-sensitively, so `asiapacific_region` is left alone.
 | Randomness detector | 16 to 128 characters |
 
 ---
+
+<a id="configuration"></a>
 
 ## ⚙️ Configuration
 
@@ -366,6 +378,8 @@ Pass `-secrets-config path/to/file.json` to tune redaction without recompiling. 
 Patterns use Go's RE2 syntax, which runs in linear time, so a bad pattern cannot freeze the proxy.
 
 ---
+
+<a id="connect-your-mcp-clients"></a>
 
 ## 🔌 Connect your MCP clients: `install`
 
@@ -445,6 +459,8 @@ It accepts the server options (`--port`, `--target`, `--cacert`, `--dns`, `--sec
 
 ---
 
+<a id="cli-reference"></a>
+
 ## 📟 CLI reference
 
 ```text
@@ -460,7 +476,7 @@ nullwire-mcp install [options]       register NullWire with your MCP clients
 | `-target` | none | Reverse-gateway upstream: a URL and/or `name=URL` entries, comma-separated. |
 | `-cacert` | none | Extra CA certificates (a PEM file or a directory) for upstream HTTPS. |
 | `-dns` | `auto` | Upstream DNS: `auto`, `system`, or a comma list of IPs such as `1.1.1.1,9.9.9.9:53`. |
-| `-secrets-config` | none | Path to the [JSON config](#-configuration). |
+| `-secrets-config` | none | Path to the [JSON config](#configuration). |
 | `-scrub-headers` | none | Extra header names to always redact. |
 | `-allow-uninspectable` | off | Forward request bodies that can't be inspected instead of refusing them with `415`. |
 
@@ -481,15 +497,17 @@ sleep infinity | ./nullwire-linux-arm64   # keep stdin open; use a second sessio
 
 ---
 
+<a id="security-model-and-honest-limits"></a>
+
 ## 🔐 Security model and honest limits
 
 NullWire is a *diagnostic* tool. Be clear-eyed about what it does and does not promise.
 
 **What it guarantees**
-- Nothing is written to disk by the server, and a stop signal wipes memory. The `install` command edits MCP client configs only when you run it, and backs each file up first.
+- Nothing is written to disk by the server, and a stop signal clears the buffer (references are dropped; memory is not zeroed). The `install` command edits MCP client configs only when you run it, and backs each file up first.
 - The proxy is reachable only from your own machine.
 - The model never sees the live traffic, only the scrubbed copy.
-- Live traffic is never rewritten, so what you debug is what runs.
+- Request and response bodies are never rewritten. Headers are adjusted only where inspection needs it: `Accept-Encoding` is reduced to `gzip`/`deflate`, and the WebSocket `permessage-deflate` offer is dropped.
 
 **What it does not do**
 - **Release binaries carry signed build provenance, not OS-vendor code-signing certificates.** Verify authenticity with `SHA256SUMS.txt` and `gh attestation verify`. Because they are not signed with an Apple Developer ID or Microsoft Authenticode certificate, on macOS you may need `xattr -d com.apple.quarantine ./nullwire-darwin-arm64`.
@@ -516,11 +534,13 @@ If you find a secret NullWire missed, please open an issue with a *fake* sample 
 | FreeBSD amd64 (VM) | ✅ verified | smoke test, silent notifications, end-to-end redaction |
 | Linux ARMv7 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
 | Linux RISC-V 64 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
-| Linux ARM64 (Android / Termux) | ✅ verified on device | live upstream proxy, redaction tags, `export_sanitized_curl`, reverse gateway, guards (needs `termux-chroot`) |
+| Linux ARM64 (Android / Termux) | ✅ verified on device (v1.2.0 CA-bundle change awaiting a device re-check) | live upstream proxy, redaction tags, `export_sanitized_curl`, reverse gateway, guards (needs `termux-chroot`) |
 
 🟡 *emulated* means run under QEMU, not on real hardware. Details are in [docs/test-results.md](docs/test-results.md).
 
 ---
+
+<a id="development"></a>
 
 ## 🧪 Development
 
