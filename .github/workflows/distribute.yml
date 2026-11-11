@@ -1,0 +1,184 @@
+name: Publish to package managers
+
+# Runs after a STABLE release (called from release.yml), or by hand for one tag
+# (Actions -> Publish to package managers -> Run workflow).
+#
+# Every job skips itself with a notice when its secret is missing, so you can
+# switch the package managers on one at a time. Secrets (repository settings):
+#   TAP_GITHUB_TOKEN   fine-grained PAT, contents:write on homebrew-nullwire and scoop-nullwire
+#   AUR_SSH_KEY        private SSH key whose public half is on your AUR account
+#   WINGET_TOKEN       classic PAT with public_repo (used by wingetcreate)
+#   CHOCO_API_KEY      API key from your chocolatey.org account
+#   PYPI_TOKEN         PyPI API token for the nullwire-mcp project
+# The npm publish lives in release.yml (secret NPM_TOKEN).
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Stable release to publish, e.g. v1.2.0 (the release must already exist)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  taps:
+    name: Homebrew and Scoop taps
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ inputs.tag }}
+      TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Render the formula and manifest, push them to the tap repositories
+        run: |
+          set -euo pipefail
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::bad tag: $TAG"; exit 1 ;; esac
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::TAP_GITHUB_TOKEN is not set; skipping the taps"
+            exit 0
+          fi
+          sh packaging/render.sh -v "$TAG" -o "$RUNNER_TEMP/pkg"
+          push_file() { # repo, source file, destination path in the repo
+            local dir
+            dir=$(mktemp -d)
+            git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/VoxNode-ux/$1.git" "$dir"
+            mkdir -p "$dir/$(dirname "$3")"
+            cp "$2" "$dir/$3"
+            (
+              cd "$dir"
+              git config user.name "nullwire-release-bot"
+              git config user.email "noreply@github.com"
+              if [ -z "$(git status --porcelain)" ]; then
+                echo "$1: already up to date"
+              else
+                git add -A
+                git commit -m "nullwire-mcp ${TAG}"
+                git push
+              fi
+            )
+          }
+          push_file homebrew-nullwire "$RUNNER_TEMP/pkg/nullwire-mcp.rb"   Formula/nullwire-mcp.rb
+          push_file scoop-nullwire    "$RUNNER_TEMP/pkg/nullwire-mcp.json" bucket/nullwire-mcp.json
+
+  aur:
+    name: Arch Linux AUR
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ inputs.tag }}
+      AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Render PKGBUILD and .SRCINFO, push them to the AUR
+        run: |
+          set -euo pipefail
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::bad tag: $TAG"; exit 1 ;; esac
+          if [ -z "$AUR_SSH_KEY" ]; then
+            echo "::notice::AUR_SSH_KEY is not set; skipping the AUR"
+            exit 0
+          fi
+          sh packaging/render.sh -v "$TAG" -o "$RUNNER_TEMP/pkg"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes"
+          git clone ssh://aur@aur.archlinux.org/nullwire-mcp-bin.git "$RUNNER_TEMP/aur"
+          cp "$RUNNER_TEMP/pkg/aur/PKGBUILD" "$RUNNER_TEMP/pkg/aur/.SRCINFO" "$RUNNER_TEMP/aur/"
+          cd "$RUNNER_TEMP/aur"
+          git config user.name "nullwire-release-bot"
+          git config user.email "noreply@github.com"
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "AUR is already up to date"
+          else
+            git add PKGBUILD .SRCINFO
+            git commit -m "nullwire-mcp-bin ${TAG#v}"
+            git push origin HEAD:master
+          fi
+
+  winget:
+    name: Windows Package Manager (winget)
+    runs-on: windows-latest
+    env:
+      TAG: ${{ inputs.tag }}
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - name: Open a pull request on microsoft/winget-pkgs
+        shell: pwsh
+        run: |
+          if ($env:TAG -notmatch '^v\d+\.\d+\.\d+$') { throw "bad tag: $env:TAG" }
+          if (-not $env:WINGET_TOKEN) {
+            Write-Host "::notice::WINGET_TOKEN is not set; skipping winget"
+            exit 0
+          }
+          $ver = $env:TAG.TrimStart('v')
+          $base = "https://github.com/VoxNode-ux/nullwire-mcp/releases/download/$($env:TAG)"
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          # `update` needs VoxNode.NullWire to exist already: submit the first
+          # version by hand (see the guide), then this takes over.
+          ./wingetcreate.exe update VoxNode.NullWire --version $ver `
+            --urls "$base/nullwire-windows-amd64.exe|x64" "$base/nullwire-windows-arm64.exe|arm64" `
+            --submit --token $env:WINGET_TOKEN
+
+  chocolatey:
+    name: Chocolatey
+    runs-on: windows-latest
+    env:
+      TAG: ${{ inputs.tag }}
+      CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Build and push the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::bad tag: $TAG"; exit 1 ;; esac
+          if [ -z "$CHOCO_API_KEY" ]; then
+            echo "::notice::CHOCO_API_KEY is not set; skipping Chocolatey"
+            exit 0
+          fi
+          bash packaging/render.sh -v "$TAG" -o out
+          cd out/choco
+          choco pack
+          choco push "nullwire-mcp.${TAG#v}.nupkg" --source https://push.chocolatey.org/ --api-key "$CHOCO_API_KEY"
+
+  pypi:
+    name: PyPI
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ inputs.tag }}
+      PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Build and upload the launcher
+        run: |
+          set -euo pipefail
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::bad tag: $TAG"; exit 1 ;; esac
+          if [ -z "$PYPI_TOKEN" ]; then
+            echo "::notice::PYPI_TOKEN is not set; skipping PyPI"
+            exit 0
+          fi
+          VER="${TAG#v}"
+          cd python
+          sed -i "s/^version = .*/version = \"$VER\"/" pyproject.toml
+          sed -i "s/^__version__ = .*/__version__ = \"$VER\"/" src/nullwire_mcp/__init__.py
+          python3 -m venv "$RUNNER_TEMP/venv"
+          . "$RUNNER_TEMP/venv/bin/activate"
+          pip install build twine
+          python -m build
+          TWINE_USERNAME=__token__ TWINE_PASSWORD="$PYPI_TOKEN" twine upload --skip-existing dist/*
