@@ -1,0 +1,13 @@
+$ErrorActionPreference = 'Stop'
+$toolsDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+
+$packageArgs = @{
+  packageName    = $env:ChocolateyPackageName
+  fileFullPath   = Join-Path $toolsDir 'nullwire-mcp.exe'
+  url64bit       = 'https://github.com/VoxNode-ux/nullwire-mcp/releases/download/@@TAG@@/nullwire-windows-amd64.exe'
+  checksum64     = '@@SHA_WINDOWS_AMD64@@'
+  checksumType64 = 'sha256'
+}
+# Downloads the single static binary and checks its SHA-256. Chocolatey then
+# puts a shim for every .exe in the tools folder on PATH automatically.
+Get-ChocolateyWebFile @packageArgs
