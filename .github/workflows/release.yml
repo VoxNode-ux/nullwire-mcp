@@ -35,14 +35,23 @@ jobs:
         run: |
           sh -n scripts/install.sh
           sh -n packaging/render.sh
+          sh -n docs/install.sh
+          cmp scripts/install.sh docs/install.sh   # the GitHub Pages copy must match
           node --check npm/bin/nullwire-mcp.js
-      - name: Check the Homebrew and Scoop templates render
+          python3 -m py_compile python/src/nullwire_mcp/__init__.py
+          for f in packaging/gh-nullwire/gh-nullwire packaging/asdf-nullwire-mcp/bin/* packaging/asdf-nullwire-mcp/lib/utils.bash; do
+            bash -n "$f"
+          done
+      - name: Check all package templates render (Homebrew, Scoop, AUR, winget, Chocolatey)
         run: |
           for a in nullwire-linux-amd64 nullwire-linux-arm64 nullwire-darwin-amd64 nullwire-darwin-arm64 nullwire-windows-amd64.exe nullwire-windows-arm64.exe; do
             printf '%s' "$a" | sha256sum | sed "s/  -/  $a/"
           done > "$RUNNER_TEMP/SHA256SUMS.txt"
           sh packaging/render.sh -v v0.0.0 -s "$RUNNER_TEMP/SHA256SUMS.txt" -o "$RUNNER_TEMP/pkg"
           python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$RUNNER_TEMP/pkg/nullwire-mcp.json"
+          bash -n "$RUNNER_TEMP/pkg/aur/PKGBUILD"
+          test -s "$RUNNER_TEMP/pkg/winget/VoxNode.NullWire.installer.yaml"
+          test -s "$RUNNER_TEMP/pkg/choco/nullwire-mcp.nuspec"
       - name: go vet
         run: |
           set -o pipefail
@@ -128,6 +137,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write   # keyless cosign signing
     # Plain docker commands instead of third-party actions: the Dockerfile
     # cross-compiles, so no emulation is needed and nothing extra has to be pinned.
     env:
@@ -142,6 +152,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+          cache: false
       - name: Build, and push outside pull requests
         run: |
           set -euo pipefail
@@ -157,7 +172,15 @@ jobs:
             fi
             args+=(--push)
           fi
-          docker buildx build "${args[@]}" .
+          docker buildx build "${args[@]}" --metadata-file "$RUNNER_TEMP/meta.json" .
+      - name: Sign the pushed image with cosign (keyless)
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
+          digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/meta.json")
+          case "$digest" in sha256:*) ;; *) echo "::error::no image digest in the build metadata"; exit 1 ;; esac
+          "$(go env GOPATH)/bin/cosign" sign --yes "${IMAGE}@${digest}"
 
   release:
     name: Publish release
@@ -166,6 +189,9 @@ jobs:
     # Never on pull requests, so untrusted code can't touch your releases.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.rel.outputs.tag }}
+      kind: ${{ steps.rel.outputs.kind }}
     permissions:
       contents: write
       id-token: write
@@ -193,11 +219,49 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Decide which release this is
+        id: rel
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            TAG="${INPUT_TAG:-v1.2.0}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$REF_NAME"
+          else
+            TAG="latest"
+          fi
+          case "$TAG" in
+            latest) KIND="rolling" ;;
+            v[0-9]*.[0-9]*.[0-9]*) KIND="stable" ;;
+            *) echo "::error::Tag must be 'latest' or look like v1.2.0 (got: $TAG)"; exit 1 ;;
+          esac
+          echo "Publishing $KIND release: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "kind=$KIND" >> "$GITHUB_OUTPUT"
+
       - name: SBOM (list of everything in the build)
         run: |
           go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
           "$(go env GOPATH)/bin/cyclonedx-gomod" mod -json -output dist/nullwire-sbom.cdx.json .
           echo "SBOM written:"; ls -l dist/nullwire-sbom.cdx.json
+
+      - name: Linux packages (.deb, .rpm, .apk) with nfpm
+        if: steps.rel.outputs.kind == 'stable'
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.0
+          NFPM="$(go env GOPATH)/bin/nfpm"
+          export VERSION="${TAG#v}"
+          for pair in amd64:linux-amd64 arm64:linux-arm64 arm7:linux-armv7; do
+            export NFPM_ARCH="${pair%%:*}"
+            export BIN_SRC="dist/nullwire-${pair#*:}"
+            for fmt in deb rpm apk; do
+              "$NFPM" package -p "$fmt" -f nfpm.yaml -t dist/
+            done
+          done
+          ls -l dist/*.deb dist/*.rpm dist/*.apk
 
       - name: Checksums
         run: cd dist && sha256sum nullwire-* > SHA256SUMS.txt
@@ -219,25 +283,21 @@ jobs:
           cp "$BUNDLE" dist/nullwire-provenance.intoto.jsonl
           ls -l dist/nullwire-provenance.intoto.jsonl
 
-      - name: Decide which release this is
-        id: rel
+      - name: Sign the files with cosign (keyless, Sigstore)
+        # One .sigstore.json bundle per file, next to it on the release. Verify with:
+        #   cosign verify-blob --bundle FILE.sigstore.json \
+        #     --certificate-identity-regexp 'https://github.com/VoxNode-ux/nullwire-mcp/\.github/workflows/release\.yml@.*' \
+        #     --certificate-oidc-issuer https://token.actions.githubusercontent.com FILE
         run: |
           set -euo pipefail
-          if [ "$EVENT" = "workflow_dispatch" ]; then
-            TAG="${INPUT_TAG:-v1.2.0}"
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            TAG="$REF_NAME"
-          else
-            TAG="latest"
-          fi
-          case "$TAG" in
-            latest) KIND="rolling" ;;
-            v[0-9]*.[0-9]*.[0-9]*) KIND="stable" ;;
-            *) echo "::error::Tag must be 'latest' or look like v1.2.0 (got: $TAG)"; exit 1 ;;
-          esac
-          echo "Publishing $KIND release: $TAG"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "kind=$KIND" >> "$GITHUB_OUTPUT"
+          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
+          COSIGN="$(go env GOPATH)/bin/cosign"
+          cd dist
+          for f in nullwire-* SHA256SUMS.txt; do
+            case "$f" in *.sigstore.json|nullwire-provenance.intoto.jsonl) continue ;; esac
+            "$COSIGN" sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+          ls -l ./*.sigstore.json
 
       - name: Create or update the release
         env:
@@ -274,3 +334,41 @@ jobs:
                 --title "$TAG" --generate-notes
             fi
           fi
+
+      - name: Publish the npm launcher (with provenance)
+        if: steps.rel.outputs.kind == 'stable'
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::notice::NPM_TOKEN is not set; skipping the npm publish"
+            exit 0
+          fi
+          VER="${TAG#v}"
+          cd npm
+          if npm view "nullwire-mcp@$VER" version >/dev/null 2>&1; then
+            echo "nullwire-mcp@$VER is already on npm; nothing to do"
+            exit 0
+          fi
+          node -e '
+            const fs = require("fs");
+            const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            p.version = process.env.TAG.slice(1);
+            p.nullwireRelease = process.env.TAG;
+            fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n");
+          '
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$RUNNER_TEMP/npmrc"
+          npm publish --provenance --access public --userconfig "$RUNNER_TEMP/npmrc"
+
+  distribute:
+    name: Package managers
+    needs: release
+    if: needs.release.outputs.kind == 'stable'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/distribute.yml
+    with:
+      tag: ${{ needs.release.outputs.tag }}
+    secrets: inherit
