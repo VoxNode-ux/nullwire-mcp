@@ -117,8 +117,9 @@ func runScanTo(out, errw io.Writer, args []string) int {
 	includeTOML := fset.Bool("toml", false, "also scan TOML config files (*.toml) in --deep directories")
 	includeYAML := fset.Bool("yaml", false, "also scan YAML files (*.yaml, *.yml) in directories and --deep")
 	includeZIP := fset.Bool("zip", false, "also scan ZIP archives (*.zip) in directories and --deep; entries over 1 MiB are skipped")
+	failOnFind := fset.Bool("fail", false, "exit with code 3 if any secret is found (for git hooks and CI)")
 	fset.Usage = func() {
-		fmt.Fprintf(errw, "usage: nullwire-mcp scan [--discover] [--deep DIR] [--history] [--toml] [--yaml] [--zip] [PATH ...]\n")
+		fmt.Fprintf(errw, "usage: nullwire-mcp scan [--discover] [--deep DIR] [--history] [--toml] [--yaml] [--zip] [--fail] [PATH ...]\n")
 		fset.PrintDefaults()
 	}
 	if err := fset.Parse(args); err != nil {
@@ -236,6 +237,9 @@ func runScanTo(out, errw io.Writer, args []string) int {
 	fmt.Fprint(out, report.String())
 	if t.filesBad > 0 && t.filesOK == 0 {
 		return 1
+	}
+	if *failOnFind && t.hits > 0 {
+		return 3
 	}
 	return 0
 }
