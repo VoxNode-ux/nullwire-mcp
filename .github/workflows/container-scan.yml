@@ -1,0 +1,42 @@
+name: Container scan
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths: [Dockerfile, go.mod, "**.go", ".github/workflows/container-scan.yml"]
+  schedule:
+    - cron: "17 5 * * 1"   # Mondays 05:17 UTC: new CVEs appear without code changes
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: Trivy scan of the Docker image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Build the image locally (not pushed)
+        run: docker build --tag nullwire-scan:local .
+      - name: Scan for HIGH and CRITICAL vulnerabilities that have a fix
+        run: |
+          set -o pipefail
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$RUNNER_TEMP/trivy-cache:/root/.cache" \
+            aquasec/trivy:0.58.1 image \
+              --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
+              nullwire-scan:local 2>&1 | tee trivy.txt
+      - name: Save the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: trivy-report
+          path: trivy.txt
+          if-no-files-found: ignore
+          retention-days: 30
