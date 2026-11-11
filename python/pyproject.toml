@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nullwire-mcp"
+version = "1.2.0"
+description = "Launcher for NullWire-MCP: a RAM-only traffic inspector for AI assistants that scrubs secrets first."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+dependencies = []
+keywords = ["mcp", "model-context-protocol", "proxy", "dlp", "secrets", "redaction", "debugging", "ai"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Security",
+  "Topic :: Software Development :: Debuggers",
+]
+
+[project.urls]
+Homepage = "https://github.com/VoxNode-ux/nullwire-mcp"
+Issues = "https://github.com/VoxNode-ux/nullwire-mcp/issues"
+
+[project.scripts]
+nullwire-mcp = "nullwire_mcp:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
