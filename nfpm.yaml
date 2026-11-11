@@ -1,0 +1,29 @@
+# nfpm config for the .deb, .rpm and .apk packages. Used by release.yml:
+#   VERSION=1.2.0 NFPM_ARCH=amd64 BIN_SRC=dist/nullwire-linux-amd64 \
+#     nfpm package -p deb -f nfpm.yaml -t dist/
+name: nullwire-mcp
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${VERSION}
+section: utils
+priority: optional
+maintainer: VoxNode-ux <https://github.com/VoxNode-ux/nullwire-mcp/issues>
+description: |
+  RAM-only traffic inspector for AI assistants that scrubs secrets first.
+  See HTTP, HTTPS and WebSocket traffic with every secret redacted.
+vendor: VoxNode-ux
+homepage: https://github.com/VoxNode-ux/nullwire-mcp
+license: MIT
+contents:
+  - src: ${BIN_SRC}
+    dst: /usr/bin/nullwire-mcp
+    file_info:
+      mode: 0755
+  - src: ./LICENSE
+    dst: /usr/share/doc/nullwire-mcp/LICENSE
+    file_info:
+      mode: 0644
+  - src: ./README.md
+    dst: /usr/share/doc/nullwire-mcp/README.md
+    file_info:
+      mode: 0644
