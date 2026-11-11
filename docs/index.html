@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NullWire-MCP: install</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fff; --fg:#1a1a1a; --code:#f2f2f2; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111; --fg:#eee; --code:#222; } }
+  body { background:var(--bg); color:var(--fg); font:16px/1.5 system-ui,sans-serif; max-width:42rem; margin:3rem auto; padding:0 1rem; }
+  pre { background:var(--code); padding:.8rem 1rem; overflow-x:auto; border-radius:6px; }
+</style>
+</head>
+<body>
+<h1>⚡ NullWire-MCP</h1>
+<p>See the traffic. Never the secrets.</p>
+<h2>macOS, Linux, Termux</h2>
+<pre>curl -fsSL https://voxnode-ux.github.io/nullwire-mcp/install.sh | sh -s -- --setup</pre>
+<h2>Windows (PowerShell)</h2>
+<pre>irm https://voxnode-ux.github.io/nullwire-mcp/install.ps1 | iex</pre>
+<p>The installers check every download against the release's <code>SHA256SUMS.txt</code>.
+Source, docs and other install methods: <a href="https://github.com/VoxNode-ux/nullwire-mcp">github.com/VoxNode-ux/nullwire-mcp</a>.</p>
+</body>
+</html>
