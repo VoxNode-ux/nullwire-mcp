@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: VoxNode.NullWire
+PackageVersion: @@VERSION@@
+InstallerType: portable
+Commands:
+  - nullwire-mcp
+ReleaseDate: @@DATE@@
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/VoxNode-ux/nullwire-mcp/releases/download/@@TAG@@/nullwire-windows-amd64.exe
+    InstallerSha256: @@SHA_WINDOWS_AMD64_UPPER@@
+  - Architecture: arm64
+    InstallerUrl: https://github.com/VoxNode-ux/nullwire-mcp/releases/download/@@TAG@@/nullwire-windows-arm64.exe
+    InstallerSha256: @@SHA_WINDOWS_ARM64_UPPER@@
+ManifestType: installer
+ManifestVersion: 1.6.0
