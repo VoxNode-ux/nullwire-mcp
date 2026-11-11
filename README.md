@@ -8,6 +8,8 @@
 
 [![CI and Release](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml)
 [![Security checks](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/security.yml/badge.svg)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/security.yml)
+[![Code quality](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/quality.yml/badge.svg)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/quality.yml)
+[![codecov](https://codecov.io/gh/VoxNode-ux/nullwire-mcp/graph/badge.svg)](https://codecov.io/gh/VoxNode-ux/nullwire-mcp)
 ![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-2ea44f)
 ![Disk writes: 0](https://img.shields.io/badge/disk%20writes-0-2ea44f)
@@ -54,7 +56,7 @@ NullWire sits between your app and the network. It records what passes through, 
 
 ### 1. Install it
 
-Pick whichever fits your machine. Every method checks the download against the release's `SHA256SUMS.txt` and installs nothing if it doesn't match. Release binaries also carry signed GitHub build provenance, and each release includes a CycloneDX SBOM (`nullwire-sbom.cdx.json`).
+Pick whichever fits your machine. Every method checks the download against the release's `SHA256SUMS.txt` and installs nothing if it doesn't match. Release binaries also carry signed GitHub build provenance and keyless [cosign](https://docs.sigstore.dev/) signatures (`*.sigstore.json`), and each release includes a CycloneDX SBOM (`nullwire-sbom.cdx.json`).
 
 <details open>
 <summary><b>With Node.js (no install step): <code>npx</code></b></summary>
@@ -85,6 +87,56 @@ Installs to `%LOCALAPPDATA%\Programs\nullwire-mcp` and adds it to your user PATH
 </details>
 
 <details>
+<summary><b>Short install URL (GitHub Pages)</b></summary>
+
+```bash
+curl -fsSL https://voxnode-ux.github.io/nullwire-mcp/install.sh | sh -s -- --setup
+```
+```powershell
+irm https://voxnode-ux.github.io/nullwire-mcp/install.ps1 | iex
+```
+Same scripts as above, just a shorter address.
+</details>
+
+<details>
+<summary><b>Linux packages and distributions</b></summary>
+
+```bash
+# Debian, Ubuntu: download the .deb from the release page, then
+sudo apt install ./nullwire-mcp_1.2.0_amd64.deb
+# Fedora, RHEL
+sudo dnf install ./nullwire-mcp-1.2.0-1.x86_64.rpm
+# Alpine (packages are not signed with an Alpine key)
+sudo apk add --allow-untrusted ./nullwire-mcp_1.2.0_x86_64.apk
+# Arch Linux (AUR)
+yay -S nullwire-mcp-bin
+# Nix
+nix run github:VoxNode-ux/nullwire-mcp
+```
+Packages are built for amd64, arm64 and ARMv7.
+</details>
+
+<details>
+<summary><b>Windows: winget and Chocolatey</b></summary>
+
+```powershell
+winget install VoxNode.NullWire
+choco install nullwire-mcp
+```
+</details>
+
+<details>
+<summary><b>Python, GitHub CLI, mise and asdf</b></summary>
+
+```bash
+pipx run nullwire-mcp install --client all        # or: pip install nullwire-mcp
+gh extension install VoxNode-ux/gh-nullwire && gh nullwire scan --discover
+mise use -g github:VoxNode-ux/nullwire-mcp        # mise, no plugin needed
+mise plugin install nullwire-mcp https://github.com/VoxNode-ux/asdf-nullwire-mcp   # or the asdf plugin
+```
+</details>
+
+<details>
 <summary><b>Homebrew and Scoop</b></summary>
 
 ```bash
@@ -92,7 +144,7 @@ brew install VoxNode-ux/nullwire/nullwire-mcp                                   
 scoop bucket add nullwire https://github.com/VoxNode-ux/scoop-nullwire           # Windows
 scoop install nullwire-mcp
 ```
-Both packages are generated from the templates in [`packaging/`](packaging/README.md).
+All package files (Homebrew, Scoop, AUR, winget, Chocolatey) are generated from the templates in [`packaging/`](packaging/README.md).
 </details>
 
 <details>
@@ -445,9 +497,25 @@ nullwire-mcp scan --history                  # opt-in: count secrets in shell hi
 | `--deep DIR` | Walk a directory for MCP config JSON and `.env` files. Skips `node_modules`, `.git`, `dist`, `build`, `vendor` and similar by exact folder name. |
 | `--toml`, `--yaml`, `--zip` | Also scan `*.toml`, `*.yaml`/`*.yml` and ZIP archives. Off by default so a deep scan doesn't open every CI file. |
 | `--history` | Count lines with secrets in bash, zsh, fish and PowerShell history. Text is never printed. |
-| exit codes | `0` done, `1` every file failed to scan, `2` bad usage |
+| `--fail` | Exit with code `3` when any secret is found (for git hooks and CI). Without it, findings never change the exit code. |
+| exit codes | `0` done, `1` every file failed to scan, `2` bad usage, `3` secrets found (only with `--fail`) |
 
 File types are recognised by name, so `nullwire-mcp scan some.env config.toml settings.yaml bundle.zip` routes each to the right scanner. Files over 4 MiB are skipped. ZIP archives are read in memory under a **zip-bomb shield**: entries over 1 MiB, archives over 20 MiB of content or 1000 entries are skipped and reported.
+
+**Git hook.** Block commits that contain secrets with [pre-commit](https://pre-commit.com):
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/VoxNode-ux/nullwire-mcp
+    rev: v1.2.0
+    hooks:
+      - id: nullwire-scan            # builds nullwire-mcp from source (needs Go)
+      # - id: nullwire-scan-system   # or use the nullwire-mcp already on your PATH
+```
+The hook runs `nullwire-mcp scan --fail --yaml` on staged `.env`, MCP config, TOML and YAML files. The report shows scrubbed values only.
+
+**Shortcut.** Add `alias nw="nullwire-mcp"` to your `~/.bashrc` or `~/.zshrc` (PowerShell: `Set-Alias nw nullwire-mcp`), then `nw scan --discover`.
 
 **`protect`** runs a quick scan of the usual places, then starts the normal server:
 
@@ -551,6 +619,9 @@ go test -race ./...
 
 - **Zero dependencies:** `go.mod` has no `require` lines, and CI keeps it that way.
 - **Release transparency:** every release is built with Go 1.26 and includes `SHA256SUMS.txt`, a CycloneDX SBOM (`nullwire-sbom.cdx.json`) and a signed build provenance attestation, which you can verify with `gh attestation verify`. The same proof is attached to each release as `nullwire-provenance.intoto.jsonl`. The `go vet` and `go test -race` logs of every CI run are saved as a `test-logs` artifact for 30 days. Pushes to `main` update a rolling `latest` pre-release; numbered tags produce stable releases. Pull requests never publish anything.
+- **Quality checks:** `quality.yml` runs golangci-lint (errcheck, staticcheck, revive, ineffassign), reports test coverage (Codecov) and compares benchmarks against the base branch with `benchstat`. Run the benchmarks yourself with `go test -run='^$' -bench=. -benchmem ./...`. `chaos_test.go` injects network faults (slowloris, dropped connections, malformed and truncated streams) and checks that nothing crashes or leaks.
+- **Supply chain:** releases are signed with keyless cosign, the Docker image is signed and scanned with Trivy every week, `reproducible.yml` rebuilds the binaries on four different runners and requires identical checksums, and `security.yml` (weekly) runs `govulncheck`, `gosec` and the fuzz targets. Verify a download with `cosign verify-blob --bundle nullwire-linux-amd64.sigstore.json --certificate-identity-regexp 'https://github.com/VoxNode-ux/nullwire-mcp/\.github/workflows/release\.yml@.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com nullwire-linux-amd64`.
+- **Releases:** a stable tag publishes the release, the `.deb`/`.rpm`/`.apk` packages, the npm package (with provenance), the Homebrew and Scoop taps, the AUR, winget, Chocolatey, PyPI and the official MCP Registry. Release notes are grouped by pull request label (`.github/release.yml`).
 - **Fuzzing:** the scrubber, the IPv6 and vendor-key matchers and the WebSocket frame reader have fuzz targets. They check that no secret survives scrubbing, that results don't depend on how input is chunked, and that nothing panics.
 - **CI:** checks the shell and Node installers for syntax errors, runs `go vet` and the race detector, cross-compiles static binaries for all 9 platforms (Linux x86-64, ARM64, ARMv7 and RISC-V 64; macOS Intel and Apple Silicon; Windows x86-64 and ARM64; FreeBSD x86-64), and publishes a multi-arch Docker image (amd64 and arm64). `smoke.yml` and `smoke-extra.yml` run on demand (Actions → Run workflow): end-to-end redaction tests on Ubuntu, macOS (Apple Silicon and Intel), Windows (x86-64 and ARM64), a FreeBSD VM, and QEMU-emulated Linux ARMv7 and RISC-V 64. Security checks run `govulncheck` and the fuzz targets. GitHub Actions are pinned to full commit hashes.
 
@@ -569,7 +640,11 @@ go test -race ./...
 | `install.go` | The `install` command (client config editing) |
 | `scripts/install.sh`, `scripts/install.ps1` | Installers for macOS, Linux, Termux and Windows |
 | `npm/` | The `npx` launcher (no dependencies, no install script) |
-| `packaging/` | Homebrew and Scoop templates and `render.sh` |
+| `packaging/` | Homebrew, Scoop, AUR, winget and Chocolatey templates, `render.sh`, Nix package, `gh` extension and asdf/mise plugin sources |
+| `flake.nix`, `nfpm.yaml` | Nix flake; `.deb`/`.rpm`/`.apk` package definition |
+| `python/` | The `pip` / `pipx` launcher |
+| `docs/` | GitHub Pages site and the short install URL |
+| `bench_test.go`, `chaos_test.go` | Benchmarks and network fault-injection tests |
 | `feature_test.go` | Tests for the features above |
 
 </details>
