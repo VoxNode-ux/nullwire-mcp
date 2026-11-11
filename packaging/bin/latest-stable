@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck source=../lib/utils.bash
+source "$(dirname "$0")/../lib/utils.bash"
+list_versions | tail -n 1
