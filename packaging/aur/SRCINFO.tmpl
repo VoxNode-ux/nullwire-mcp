@@ -1,0 +1,18 @@
+pkgbase = nullwire-mcp-bin
+	pkgdesc = RAM-only traffic inspector for AI assistants that scrubs secrets first
+	pkgver = @@VERSION@@
+	pkgrel = 1
+	url = https://github.com/VoxNode-ux/nullwire-mcp
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	provides = nullwire-mcp
+	conflicts = nullwire-mcp
+	source = LICENSE-@@VERSION@@::https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/v@@VERSION@@/LICENSE
+	sha256sums = SKIP
+	source_x86_64 = nullwire-mcp-@@VERSION@@-x86_64::https://github.com/VoxNode-ux/nullwire-mcp/releases/download/v@@VERSION@@/nullwire-linux-amd64
+	sha256sums_x86_64 = @@SHA_LINUX_AMD64@@
+	source_aarch64 = nullwire-mcp-@@VERSION@@-aarch64::https://github.com/VoxNode-ux/nullwire-mcp/releases/download/v@@VERSION@@/nullwire-linux-arm64
+	sha256sums_aarch64 = @@SHA_LINUX_ARM64@@
+
+pkgname = nullwire-mcp-bin
