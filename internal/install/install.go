@@ -3,250 +3,621 @@ package install
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"runtime"
 	"strings"
-	"testing"
 )
 
-func TestEditJSONServers(t *testing.T) {
-	entry := jsonEntry(serverCmd{command: "/bin/nw", args: []string{"-port", "9090"}}, false)
-	raw := []byte(`{"theme":"dark","big":12345678901234567890,"mcpServers":{"other":{"command":"x","args":["a"],"env":{"K":"V"}}}}`)
+// The install command registers NullWire in MCP clients' config files (and
+// removes it again). It only runs when asked, backs up a file before the first
+// change, writes through a temporary file, and refuses to touch a file it
+// cannot parse as plain JSON.
 
-	out, action, err := editJSONServers(raw, "mcpServers", "nullwire", entry)
-	if err != nil || action != "added" {
-		t.Fatalf("add: %v %q", err, action)
-	}
-	s := string(out)
-	for _, keep := range []string{`"theme": "dark"`, `12345678901234567890`, `"K": "V"`, `"/bin/nw"`} {
-		if !strings.Contains(s, keep) {
-			t.Errorf("output lost %s:\n%s", keep, s)
+// clientSpec describes one MCP client.
+type clientSpec struct {
+	id    string
+	label string
+	kind  string // "json", "toml" or "cli"
+	key   string // json: the top-level object that holds the servers
+	typed bool   // json: also write "type": "stdio"
+	path  func() (string, error)
+}
+
+// serverCmd is the command a client should run to start NullWire.
+type serverCmd struct {
+	command string
+	args    []string
+}
+
+type installOptions struct {
+	name      string
+	cmd       serverCmd
+	uninstall bool
+	dryRun    bool
+}
+
+var reServerName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+func underHome(parts ...string) func() (string, error) {
+	return func() (string, error) {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
 		}
-	}
-	if !strings.HasSuffix(s, "\n") {
-		t.Errorf("output should end with a newline")
-	}
-
-	if _, action, _ := editJSONServers(out, "mcpServers", "nullwire", entry); action != "unchanged" {
-		t.Errorf("a second add should change nothing, got %q", action)
-	}
-
-	// An update keeps fields NullWire does not manage, such as env.
-	withEnv := bytes.Replace(out, []byte(`"command": "/bin/nw"`), []byte(`"command": "/old/nw",
-      "env": {"MODE": "x"}`), 1)
-	out2, action, err := editJSONServers(withEnv, "mcpServers", "nullwire", entry)
-	if err != nil || action != "updated" || !strings.Contains(string(out2), `"MODE": "x"`) || !strings.Contains(string(out2), `"/bin/nw"`) {
-		t.Errorf("update: %v %q\n%s", err, action, out2)
-	}
-
-	out3, action, err := editJSONServers(out, "mcpServers", "nullwire", nil)
-	if err != nil || action != "removed" || strings.Contains(string(out3), "nullwire") || !strings.Contains(string(out3), `"other"`) {
-		t.Errorf("remove: %v %q\n%s", err, action, out3)
-	}
-	if _, action, _ := editJSONServers(out3, "mcpServers", "nullwire", nil); action != "absent" {
-		t.Errorf("removing twice: %q", action)
-	}
-
-	if _, _, err := editJSONServers([]byte("{\n // comment\n \"mcpServers\": {}\n}"), "mcpServers", "nullwire", entry); err == nil {
-		t.Errorf("a file with comments must be refused, not rewritten")
-	}
-	if _, _, err := editJSONServers([]byte(`{"mcpServers":[1]}`), "mcpServers", "nullwire", entry); err == nil {
-		t.Errorf("a servers key that is not an object must be refused")
-	}
-	if out, action, err := editJSONServers(nil, "servers", "nullwire", jsonEntry(serverCmd{command: "c"}, true)); err != nil || action != "added" || !strings.Contains(string(out), `"type": "stdio"`) {
-		t.Errorf("empty file: %v %q %s", err, action, out)
-	}
-	var v map[string]any
-	if err := json.Unmarshal(out, &v); err != nil {
-		t.Errorf("result is not valid JSON: %v", err)
+		return filepath.Join(append([]string{h}, parts...)...), nil
 	}
 }
 
-func TestEditCodexTOML(t *testing.T) {
-	cmd := serverCmd{command: `C:\tools\nw.exe`, args: []string{"-port", "9"}}
-	raw := "model = \"gpt\"\n\n[mcp_servers.other]\ncommand = \"x\"\n"
-
-	out, action, err := editCodexTOML(raw, "nullwire", cmd, false)
-	if err != nil || action != "added" {
-		t.Fatalf("add: %v %q", err, action)
-	}
-	for _, want := range []string{"model = \"gpt\"", "[mcp_servers.other]", "[mcp_servers.nullwire]", `command = "C:\\tools\\nw.exe"`, `args = ["-port", "9"]`} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %q:\n%s", want, out)
+func underConfig(parts ...string) func() (string, error) {
+	return func() (string, error) {
+		d, err := os.UserConfigDir()
+		if err != nil {
+			return "", err
 		}
-	}
-	if _, action, _ := editCodexTOML(out, "nullwire", cmd, false); action != "unchanged" {
-		t.Errorf("second add: %q", action)
-	}
-
-	// Update: keep other keys and sub-tables, replace command and a multi-line args array.
-	old := "[mcp_servers.nullwire]\ncommand = \"/old\"\nargs = [\n  \"-x\",\n  \"-y\",\n]\nstartup_timeout_sec = 20\n\n[mcp_servers.nullwire.env]\nK = \"V\"\n"
-	out2, action, err := editCodexTOML(old, "nullwire", serverCmd{command: "/new", args: []string{"-p"}}, false)
-	if err != nil || action != "updated" {
-		t.Fatalf("update: %v %q\n%s", err, action, out2)
-	}
-	for _, want := range []string{`command = "/new"`, `args = ["-p"]`, "startup_timeout_sec = 20", "[mcp_servers.nullwire.env]", `K = "V"`} {
-		if !strings.Contains(out2, want) {
-			t.Errorf("update lost %q:\n%s", want, out2)
-		}
-	}
-	for _, gone := range []string{"/old", `"-x"`, `"-y"`} {
-		if strings.Contains(out2, gone) {
-			t.Errorf("update kept %q:\n%s", gone, out2)
-		}
-	}
-
-	out3, action, err := editCodexTOML(out, "nullwire", cmd, true)
-	if err != nil || action != "removed" || strings.Contains(out3, "nullwire") || !strings.Contains(out3, "[mcp_servers.other]") {
-		t.Errorf("remove: %v %q\n%s", err, action, out3)
-	}
-	if _, _, err := editCodexTOML("", "bad name", cmd, false); err == nil {
-		t.Errorf("an unusable name must be refused")
+		return filepath.Join(append([]string{d}, parts...)...), nil
 	}
 }
 
-// installEnv points every client path at a temporary home and hides the
-// claude command, so a test can never touch real settings.
-func installEnv(t *testing.T) string {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("APPDATA", filepath.Join(home, "AppData"))
-	t.Setenv("CODEX_HOME", "")
-	t.Setenv("NULLWIRE_VIA_NPM", "")
-	t.Setenv("PATH", t.TempDir())
-	return home
+func codexConfigPath() (string, error) {
+	if h := os.Getenv("CODEX_HOME"); h != "" {
+		return filepath.Join(h, "config.toml"), nil
+	}
+	return underHome(".codex", "config.toml")()
 }
 
-func fakeBinary(t *testing.T) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), "nullwire-mcp")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
-
-func TestInstallEndToEnd(t *testing.T) {
-	home := installEnv(t)
-	bin := fakeBinary(t)
-	cursor := filepath.Join(home, ".cursor", "mcp.json")
-	if err := os.MkdirAll(filepath.Dir(cursor), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	original := `{"mcpServers":{"keep":{"command":"k"}}}`
-	if err := os.WriteFile(cursor, []byte(original), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	run := func(args ...string) (string, int) {
-		var out, errw bytes.Buffer
-		code := runInstallTo(&out, &errw, args)
-		return out.String() + errw.String(), code
-	}
-
-	// Dry run changes nothing.
-	if out, code := run("--client", "cursor", "--binary", bin, "--dry-run", "--", "-port", "9090"); code != 0 || !strings.Contains(out, "would be added") {
-		t.Fatalf("dry run: %d\n%s", code, out)
-	}
-	if b, _ := os.ReadFile(cursor); string(b) != original {
-		t.Fatalf("a dry run modified the file:\n%s", b)
-	}
-
-	// Real install: entry written, original backed up, other servers kept.
-	out, code := run("--client", "all", "--binary", bin, "--", "-port", "9090")
-	if code != 0 || !strings.Contains(out, "Cursor") || !strings.Contains(out, "backup:") || !strings.Contains(out, "not found on this machine") {
-		t.Fatalf("install: %d\n%s", code, out)
-	}
-	b, _ := os.ReadFile(cursor)
-	for _, want := range []string{`"nullwire"`, `"keep"`, `"-port"`, `"9090"`, bin} {
-		if !strings.Contains(string(b), strings.ReplaceAll(want, `\`, `\\`)) {
-			t.Errorf("config is missing %s:\n%s", want, b)
-		}
-	}
-	if bak, _ := os.ReadFile(cursor + ".nullwire-bak"); string(bak) != original {
-		t.Errorf("the backup must hold the original file, got %q", bak)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".codeium")); err == nil {
-		t.Errorf("a client that is not installed must not get a config file")
-	}
-
-	if out, _ := run("--client", "cursor", "--binary", bin, "--", "-port", "9090"); !strings.Contains(out, "unchanged") {
-		t.Errorf("second install should be unchanged:\n%s", out)
-	}
-
-	// Uninstall removes only our entry.
-	if out, code := run("--client", "cursor", "--uninstall"); code != 0 || !strings.Contains(out, "removed") {
-		t.Fatalf("uninstall: %d\n%s", code, out)
-	}
-	after, _ := os.ReadFile(cursor)
-	if strings.Contains(string(after), "nullwire") || !strings.Contains(string(after), `"keep"`) {
-		t.Errorf("uninstall result:\n%s", after)
-	}
-
-	// An explicit client with no config yet gets one created.
-	if out, code := run("--client", "windsurf", "--binary", bin); code != 0 || !strings.Contains(out, "added") {
-		t.Errorf("explicit client: %d\n%s", code, out)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")); err != nil {
-		t.Errorf("windsurf config was not created: %v", err)
+func installClients() []clientSpec {
+	return []clientSpec{
+		{id: "claude-desktop", label: "Claude Desktop", kind: "json", key: "mcpServers", path: underConfig("Claude", "claude_desktop_config.json")},
+		{id: "claude-code", label: "Claude Code", kind: "cli"},
+		{id: "cursor", label: "Cursor", kind: "json", key: "mcpServers", path: underHome(".cursor", "mcp.json")},
+		{id: "windsurf", label: "Windsurf", kind: "json", key: "mcpServers", path: underHome(".codeium", "windsurf", "mcp_config.json")},
+		{id: "vscode", label: "VS Code (Copilot)", kind: "json", key: "servers", typed: true, path: underConfig("Code", "User", "mcp.json")},
+		{id: "cline", label: "Cline", kind: "json", key: "mcpServers", path: underConfig("Code", "User", "globalStorage", "saoudrizwan.claude-dev", "settings", "cline_mcp_settings.json")},
+		{id: "roo", label: "Roo Code", kind: "json", key: "mcpServers", path: underConfig("Code", "User", "globalStorage", "rooveterinaryinc.roo-cline", "settings", "mcp_settings.json")},
+		{id: "gemini", label: "Gemini CLI", kind: "json", key: "mcpServers", path: underHome(".gemini", "settings.json")},
+		{id: "codex", label: "Codex CLI", kind: "toml", path: codexConfigPath},
 	}
 }
 
-func TestInstallArgumentsAndNpx(t *testing.T) {
-	installEnv(t)
-	run := func(args ...string) (string, int) {
-		var out, errw bytes.Buffer
-		code := runInstallTo(&out, &errw, args)
-		return out.String() + errw.String(), code
+// detected reports whether a client looks installed: its config file or the
+// folder that holds it exists (for the Claude Code CLI, whether `claude` is on PATH).
+func (c clientSpec) detected() bool {
+	if c.kind == "cli" {
+		_, err := exec.LookPath("claude")
+		return err == nil
 	}
-	if out, code := run("--client", "cursor", "-port", "9090"); code != 2 {
-		t.Errorf("a server flag without -- must be a usage error, got %d\n%s", code, out)
-	}
-	if out, code := run("--client", "cursor", "stray"); code != 2 || !strings.Contains(out, "after --") {
-		t.Errorf("a stray argument must be refused: %d\n%s", code, out)
-	}
-	if _, code := run("--client", "nosuchclient"); code != 2 {
-		t.Errorf("an unknown client must be refused, got %d", code)
-	}
-	if _, code := run("--name", "bad name!"); code != 2 {
-		t.Errorf("a bad name must be refused, got %d", code)
-	}
-	if out, code := run("--client", "cursor", "--npx", "--dry-run"); code != 0 || !strings.Contains(out, "nullwire-mcp") || !strings.Contains(out, "npx") {
-		t.Errorf("npx dry run: %d\n%s", code, out)
-	}
-	t.Setenv("NULLWIRE_VIA_NPM", "1")
-	if out, _ := run("--client", "cursor", "--dry-run"); !strings.Contains(out, "npx") {
-		t.Errorf("under the npm wrapper the npx form is used:\n%s", out)
-	}
-	if out, code := run("--list"); code != 0 || !strings.Contains(out, "claude-desktop") || !strings.Contains(out, "codex") {
-		t.Errorf("list: %d\n%s", code, out)
-	}
-	if out, code := run("--print", "--binary", fakeBinary(t)); code != 0 || !strings.Contains(out, "mcpServers") || !strings.Contains(out, "[mcp_servers.nullwire]") {
-		t.Errorf("print: %d\n%s", code, out)
-	}
-}
-
-func TestInstallCodexAndVSCodeFormats(t *testing.T) {
-	home := installEnv(t)
-	bin := fakeBinary(t)
-	var out, errw bytes.Buffer
-	if code := runInstallTo(&out, &errw, []string{"--client", "codex,vscode", "--binary", bin}); code != 0 {
-		t.Fatalf("exit %d\n%s%s", code, out.String(), errw.String())
-	}
-	toml, _ := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
-	if !strings.Contains(string(toml), "[mcp_servers.nullwire]") {
-		t.Errorf("codex config:\n%s", toml)
-	}
-	vs, err := os.ReadFile(filepath.Join(home, ".config", "Code", "User", "mcp.json"))
+	p, err := c.path()
 	if err != nil {
-		// macOS and Windows keep VS Code settings elsewhere; find the file the program chose.
-		p, _ := underConfig("Code", "User", "mcp.json")()
-		vs, err = os.ReadFile(p)
+		return false
 	}
-	if err != nil || !strings.Contains(string(vs), `"servers"`) || !strings.Contains(string(vs), `"type": "stdio"`) {
-		t.Errorf("vscode config: %v\n%s", err, vs)
+	if _, err := os.Stat(p); err == nil {
+		return true
 	}
+	if st, err := os.Stat(filepath.Dir(p)); err == nil && st.IsDir() {
+		return true
+	}
+	return false
+}
+
+// jsonEntry builds the server entry written into a JSON config.
+func jsonEntry(c serverCmd, typed bool) map[string]any {
+	args := make([]any, len(c.args))
+	for i, a := range c.args {
+		args[i] = a
+	}
+	e := map[string]any{"command": c.command, "args": args}
+	if typed {
+		e["type"] = "stdio"
+	}
+	return e
+}
+
+// editJSONServers adds, updates or removes one server in a JSON config. Other
+// settings, numbers and unmanaged fields of the entry (such as env) are kept.
+// entry == nil removes the server. action is one of added, updated, unchanged,
+// removed or absent; when it is unchanged or absent the input is returned as is.
+func editJSONServers(raw []byte, key, name string, entry map[string]any) (out []byte, action string, err error) {
+	doc := map[string]any{}
+	if len(bytes.TrimSpace(raw)) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		if err := dec.Decode(&doc); err != nil {
+			return nil, "", fmt.Errorf("not plain JSON (comments or a syntax error?): %v", err)
+		}
+		if dec.More() {
+			return nil, "", fmt.Errorf("unexpected data after the JSON document")
+		}
+	}
+	servers := map[string]any{}
+	if v, ok := doc[key]; ok && v != nil {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil, "", fmt.Errorf("%q is not an object", key)
+		}
+		servers = m
+	}
+
+	cur, exists := servers[name]
+	switch {
+	case entry == nil:
+		if !exists {
+			return raw, "absent", nil
+		}
+		delete(servers, name)
+		action = "removed"
+	case !exists:
+		servers[name] = entry
+		action = "added"
+	default:
+		merged := map[string]any{}
+		if m, ok := cur.(map[string]any); ok {
+			for k, v := range m {
+				merged[k] = v
+			}
+		}
+		same := true
+		for k, v := range entry {
+			if !reflect.DeepEqual(merged[k], v) {
+				same = false
+			}
+			merged[k] = v
+		}
+		if same {
+			return raw, "unchanged", nil
+		}
+		servers[name] = merged
+		action = "updated"
+	}
+	doc[key] = servers
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(doc); err != nil {
+		return nil, "", err
+	}
+	return buf.Bytes(), action, nil
+}
+
+func tomlQuote(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r == '"':
+			b.WriteString(`\"`)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&b, `\u%04X`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func tomlArray(items []string) string {
+	q := make([]string, len(items))
+	for i, s := range items {
+		q[i] = tomlQuote(s)
+	}
+	return "[" + strings.Join(q, ", ") + "]"
+}
+
+func isTOMLTableHeader(line string) bool {
+	t := strings.TrimSpace(line)
+	return strings.HasPrefix(t, "[")
+}
+
+func tomlKeyIs(line, key string) bool {
+	t := strings.TrimSpace(line)
+	if !strings.HasPrefix(t, key) {
+		return false
+	}
+	rest := strings.TrimSpace(t[len(key):])
+	return strings.HasPrefix(rest, "=")
+}
+
+// editCodexTOML adds, updates or removes [mcp_servers.<name>] in Codex's
+// config.toml. Other keys inside the table are kept; sub-tables such as
+// [mcp_servers.<name>.env] are left alone.
+func editCodexTOML(raw, name string, cmd serverCmd, remove bool) (out, action string, err error) {
+	if !reServerName.MatchString(name) {
+		return "", "", fmt.Errorf("server name %q is not usable in TOML (letters, digits, - and _ only)", name)
+	}
+	header := "[mcp_servers." + name + "]"
+	quoted := `[mcp_servers."` + name + `"]`
+	lines := strings.Split(raw, "\n")
+
+	start := -1
+	for i, l := range lines {
+		if t := strings.TrimSpace(l); t == header || t == quoted {
+			start = i
+			break
+		}
+	}
+	end := len(lines)
+	if start >= 0 {
+		for j := start + 1; j < len(lines); j++ {
+			if isTOMLTableHeader(lines[j]) {
+				end = j
+				break
+			}
+		}
+	}
+
+	if remove {
+		if start < 0 {
+			return raw, "absent", nil
+		}
+		from := start
+		if from > 0 && strings.TrimSpace(lines[from-1]) == "" {
+			from--
+		}
+		rest := append(append([]string{}, lines[:from]...), lines[end:]...)
+		text := strings.Join(rest, "\n")
+		if strings.HasSuffix(raw, "\n") && !strings.HasSuffix(text, "\n") {
+			text += "\n"
+		}
+		return text, "removed", nil
+	}
+
+	block := []string{header, "command = " + tomlQuote(cmd.command), "args = " + tomlArray(cmd.args)}
+	if start < 0 {
+		text := raw
+		if text != "" && !strings.HasSuffix(text, "\n") {
+			text += "\n"
+		}
+		if text != "" {
+			text += "\n"
+		}
+		return text + strings.Join(block, "\n") + "\n", "added", nil
+	}
+
+	// Keep the table's other keys; replace command and args.
+	var kept []string
+	for k := start + 1; k < end; k++ {
+		l := lines[k]
+		switch {
+		case tomlKeyIs(l, "command"):
+		case tomlKeyIs(l, "args"):
+			if strings.Contains(l, "[") && !strings.Contains(l, "]") {
+				for k+1 < end && !strings.Contains(lines[k], "]") {
+					k++
+				}
+			}
+		default:
+			kept = append(kept, l)
+		}
+	}
+	replaced := append(append([]string{}, block...), kept...)
+	rest := append(append([]string{}, lines[:start]...), replaced...)
+	rest = append(rest, lines[end:]...)
+	text := strings.Join(rest, "\n")
+	if text == raw {
+		return raw, "unchanged", nil
+	}
+	return text, "updated", nil
+}
+
+// writeFileAtomic writes data through a temporary file in the same folder. If
+// the file already exists, a copy is kept next to it the first time (the copy
+// is never overwritten, so it always holds the original).
+func writeFileAtomic(path string, data []byte) (backup string, err error) {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real // keep a symlinked dotfile a symlink
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	mode := os.FileMode(0o600)
+	if st, err := os.Stat(path); err == nil {
+		mode = st.Mode().Perm()
+		bak := path + ".nullwire-bak"
+		if _, err := os.Stat(bak); os.IsNotExist(err) {
+			if old, err := os.ReadFile(path); err == nil {
+				if err := os.WriteFile(bak, old, mode); err == nil {
+					backup = bak
+				}
+			}
+		}
+	}
+	tmp, err := os.CreateTemp(dir, ".nullwire-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return "", err
+	}
+	if err := tmp.Chmod(mode); err != nil && runtime.GOOS != "windows" {
+		_ = tmp.Close()
+		cleanup()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return "", err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return "", err
+	}
+	return backup, nil
+}
+
+func readIfExists(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	return b, err
+}
+
+// applyFile edits a JSON or TOML config. It returns a short status word.
+func applyFile(spec clientSpec, o installOptions) (status, path string, err error) {
+	path, err = spec.path()
+	if err != nil {
+		return "", "", err
+	}
+	raw, err := readIfExists(path)
+	if err != nil {
+		return "", path, err
+	}
+	var out []byte
+	var action string
+	if spec.kind == "toml" {
+		var text string
+		text, action, err = editCodexTOML(string(raw), o.name, o.cmd, o.uninstall)
+		out = []byte(text)
+	} else {
+		var entry map[string]any
+		if !o.uninstall {
+			entry = jsonEntry(o.cmd, spec.typed)
+		}
+		out, action, err = editJSONServers(raw, spec.key, o.name, entry)
+	}
+	if err != nil {
+		return "", path, err
+	}
+	if action == "unchanged" || action == "absent" {
+		return action, path, nil
+	}
+	if o.dryRun {
+		return "would be " + action, path, nil
+	}
+	backup, err := writeFileAtomic(path, out)
+	if err != nil {
+		return "", path, err
+	}
+	if backup != "" {
+		return action + " (backup: " + backup + ")", path, nil
+	}
+	return action, path, nil
+}
+
+// claudeCodeArgs returns the Claude Code CLI commands for add or remove.
+func claudeCodeArgs(o installOptions) [][]string {
+	if o.uninstall {
+		return [][]string{{"mcp", "remove", o.name, "--scope", "user"}}
+	}
+	add := append([]string{"mcp", "add", "--scope", "user", o.name, "--", o.cmd.command}, o.cmd.args...)
+	return [][]string{{"mcp", "remove", o.name, "--scope", "user"}, add}
+}
+
+func applyClaudeCode(o installOptions) (status string, err error) {
+	if _, err := exec.LookPath("claude"); err != nil {
+		return "", fmt.Errorf("the claude command was not found; run: claude %s", strings.Join(claudeCodeArgs(o)[len(claudeCodeArgs(o))-1], " "))
+	}
+	cmds := claudeCodeArgs(o)
+	if o.dryRun {
+		return "would run: claude " + strings.Join(cmds[len(cmds)-1], " "), nil
+	}
+	for i, a := range cmds {
+		out, err := exec.Command("claude", a...).CombinedOutput()
+		last := i == len(cmds)-1
+		if err != nil && (last || o.uninstall) {
+			if o.uninstall {
+				return "absent", nil
+			}
+			return "", fmt.Errorf("claude %s failed: %s", strings.Join(a, " "), strings.TrimSpace(string(out)))
+		}
+	}
+	if o.uninstall {
+		return "removed", nil
+	}
+	return "added", nil
+}
+
+// resolveServerCmd works out what a client should run. Under the npm wrapper
+// (or with --npx) that is npx, because the downloaded binary lives in a cache.
+func resolveServerCmd(binary string, useNpx bool, serverArgs []string) (serverCmd, error) {
+	if useNpx {
+		args := append([]string{"-y", "nullwire-mcp"}, serverArgs...)
+		if runtime.GOOS == "windows" {
+			return serverCmd{command: "cmd", args: append([]string{"/c", "npx"}, args...)}, nil
+		}
+		return serverCmd{command: "npx", args: args}, nil
+	}
+	if binary == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return serverCmd{}, fmt.Errorf("cannot locate this program: %v (use --binary)", err)
+		}
+		binary = exe
+	}
+	abs, err := filepath.Abs(binary)
+	if err != nil {
+		return serverCmd{}, err
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	}
+	if st, err := os.Stat(abs); err != nil || st.IsDir() {
+		return serverCmd{}, fmt.Errorf("%s is not a file; check --binary", abs)
+	}
+	return serverCmd{command: abs, args: serverArgs}, nil
+}
+
+func Run(args []string) int { return runInstallTo(os.Stdout, os.Stderr, args) }
+
+// runInstallTo is Run with explicit writers, for tests.
+func runInstallTo(out, errw io.Writer, args []string) int {
+	fset := flag.NewFlagSet("install", flag.ContinueOnError)
+	fset.SetOutput(errw)
+	clientFlag := fset.String("client", "all", "comma-separated clients, or all (every client found on this machine)")
+	name := fset.String("name", "nullwire", "name to register the server under")
+	binary := fset.String("binary", "", "path of the nullwire-mcp binary to register (default: this program)")
+	useNpx := fset.Bool("npx", false, "register `npx -y nullwire-mcp` instead of a binary path")
+	uninstall := fset.Bool("uninstall", false, "remove the server instead of adding it")
+	dryRun := fset.Bool("dry-run", false, "show what would change without writing anything")
+	list := fset.Bool("list", false, "list supported clients and whether they are installed here")
+	printCfg := fset.Bool("print", false, "print a config snippet for clients that are not supported")
+	fset.Usage = func() {
+		fmt.Fprintf(errw, "usage: nullwire-mcp install [--client NAME,…|all] [--dry-run] [--uninstall] [--list] [--print] [--name N] [--binary PATH | --npx] [-- SERVER FLAGS…]\n")
+		fmt.Fprintf(errw, "Server flags after -- are saved in the client's config, for example: install --client cursor -- -port 8081\n")
+		fset.PrintDefaults()
+	}
+	// Everything after the first "--" belongs to the server, not to install.
+	own, serverArgs := args, []string(nil)
+	for i, a := range args {
+		if a == "--" {
+			own, serverArgs = args[:i], args[i+1:]
+			break
+		}
+	}
+	if err := fset.Parse(own); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 2
+	}
+	if fset.NArg() > 0 {
+		fmt.Fprintf(errw, "nullwire-mcp install: unexpected argument %q (server flags go after --)\n", fset.Arg(0))
+		return 2
+	}
+	if !reServerName.MatchString(*name) {
+		fmt.Fprintf(errw, "nullwire-mcp install: --name must be 1 to 64 letters, digits, - or _\n")
+		return 2
+	}
+
+	clients := installClients()
+	if *list {
+		for _, c := range clients {
+			loc := "claude command"
+			if c.kind != "cli" {
+				if p, err := c.path(); err == nil {
+					loc = p
+				}
+			}
+			state := "not found"
+			if c.detected() {
+				state = "found"
+			}
+			fmt.Fprintf(out, "%-15s %-18s %-10s %s\n", c.id, c.label, state, loc)
+		}
+		return 0
+	}
+
+	useNpxFinal := *useNpx || (*binary == "" && os.Getenv("NULLWIRE_VIA_NPM") == "1")
+	cmd, err := resolveServerCmd(*binary, useNpxFinal, serverArgs)
+	if err != nil {
+		fmt.Fprintf(errw, "nullwire-mcp install: %v\n", err)
+		return 1
+	}
+	if *printCfg {
+		entry, _ := json.MarshalIndent(map[string]any{"mcpServers": map[string]any{*name: jsonEntry(cmd, false)}}, "", "  ")
+		fmt.Fprintf(out, "JSON clients (Zed, Continue, Amazon Q and others use a similar block):\n%s\n\n", entry)
+		toml, _, _ := editCodexTOML("", *name, cmd, false)
+		fmt.Fprintf(out, "TOML (Codex CLI):\n%s", toml)
+		return 0
+	}
+
+	wanted := map[string]bool{}
+	all := false
+	for _, id := range strings.Split(*clientFlag, ",") {
+		id = strings.ToLower(strings.TrimSpace(id))
+		switch {
+		case id == "":
+		case id == "all":
+			all = true
+		default:
+			known := false
+			for _, c := range clients {
+				if c.id == id {
+					known = true
+				}
+			}
+			if !known {
+				fmt.Fprintf(errw, "nullwire-mcp install: unknown client %q (run --list)\n", id)
+				return 2
+			}
+			wanted[id] = true
+		}
+	}
+
+	o := installOptions{name: *name, cmd: cmd, uninstall: *uninstall, dryRun: *dryRun}
+	verb := "Registering"
+	if o.uninstall {
+		verb = "Removing"
+	}
+	suffix := ""
+	if o.dryRun {
+		suffix = " [dry run]"
+	}
+	fmt.Fprintf(out, "%s %q (%s)%s\n", verb, o.name, strings.TrimSpace(cmd.command+" "+strings.Join(cmd.args, " ")), suffix)
+
+	failures, handled := 0, 0
+	for _, c := range clients {
+		explicit := wanted[c.id]
+		if !explicit && !all {
+			continue
+		}
+		if !explicit && !c.detected() {
+			fmt.Fprintf(out, "  –  %-18s not found on this machine\n", c.label)
+			continue
+		}
+		var status, where string
+		var err error
+		if c.kind == "cli" {
+			status, err = applyClaudeCode(o)
+			where = "claude CLI"
+		} else {
+			status, where, err = applyFile(c, o)
+		}
+		handled++
+		if err != nil {
+			failures++
+			fmt.Fprintf(out, "  ✗  %-18s %v\n", c.label, err)
+			continue
+		}
+		fmt.Fprintf(out, "  ✓  %-18s %s  %s\n", c.label, status, where)
+	}
+	if handled == 0 {
+		fmt.Fprintf(out, "No supported MCP clients were found. Name one with --client (see --list), or use --print for a snippet to paste.\n")
+	} else if !o.dryRun && !o.uninstall && failures < handled {
+		fmt.Fprintf(out, "Restart the client to pick up the change.\n")
+	}
+	if failures > 0 {
+		return 1
+	}
+	return 0
 }
