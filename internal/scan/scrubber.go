@@ -5,6 +5,8 @@ import "strings"
 // Scrubber is the part of the redaction engine that the scanner needs.
 type Scrubber interface {
 	ScrubText(in string) (string, int)
+	TokenCount() uint64
+	IPCount() uint64
 }
 
 // NewScrubber builds the Scrubber that Run uses. The app package sets it at

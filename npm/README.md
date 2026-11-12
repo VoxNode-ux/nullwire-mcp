@@ -632,23 +632,24 @@ go test -race ./...
 
 | File | Purpose |
 |---|---|
-| `main.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
-| `ws.go` | WebSocket frame reader and capture (read-only taps) |
-| `inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
-| `scrub_extra.go` | JSON array, XML and base64 redaction |
+| `main.go` | Tiny entry point (keeps `go install github.com/VoxNode-ux/nullwire-mcp@latest` working) |
+| `internal/app/app.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
+| `internal/app/ws.go` | WebSocket frame reader and capture (read-only taps) |
+| `internal/app/inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
+| `internal/app/scrub_extra.go` | JSON array, XML and base64 redaction |
 | `internal/vendors/` | Vendor prefix tiers |
-| `cloud_secrets.go` | Prefix-less cloud credentials (AWS, Azure, Cloudflare) and their headers |
-| `scan.go`, `env_scan.go`, `toml_scan.go`, `yaml_scan.go`, `zip_scan.go`, `history_scan.go` | The `scan` command |
-| `protect.go`, `protect_helpers.go` | The `protect` command |
+| `internal/app/cloud_secrets.go` | Prefix-less cloud credentials (AWS, Azure, Cloudflare) and their headers |
+| `internal/app/scan.go`, `internal/app/env_scan.go`, `internal/app/toml_scan.go`, `internal/app/yaml_scan.go`, `internal/app/zip_scan.go`, `internal/app/history_scan.go` | The `scan` command |
+| `internal/app/protect.go`, `internal/app/protect_helpers.go` | The `protect` command |
 | `internal/install/` | The `install` command (client config editing) |
-| `scripts/install.sh`, `scripts/install.ps1` | Installers for macOS, Linux, Termux and Windows |
+| `scripts/` | Installers for macOS, Linux, Termux and Windows (`install.sh`, `install.ps1`, `termux-install.sh`) |
 | `npm/` | The `npx` launcher (no dependencies, no install script) |
 | `packaging/` | Homebrew, Scoop, AUR, winget and Chocolatey templates, `render.sh`, Nix package, `gh` extension and asdf/mise plugin sources |
 | `flake.nix`, `nfpm.yaml` | Nix flake; `.deb`/`.rpm`/`.apk` package definition |
 | `python/` | The `pip` / `pipx` launcher |
 | `docs/` | GitHub Pages site and the short install URL |
-| `bench_test.go`, `chaos_test.go` | Benchmarks and network fault-injection tests |
-| `feature_test.go` | Tests for the features above |
+| `internal/app/bench_test.go`, `internal/app/chaos_test.go` | Benchmarks and network fault-injection tests |
+| `internal/app/feature_test.go` | Tests for the features above |
 
 </details>
 
