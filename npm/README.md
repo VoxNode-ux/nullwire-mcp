@@ -639,8 +639,8 @@ go test -race ./...
 | `internal/app/scrub_extra.go` | JSON array, XML and base64 redaction |
 | `internal/vendors/` | Vendor prefix tiers |
 | `internal/app/cloud_secrets.go` | Prefix-less cloud credentials (AWS, Azure, Cloudflare) and their headers |
-| `internal/app/scan.go`, `internal/app/env_scan.go`, `internal/app/toml_scan.go`, `internal/app/yaml_scan.go`, `internal/app/zip_scan.go`, `internal/app/history_scan.go` | The `scan` command |
-| `internal/app/protect.go`, `internal/app/protect_helpers.go` | The `protect` command |
+| `internal/scan/` | The `scan` command (`scan.go`, `env_scan.go`, `toml_scan.go`, `yaml_scan.go`, `zip_scan.go`, `history_scan.go`, plus the small `Scrubber` interface in `scrubber.go`) |
+| `internal/protect/` | The `protect` command |
 | `internal/install/` | The `install` command (client config editing) |
 | `scripts/` | Installers for macOS, Linux, Termux and Windows (`install.sh`, `install.ps1`, `termux-install.sh`) |
 | `npm/` | The `npx` launcher (no dependencies, no install script) |
