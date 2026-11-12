@@ -318,8 +318,8 @@ func editCodexTOML(raw, name string, cmd serverCmd, remove bool) (out, action st
 // the file already exists, a copy is kept next to it the first time (the copy
 // is never overwritten, so it always holds the original).
 func writeFileAtomic(path string, data []byte) (backup string, err error) {
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		path = real // keep a symlinked dotfile a symlink
+	if realPath, err := filepath.EvalSymlinks(path); err == nil {
+		path = realPath // keep a symlinked dotfile a symlink
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -468,8 +468,8 @@ func resolveServerCmd(binary string, useNpx bool, serverArgs []string) (serverCm
 	if err != nil {
 		return serverCmd{}, err
 	}
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = real
+	if realPath, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = realPath
 	}
 	if st, err := os.Stat(abs); err != nil || st.IsDir() {
 		return serverCmd{}, fmt.Errorf("%s is not a file; check --binary", abs)
@@ -555,9 +555,9 @@ func runInstallTo(out, errw io.Writer, args []string) int {
 	all := false
 	for _, id := range strings.Split(*clientFlag, ",") {
 		id = strings.ToLower(strings.TrimSpace(id))
-		switch {
-		case id == "":
-		case id == "all":
+		switch id {
+		case "":
+		case "all":
 			all = true
 		default:
 			known := false

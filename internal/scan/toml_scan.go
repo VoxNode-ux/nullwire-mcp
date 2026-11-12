@@ -1,4 +1,4 @@
-package main
+package scan
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 var tomlKeyValue = regexp.MustCompile(`^\s*([A-Za-z0-9_.-]+)\s*=\s*["']([^"']*)["']`)
 var tomlInlineTable = regexp.MustCompile(`^\s*([A-Za-z0-9_.-]+)\s*=\s*\{(.*)\}\s*$`)
 
-func scanTOMLFile(s *Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens int) {
+func scanTOMLFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens int) {
 	raw, err := readScanFile(path)
 	if err != nil {
 		fmt.Fprintf(report, "✗ %s: %v\n", path, err)

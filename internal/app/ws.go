@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"encoding/binary"
@@ -221,7 +221,7 @@ type wsCollector struct {
 	dropped   int // messages left out because the total limit was reached
 }
 
-func newWSCollector(max int) *wsCollector { return &wsCollector{max: max} }
+func newWSCollector(maxBytes int) *wsCollector { return &wsCollector{max: maxBytes} }
 
 func (c *wsCollector) add(m wsMessage) {
 	c.mu.Lock()

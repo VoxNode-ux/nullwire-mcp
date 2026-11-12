@@ -8,12 +8,14 @@
 
 [![CI and Release](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/release.yml)
 [![Security checks](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/security.yml/badge.svg)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/security.yml)
+[![Code quality](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/quality.yml/badge.svg)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/quality.yml)
+[![codecov](https://codecov.io/gh/VoxNode-ux/nullwire-mcp/graph/badge.svg)](https://codecov.io/gh/VoxNode-ux/nullwire-mcp)
 ![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-2ea44f)
 ![Disk writes: 0](https://img.shields.io/badge/disk%20writes-0-2ea44f)
 ![MCP](https://img.shields.io/badge/MCP-stdio-7c3aed)
 
-[Quick start](#-quick-start) · [How it works](#-how-it-works) · [What gets redacted](#-what-gets-redacted) · [MCP tools](#-mcp-tools) · [Configuration](#-configuration) · [CLI reference](#-cli-reference) · [Security model](#-security-model-and-honest-limits)
+[Quick start](#quick-start) · [How it works](#how-it-works) · [What gets redacted](#what-gets-redacted) · [MCP tools](#mcp-tools) · [Configuration](#configuration) · [CLI reference](#cli-reference) · [Security model](#security-model-and-honest-limits) · [Contributing](https://github.com/VoxNode-ux/nullwire-mcp/blob/main/CONTRIBUTING.md)
 
 </div>
 
@@ -28,7 +30,7 @@ NullWire sits between your app and the network. It records what passes through, 
 ```text
   your app ──► NullWire (127.0.0.1) ──► the real server
                     │
-                    ├─ forwards every byte, unmodified
+                    ├─ forwards your traffic as-is (bodies untouched)
                     └─ keeps a scrubbed copy in RAM ──► your AI assistant (MCP)
 ```
 
@@ -37,9 +39,9 @@ NullWire sits between your app and the network. It records what passes through, 
 | | |
 |---|---|
 | 🪶 **Zero dependencies** | Go standard library only. One static binary, nothing to install. |
-| 🧠 **RAM only** | The last 50 flows live in memory. The server never writes a file, and a stop signal wipes the buffer. (`install` edits your MCP client configs, but only when you run it.) |
+| 🧠 **RAM only** | The last 50 flows live in memory. The server never writes a file, and a stop signal clears the buffer. (`install` edits your MCP client configs, but only when you run it.) |
 | 🔒 **Loopback only** | The proxy binds to `127.0.0.1`. A DNS-rebinding guard answers only loopback `Host` headers. |
-| 🧽 **Layered redaction** | Private keys, JSON/XML/query secrets, JWTs, 50+ vendor key formats, IPs, secrets hiding in base64, and a randomness detector for keys nobody has seen before. |
+| 🧽 **Layered redaction** | Private keys, JSON/XML/query secrets, JWTs, 200+ vendor key formats, cloud credentials (AWS, Azure, Cloudflare) with or without a prefix, IPs, secrets hiding in base64, and a randomness detector for keys nobody has seen before. |
 | 🛡️ **Fail-closed shields** | Bodies that can't be inspected are refused or flagged, never silently passed to the model. |
 | 🔌 **HTTP, HTTPS and WebSocket** | Plain proxying, blind `CONNECT` tunnels, a reverse gateway for full HTTPS visibility, and WebSocket text capture in both directions. |
 | 🔁 **Safe replay** | Export any captured request as a `curl` command with secrets swapped for environment variables. |
@@ -48,11 +50,13 @@ NullWire sits between your app and the network. It records what passes through, 
 
 ---
 
+<a id="quick-start"></a>
+
 ## 🚀 Quick start
 
 ### 1. Install it
 
-Pick whichever fits your machine. Every method checks the download against the release's `SHA256SUMS.txt` and installs nothing if it doesn't match. Release binaries also carry signed GitHub build provenance, and each release includes a CycloneDX SBOM (`nullwire-sbom.cdx.json`).
+Pick whichever fits your machine. Every method checks the download against the release's `SHA256SUMS.txt` and installs nothing if it doesn't match. Release binaries also carry signed GitHub build provenance and keyless [cosign](https://docs.sigstore.dev/) signatures (`*.sigstore.json`), and each release includes a CycloneDX SBOM (`nullwire-sbom.cdx.json`).
 
 <details open>
 <summary><b>With Node.js (no install step): <code>npx</code></b></summary>
@@ -83,6 +87,56 @@ Installs to `%LOCALAPPDATA%\Programs\nullwire-mcp` and adds it to your user PATH
 </details>
 
 <details>
+<summary><b>Short install URL (GitHub Pages)</b></summary>
+
+```bash
+curl -fsSL https://voxnode-ux.github.io/nullwire-mcp/install.sh | sh -s -- --setup
+```
+```powershell
+irm https://voxnode-ux.github.io/nullwire-mcp/install.ps1 | iex
+```
+Same scripts as above, just a shorter address.
+</details>
+
+<details>
+<summary><b>Linux packages and distributions</b></summary>
+
+```bash
+# Debian, Ubuntu: download the .deb from the release page, then
+sudo apt install ./nullwire-mcp_1.2.0_amd64.deb
+# Fedora, RHEL
+sudo dnf install ./nullwire-mcp-1.2.0-1.x86_64.rpm
+# Alpine (packages are not signed with an Alpine key)
+sudo apk add --allow-untrusted ./nullwire-mcp_1.2.0_x86_64.apk
+# Arch Linux (AUR)
+yay -S nullwire-mcp-bin
+# Nix
+nix run github:VoxNode-ux/nullwire-mcp
+```
+Packages are built for amd64, arm64 and ARMv7.
+</details>
+
+<details>
+<summary><b>Windows: winget and Chocolatey</b></summary>
+
+```powershell
+winget install VoxNode.NullWire
+choco install nullwire-mcp
+```
+</details>
+
+<details>
+<summary><b>Python, GitHub CLI, mise and asdf</b></summary>
+
+```bash
+pipx run nullwire-mcp install --client all        # or: pip install nullwire-mcp
+gh extension install VoxNode-ux/gh-nullwire && gh nullwire scan --discover
+mise use -g github:VoxNode-ux/nullwire-mcp        # mise, no plugin needed
+mise plugin install nullwire-mcp https://github.com/VoxNode-ux/asdf-nullwire-mcp   # or the asdf plugin
+```
+</details>
+
+<details>
 <summary><b>Homebrew and Scoop</b></summary>
 
 ```bash
@@ -90,7 +144,7 @@ brew install VoxNode-ux/nullwire/nullwire-mcp                                   
 scoop bucket add nullwire https://github.com/VoxNode-ux/scoop-nullwire           # Windows
 scoop install nullwire-mcp
 ```
-Both packages are generated from the templates in [`packaging/`](packaging/README.md).
+All package files (Homebrew, Scoop, AUR, winget, Chocolatey) are generated from the templates in [`packaging/`](https://github.com/VoxNode-ux/nullwire-mcp/blob/main/packaging/README.md).
 </details>
 
 <details>
@@ -141,7 +195,7 @@ nullwire-mcp install --client all --dry-run   # look first: nothing is written
 nullwire-mcp install --client all             # then do it, and restart the client
 ```
 
-It covers Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, Cline, Roo Code, Gemini CLI and Codex CLI. See [Connect your MCP clients](#-connect-your-mcp-clients-install) for details, or add it by hand:
+It covers Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, Cline, Roo Code, Gemini CLI and Codex CLI. See [Connect your MCP clients](#connect-your-mcp-clients) for details, or add it by hand:
 
 ```bash
 # Claude Code
@@ -186,20 +240,22 @@ curl http://127.0.0.1:8080/v1/things -H "Authorization: Bearer sk-live-..."
 
 ---
 
+<a id="how-it-works"></a>
+
 ## 🔭 How it works
 
 ```mermaid
 flowchart LR
     A[Your app or curl] -->|HTTP_PROXY / base URL| P[NullWire proxy<br/>127.0.0.1:8080]
-    P -->|unmodified bytes| S[(Real server)]
-    S -->|unmodified bytes| P
+    P -->|bodies untouched| S[(Real server)]
+    S -->|bodies untouched| P
     P --> C[Capture copy]
     C --> R[Redaction layers]
     R --> B[(RAM ring<br/>50 flows)]
     B -->|MCP over stdio| M[AI assistant]
 ```
 
-The key idea: **the model reads a scrubbed copy, your app talks to the real server.** Nothing the proxy forwards is rewritten, so debugging never changes the behaviour you are debugging.
+The key idea: **the model reads a scrubbed copy, your app talks to the real server.** Request and response bodies are never rewritten. Only a few negotiation headers are adjusted (see [Safety shields](#safety-shields)), so debugging barely changes the behaviour you are debugging.
 
 ### Four ways to capture traffic
 
@@ -227,6 +283,8 @@ Names are letters, digits, `.`, `_` and `-` (up to 32 characters, case-insensiti
 
 ---
 
+<a id="mcp-tools"></a>
+
 ## 🧰 MCP tools
 
 NullWire exposes three tools over stdio. It speaks MCP protocol versions `2026-07-28`, `2025-11-25` and `2024-11-05`, and accepts JSON-RPC batches.
@@ -235,7 +293,7 @@ NullWire exposes three tools over stdio. It speaks MCP protocol versions `2026-0
 |---|---|---|
 | `inspect_traffic` | Returns recent scrubbed flows. | `limit` (1 to 50, default 10), `method`, `url_filter` |
 | `export_sanitized_curl` | Rebuilds a captured request as a `curl` command. Redacted values become environment variables you fill in yourself. | `flow_id` (required) |
-| `clear_ram_buffer` | Wipes all 50 slots and resets the counters. | none |
+| `clear_ram_buffer` | Clears all 50 slots and resets the counters. | none |
 
 A flow looks like this (illustrative):
 
@@ -274,6 +332,8 @@ Placeholders are `NULLWIRE_AUTH_TOKEN`, `NULLWIRE_COOKIE`, `NULLWIRE_IP` and `NU
 
 ---
 
+<a id="what-gets-redacted"></a>
+
 ## 🧽 What gets redacted
 
 Every URL, header, request body and response body passes through these layers, in this order:
@@ -286,14 +346,16 @@ Every URL, header, request body and response body passes through these layers, i
 | 4 | **URL credentials** | `user:password@host` in any URL or connection string | `postgres://app:pw@db/prod` |
 | 5 | **Auth schemes** | `Bearer`, `Basic` and `Token` credentials | `Authorization: Bearer …` |
 | 6 | **JWTs** | Three-part `eyJ…` tokens | |
-| 7 | **Vendor keys** | 50+ formats in three tiers (below) | `AKIA…`, `ghp_…`, `sk-ant-…`, `SG.…` |
+| 7 | **Vendor keys** | 200+ prefixes in three tiers (below), plus webhook URLs and connection strings | `AKIA…`, `ghp_…`, `sk-ant-…`, `cfut_…`, `SG.…` |
 | 8 | **Secret-named fields** | `key: value` or `key=value` pairs where the *name* says secret and the value is 12 to 256 characters | `x-custom-auth: …`, `session=…` |
-| 9 | **Your patterns** | Regexes from the [config file](#-configuration) | |
+| 9 | **Your patterns** | Regexes from the [config file](#configuration) | |
 | 10 | **IP addresses** | IPv4 (strictly validated) and IPv6, except loopback and unspecified | `203.0.113.9` |
 | 11 | **Base64** | Base64 or URL-safe base64 whose *decoded* text contains a secret. Images and other binary data are left alone. | `eyJhcGlfa2V5…` |
 | 12 | **Randomness detector** | 16 to 128 character tokens that look machine-generated: mixed case or digits, high Shannon entropy, few vowels. UUIDs are exempt. | an unknown vendor's key |
 
-**Headers.** `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, `Api-Key`, `X-Auth-Token` and `Proxy-Authorization` are always redacted, plus any you add.
+**Headers.** `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, `Api-Key`, `X-Auth-Token` and `Proxy-Authorization` are always redacted, plus common cloud and developer-tool headers (`X-Auth-Key`, `Ocp-Apim-Subscription-Key`, `X-Amz-Security-Token`, `X-Goog-Api-Key`, `Private-Token`, `X-Vault-Token`, `Apikey`, and others), plus any you add. Use `ignore_headers` to opt a header out.
+
+**Cloud credentials without a prefix.** AWS secret access keys, Azure storage and Service Bus keys, Azure AD client secrets (`…8Q~…`) and SQL connection-string passwords have no vendor prefix. They are caught by the name they are stored under (`SecretAccessKey`, `AccountKey`, `SharedAccessKey`, `client_secret`, `Password=` in a connection string), by their shape (a standalone 40-character random base64 string, an Azure AD secret), or by the header they travel in. Cloudflare API tokens are caught by `Authorization: Bearer`, `X-Auth-Key`, the new `cfut_`/`cfat_` prefixes, or the randomness detector.
 
 **Vendor tiers.** Matching all prefixes the same way would redact ordinary words, so they are tiered:
 
@@ -309,6 +371,8 @@ Prefixes are matched case-sensitively, so `asiapacific_region` is left alone.
 
 ---
 
+<a id="safety-shields"></a>
+
 ## 🛡️ Safety shields
 
 | Shield | Behaviour |
@@ -320,7 +384,7 @@ Prefixes are matched case-sensitively, so `asiapacific_region` is left alone.
 | **Size limits** | See the table below. A secret that straddles a limit is still scrubbed first, thanks to an 8 KiB scrub window. |
 | **Loopback only** | The proxy binds to `127.0.0.1`. The reverse gateway answers only loopback `Host` headers (`403` otherwise) and refuses to proxy to itself (`508`). |
 | **Tunnel limits** | At most 256 concurrent tunnels and upgraded connections, each closed after 10 minutes idle. |
-| **Wipe on exit** | `SIGINT` and `SIGTERM` clear the ring buffer before the process exits. |
+| **Clear on exit** | `SIGINT` and `SIGTERM` clear the ring buffer before the process exits. |
 
 ### Limits
 
@@ -335,6 +399,8 @@ Prefixes are matched case-sensitively, so `asiapacific_region` is left alone.
 | Randomness detector | 16 to 128 characters |
 
 ---
+
+<a id="configuration"></a>
 
 ## ⚙️ Configuration
 
@@ -366,6 +432,8 @@ Pass `-secrets-config path/to/file.json` to tune redaction without recompiling. 
 Patterns use Go's RE2 syntax, which runs in linear time, so a bad pattern cannot freeze the proxy.
 
 ---
+
+<a id="connect-your-mcp-clients"></a>
 
 ## 🔌 Connect your MCP clients: `install`
 
@@ -431,9 +499,25 @@ nullwire-mcp scan --history                  # opt-in: count secrets in shell hi
 | `--deep DIR` | Walk a directory for MCP config JSON and `.env` files. Skips `node_modules`, `.git`, `dist`, `build`, `vendor` and similar by exact folder name. |
 | `--toml`, `--yaml`, `--zip` | Also scan `*.toml`, `*.yaml`/`*.yml` and ZIP archives. Off by default so a deep scan doesn't open every CI file. |
 | `--history` | Count lines with secrets in bash, zsh, fish and PowerShell history. Text is never printed. |
-| exit codes | `0` done, `1` every file failed to scan, `2` bad usage |
+| `--fail` | Exit with code `3` when any secret is found (for git hooks and CI). Without it, findings never change the exit code. |
+| exit codes | `0` done, `1` every file failed to scan, `2` bad usage, `3` secrets found (only with `--fail`) |
 
 File types are recognised by name, so `nullwire-mcp scan some.env config.toml settings.yaml bundle.zip` routes each to the right scanner. Files over 4 MiB are skipped. ZIP archives are read in memory under a **zip-bomb shield**: entries over 1 MiB, archives over 20 MiB of content or 1000 entries are skipped and reported.
+
+**Git hook.** Block commits that contain secrets with [pre-commit](https://pre-commit.com):
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/VoxNode-ux/nullwire-mcp
+    rev: v1.2.0
+    hooks:
+      - id: nullwire-scan            # builds nullwire-mcp from source (needs Go)
+      # - id: nullwire-scan-system   # or use the nullwire-mcp already on your PATH
+```
+The hook runs `nullwire-mcp scan --fail --yaml` on staged `.env`, MCP config, TOML and YAML files. The report shows scrubbed values only.
+
+**Shortcut.** Add `alias nw="nullwire-mcp"` to your `~/.bashrc` or `~/.zshrc` (PowerShell: `Set-Alias nw nullwire-mcp`), then `nw scan --discover`.
 
 **`protect`** runs a quick scan of the usual places, then starts the normal server:
 
@@ -444,6 +528,8 @@ nullwire-mcp protect --target https://api.example.com --deep .
 It accepts the server options (`--port`, `--target`, `--cacert`, `--dns`, `--secrets-config`, `--scrub-headers`, `--allow-uninspectable`) plus `--deep DIR`, `--history` and `--no-scan`. The scan report goes to stderr, so the MCP channel on stdout stays clean, and stop signals are passed on to the server.
 
 ---
+
+<a id="cli-reference"></a>
 
 ## 📟 CLI reference
 
@@ -460,7 +546,7 @@ nullwire-mcp install [options]       register NullWire with your MCP clients
 | `-target` | none | Reverse-gateway upstream: a URL and/or `name=URL` entries, comma-separated. |
 | `-cacert` | none | Extra CA certificates (a PEM file or a directory) for upstream HTTPS. |
 | `-dns` | `auto` | Upstream DNS: `auto`, `system`, or a comma list of IPs such as `1.1.1.1,9.9.9.9:53`. |
-| `-secrets-config` | none | Path to the [JSON config](#-configuration). |
+| `-secrets-config` | none | Path to the [JSON config](#configuration). |
 | `-scrub-headers` | none | Extra header names to always redact. |
 | `-allow-uninspectable` | off | Forward request bodies that can't be inspected instead of refusing them with `415`. |
 
@@ -481,15 +567,17 @@ sleep infinity | ./nullwire-linux-arm64   # keep stdin open; use a second sessio
 
 ---
 
+<a id="security-model-and-honest-limits"></a>
+
 ## 🔐 Security model and honest limits
 
 NullWire is a *diagnostic* tool. Be clear-eyed about what it does and does not promise.
 
 **What it guarantees**
-- Nothing is written to disk by the server, and a stop signal wipes memory. The `install` command edits MCP client configs only when you run it, and backs each file up first.
+- Nothing is written to disk by the server, and a stop signal clears the buffer (references are dropped; memory is not zeroed). The `install` command edits MCP client configs only when you run it, and backs each file up first.
 - The proxy is reachable only from your own machine.
 - The model never sees the live traffic, only the scrubbed copy.
-- Live traffic is never rewritten, so what you debug is what runs.
+- Request and response bodies are never rewritten. Headers are adjusted only where inspection needs it: `Accept-Encoding` is reduced to `gzip`/`deflate`, and the WebSocket `permessage-deflate` offer is dropped.
 
 **What it does not do**
 - **Release binaries carry signed build provenance, not OS-vendor code-signing certificates.** Verify authenticity with `SHA256SUMS.txt` and `gh attestation verify`. Because they are not signed with an Apple Developer ID or Microsoft Authenticode certificate, on macOS you may need `xattr -d com.apple.quarantine ./nullwire-darwin-arm64`.
@@ -516,11 +604,13 @@ If you find a secret NullWire missed, please open an issue with a *fake* sample 
 | FreeBSD amd64 (VM) | ✅ verified | smoke test, silent notifications, end-to-end redaction |
 | Linux ARMv7 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
 | Linux RISC-V 64 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
-| Linux ARM64 (Android / Termux) | ✅ verified on device | live upstream proxy, redaction tags, `export_sanitized_curl`, reverse gateway, guards (needs `termux-chroot`) |
+| Linux ARM64 (Android / Termux) | ✅ verified on device (v1.2.0 CA-bundle change awaiting a device re-check) | live upstream proxy, redaction tags, `export_sanitized_curl`, reverse gateway, guards (needs `termux-chroot`) |
 
-🟡 *emulated* means run under QEMU, not on real hardware. Details are in [docs/test-results.md](docs/test-results.md).
+🟡 *emulated* means run under QEMU, not on real hardware. Details are in [docs/test-results.md](https://github.com/VoxNode-ux/nullwire-mcp/blob/main/docs/test-results.md).
 
 ---
+
+<a id="development"></a>
 
 ## 🧪 Development
 
@@ -531,6 +621,9 @@ go test -race ./...
 
 - **Zero dependencies:** `go.mod` has no `require` lines, and CI keeps it that way.
 - **Release transparency:** every release is built with Go 1.26 and includes `SHA256SUMS.txt`, a CycloneDX SBOM (`nullwire-sbom.cdx.json`) and a signed build provenance attestation, which you can verify with `gh attestation verify`. The same proof is attached to each release as `nullwire-provenance.intoto.jsonl`. The `go vet` and `go test -race` logs of every CI run are saved as a `test-logs` artifact for 30 days. Pushes to `main` update a rolling `latest` pre-release; numbered tags produce stable releases. Pull requests never publish anything.
+- **Quality checks:** `quality.yml` runs golangci-lint (errcheck, staticcheck, revive, ineffassign), reports test coverage (Codecov) and compares benchmarks against the base branch with `benchstat`. Run the benchmarks yourself with `go test -run='^$' -bench=. -benchmem ./...`. `chaos_test.go` injects network faults (slowloris, dropped connections, malformed and truncated streams) and checks that nothing crashes or leaks.
+- **Supply chain:** releases are signed with keyless cosign, the Docker image is signed and scanned with Trivy every week, `reproducible.yml` rebuilds the binaries on four different runners and requires identical checksums, and `security.yml` (weekly) runs `govulncheck`, `gosec` and the fuzz targets. Verify a download with `cosign verify-blob --bundle nullwire-linux-amd64.sigstore.json --certificate-identity-regexp 'https://github.com/VoxNode-ux/nullwire-mcp/\.github/workflows/release\.yml@.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com nullwire-linux-amd64`.
+- **Releases:** a stable tag publishes the release, the `.deb`/`.rpm`/`.apk` packages, the npm package (with provenance), the Homebrew and Scoop taps, the AUR, winget, Chocolatey, PyPI and the official MCP Registry. Release notes are grouped by pull request label (`.github/release.yml`).
 - **Fuzzing:** the scrubber, the IPv6 and vendor-key matchers and the WebSocket frame reader have fuzz targets. They check that no secret survives scrubbing, that results don't depend on how input is chunked, and that nothing panics.
 - **CI:** checks the shell and Node installers for syntax errors, runs `go vet` and the race detector, cross-compiles static binaries for all 9 platforms (Linux x86-64, ARM64, ARMv7 and RISC-V 64; macOS Intel and Apple Silicon; Windows x86-64 and ARM64; FreeBSD x86-64), and publishes a multi-arch Docker image (amd64 and arm64). `smoke.yml` and `smoke-extra.yml` run on demand (Actions → Run workflow): end-to-end redaction tests on Ubuntu, macOS (Apple Silicon and Intel), Windows (x86-64 and ARM64), a FreeBSD VM, and QEMU-emulated Linux ARMv7 and RISC-V 64. Security checks run `govulncheck` and the fuzz targets. GitHub Actions are pinned to full commit hashes.
 
@@ -539,18 +632,24 @@ go test -race ./...
 
 | File | Purpose |
 |---|---|
-| `main.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
-| `ws.go` | WebSocket frame reader and capture (read-only taps) |
-| `inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
-| `scrub_extra.go` | JSON array, XML and base64 redaction |
-| `vendors.go` | Vendor prefix tiers |
-| `scan.go`, `env_scan.go`, `toml_scan.go`, `yaml_scan.go`, `zip_scan.go`, `history_scan.go` | The `scan` command |
-| `protect.go`, `protect_helpers.go` | The `protect` command |
-| `install.go` | The `install` command (client config editing) |
-| `scripts/install.sh`, `scripts/install.ps1` | Installers for macOS, Linux, Termux and Windows |
+| `main.go` | Tiny entry point (keeps `go install github.com/VoxNode-ux/nullwire-mcp@latest` working) |
+| `internal/app/app.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
+| `internal/app/ws.go` | WebSocket frame reader and capture (read-only taps) |
+| `internal/app/inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
+| `internal/app/scrub_extra.go` | JSON array, XML and base64 redaction |
+| `internal/vendors/` | Vendor prefix tiers |
+| `internal/app/cloud_secrets.go` | Prefix-less cloud credentials (AWS, Azure, Cloudflare) and their headers |
+| `internal/scan/` | The `scan` command (`scan.go`, `env_scan.go`, `toml_scan.go`, `yaml_scan.go`, `zip_scan.go`, `history_scan.go`, plus the small `Scrubber` interface in `scrubber.go`) |
+| `internal/protect/` | The `protect` command |
+| `internal/install/` | The `install` command (client config editing) |
+| `scripts/` | Installers for macOS, Linux, Termux and Windows (`install.sh`, `install.ps1`, `termux-install.sh`) |
 | `npm/` | The `npx` launcher (no dependencies, no install script) |
-| `packaging/` | Homebrew and Scoop templates and `render.sh` |
-| `feature_test.go` | Tests for the features above |
+| `packaging/` | Homebrew, Scoop, AUR, winget and Chocolatey templates, `render.sh`, Nix package, `gh` extension and asdf/mise plugin sources |
+| `flake.nix`, `nfpm.yaml` | Nix flake; `.deb`/`.rpm`/`.apk` package definition |
+| `python/` | The `pip` / `pipx` launcher |
+| `docs/` | GitHub Pages site and the short install URL |
+| `internal/app/bench_test.go`, `internal/app/chaos_test.go` | Benchmarks and network fault-injection tests |
+| `internal/app/feature_test.go` | Tests for the features above |
 
 </details>
 

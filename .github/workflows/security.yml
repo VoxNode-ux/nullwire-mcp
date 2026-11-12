@@ -56,14 +56,14 @@ jobs:
           set -o pipefail
           {
             echo "== go vet =="; go vet ./... 2>&1
-            echo "== go test -c =="; go test -c -o /dev/null . 2>&1
+            echo "== go test -c =="; go test -c -o /dev/null ./internal/app 2>&1
             echo "== fuzz build (1 execution) =="
-            go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=1x . 2>&1
+            go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=1x ./internal/app 2>&1
           } | tee fuzz-build-${{ matrix.target }}.log
       - name: Run fuzzing for 2 minutes
         run: |
           set -o pipefail
-          go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=120s . 2>&1 | tee fuzz-${{ matrix.target }}.log
+          go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=120s ./internal/app 2>&1 | tee fuzz-${{ matrix.target }}.log
       - name: Save the fuzz log
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

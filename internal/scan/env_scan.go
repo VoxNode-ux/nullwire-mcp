@@ -1,4 +1,4 @@
-package main
+package scan
 
 import (
 	"fmt"
@@ -10,9 +10,9 @@ import (
 // AUTH only counts as a whole word or next to _ or -, so AUTHOR is not flagged.
 var envSecretNames = regexp.MustCompile(`(?i)(SECRET|TOKEN|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CREDENTIAL|BEARER|AUTHORIZATION|^AUTH$|AUTH[_-]|[_-]AUTH|SESSION[_-]?(ID|KEY|TOKEN))`)
 
-const hiddenValue = "(name looks secret; value hidden)"
+const HiddenValue = "(name looks secret; value hidden)"
 
-func scanEnvFile(s *Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens, ips int) {
+func scanEnvFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens, ips int) {
 	raw, err := readScanFile(path)
 	if err != nil {
 		fmt.Fprintf(report, "✗ %s: %v\n", path, err)

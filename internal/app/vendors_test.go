@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"strings"
@@ -28,7 +28,7 @@ func TestVendorPrefixListsAreSane(t *testing.T) {
 				continue
 			}
 			c := p[0]
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
 				t.Errorf("%s prefix %q must start with a letter or digit", name, p)
 			}
 			for i := 0; i < len(p); i++ {

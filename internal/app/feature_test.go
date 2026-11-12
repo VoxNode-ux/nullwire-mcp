@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"archive/zip"
@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/VoxNode-ux/nullwire-mcp/internal/scan"
 )
 
 // Helpers are prefixed fx so they cannot collide with other test files.
@@ -104,8 +106,8 @@ func fxFeed(p *wsParser, stream []byte, chunk int) {
 }
 
 // fxParse parses a stream and returns what a collector with room for max bytes holds.
-func fxParse(stream []byte, chunk, max int) (*wsCollector, *wsParser) {
-	c := newWSCollector(max)
+func fxParse(stream []byte, chunk, maxBytes int) (*wsCollector, *wsParser) {
+	c := newWSCollector(maxBytes)
 	p := newWSParser(c.add)
 	fxFeed(p, stream, chunk)
 	return c, p
@@ -486,7 +488,7 @@ func TestScanFindsSecrets(t *testing.T) {
 	}
 	s, _ := NewScrubber()
 	var report strings.Builder
-	ok, hits, tokens, _ := scanFile(s, cfg, &report)
+	ok, hits, tokens, _ := scan.ScanFile(s, cfg, &report)
 	if !ok || hits == 0 || tokens == 0 || strings.Contains(report.String(), strings.Repeat("a1", 20)) {
 		t.Fatalf("scan missed or leaked a secret:\n%s", report.String())
 	}
@@ -505,12 +507,12 @@ func TestScanRoutesFileTypes(t *testing.T) {
 	write(".mcp.json", `{"mcpServers":{"a":{"env":{"GITHUB_TOKEN":"ghp_`+strings.Repeat("a1", 20)+`"}}}}`)
 
 	var out, errw bytes.Buffer
-	code := runScanTo(&out, &errw, []string{dir})
+	code := scan.RunTo(&out, &errw, []string{dir})
 	report := out.String()
 	if code != 0 {
 		t.Fatalf("exit code %d\n%s%s", code, report, errw.String())
 	}
-	for _, want := range []string{"API_TOKEN", "server.api_key", hiddenValue, "GITHUB_TOKEN"} {
+	for _, want := range []string{"API_TOKEN", "server.api_key", scan.HiddenValue, "GITHUB_TOKEN"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("report is missing %q:\n%s", want, report)
 		}
@@ -538,7 +540,7 @@ func TestScanDeepSkipsOnlyByDirectoryName(t *testing.T) {
 		}
 	}
 	var out, errw bytes.Buffer
-	runScanTo(&out, &errw, []string{"--deep", root})
+	scan.RunTo(&out, &errw, []string{"--deep", root})
 	report := out.String()
 	if !strings.Contains(report, filepath.Join("rebuild-tools", ".github", "mcp.json")) {
 		t.Errorf("the config under .github was not scanned:\n%s", report)
@@ -557,7 +559,7 @@ func TestHistoryScanNeverPrintsText(t *testing.T) {
 	}
 	s, _ := NewScrubber()
 	var report strings.Builder
-	ok, hits, tokens := scanHistoryFile(s, path, &report)
+	ok, hits, tokens := scan.ScanHistoryFile(s, path, &report)
 	if !ok || hits != 1 || tokens == 0 {
 		t.Fatalf("ok=%v hits=%d tokens=%d\n%s", ok, hits, tokens, report.String())
 	}
@@ -802,7 +804,7 @@ func TestYAMLScan(t *testing.T) {
 	}
 	s, _ := NewScrubber()
 	var report strings.Builder
-	ok, hits, tokens := scanYAMLFile(s, path, &report)
+	ok, hits, tokens := scan.ScanYAMLFile(s, path, &report)
 	if !ok || hits != 3 || tokens < 3 {
 		t.Fatalf("ok=%v hits=%d tokens=%d\n%s", ok, hits, tokens, report.String())
 	}
@@ -819,12 +821,12 @@ func TestScanYAMLNeedsFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errw bytes.Buffer
-	runScanTo(&out, &errw, []string{dir})
+	scan.RunTo(&out, &errw, []string{dir})
 	if strings.Contains(out.String(), "app.yaml") {
 		t.Errorf("YAML must not be scanned without --yaml:\n%s", out.String())
 	}
 	out.Reset()
-	runScanTo(&out, &errw, []string{"--yaml", dir})
+	scan.RunTo(&out, &errw, []string{"--yaml", dir})
 	if !strings.Contains(out.String(), "app.yaml") || !strings.Contains(out.String(), "password") || strings.Contains(out.String(), "supersecretvalue123") {
 		t.Errorf("--yaml report wrong:\n%s", out.String())
 	}
@@ -856,7 +858,7 @@ func TestZipBombShield(t *testing.T) {
 
 	s, _ := NewScrubber()
 	var report strings.Builder
-	ok, hits, tokens := scanZipFile(s, path, &report)
+	ok, hits, tokens := scan.ScanZipFile(s, path, &report)
 	if !ok || hits != 1 || tokens == 0 {
 		t.Fatalf("ok=%v hits=%d tokens=%d\n%s", ok, hits, tokens, report.String())
 	}

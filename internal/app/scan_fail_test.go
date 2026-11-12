@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/VoxNode-ux/nullwire-mcp/internal/scan"
 )
 
 // The --fail flag is what the pre-commit hook relies on: exit code 3 when a
@@ -23,7 +25,7 @@ func TestScanFailFlagExitCodes(t *testing.T) {
 
 	run := func(args ...string) (int, string) {
 		var out, errw bytes.Buffer
-		code := runScanTo(&out, &errw, args)
+		code := scan.RunTo(&out, &errw, args)
 		return code, out.String() + errw.String()
 	}
 

@@ -1,4 +1,4 @@
-package main
+package protect
 
 import (
 	"flag"
@@ -6,9 +6,9 @@ import (
 	"os"
 )
 
-// runProtect scans the usual config locations for secrets, then starts the
+// Run scans the usual config locations for secrets, then starts the
 // normal server in a child process with the options it was given.
-func runProtect(args []string) int {
+func Run(args []string) int {
 	pf := flag.NewFlagSet("protect", flag.ContinueOnError)
 	port := pf.Int("port", 8080, "TCP port for the diagnostic proxy (always 127.0.0.1)")
 	target := pf.String("target", "", "upstream base URL(s) (see main help)")

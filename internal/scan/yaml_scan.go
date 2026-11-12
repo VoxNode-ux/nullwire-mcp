@@ -1,4 +1,4 @@
-package main
+package scan
 
 import (
 	"fmt"
@@ -8,9 +8,9 @@ import (
 
 var yamlKeyValue = regexp.MustCompile(`^\s*(?:-\s*)?([A-Za-z0-9_.-]+)\s*:\s*(.*)$`)
 
-// scanYAMLFile checks "key: value" lines. It is a line scanner, not a YAML
+// ScanYAMLFile checks "key: value" lines. It is a line scanner, not a YAML
 // parser: block scalars (| and >) and multi-line strings are skipped.
-func scanYAMLFile(s *Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens int) {
+func ScanYAMLFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens int) {
 	raw, err := readScanFile(path)
 	if err != nil {
 		fmt.Fprintf(report, "✗ %s: %v\n", path, err)

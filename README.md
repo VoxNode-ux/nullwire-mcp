@@ -15,7 +15,9 @@
 ![Disk writes: 0](https://img.shields.io/badge/disk%20writes-0-2ea44f)
 ![MCP](https://img.shields.io/badge/MCP-stdio-7c3aed)
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [What gets redacted](#what-gets-redacted) · [MCP tools](#mcp-tools) · [Configuration](#configuration) · [CLI reference](#cli-reference) · [Security model](#security-model-and-honest-limits) · [Contributing](CONTRIBUTING.md)
+[Quick start](#quick-start) · [How it works](#how-it-works) · [What gets redacted](#what-gets-redacted) · [MCP tools](#mcp-tools) · [Configuration](#configuration) · [CLI reference](#cli-reference) · [Security model](#security-model-and-honest-limits) · [How it compares](#how-it-compares) · [Contributing](CONTRIBUTING.md)
+
+**[▶ Try the live redactor](https://voxnode-ux.github.io/nullwire-mcp/)** (the real engine, running in your browser; nothing is uploaded)
 
 </div>
 
@@ -47,6 +49,27 @@ NullWire sits between your app and the network. It records what passes through, 
 | 🔁 **Safe replay** | Export any captured request as a `curl` command with secrets swapped for environment variables. |
 | 🔎 **Secret scanner** | `scan` and `protect` look for secrets in your MCP configs, `.env`, TOML, YAML and ZIP files before they leak. |
 | 📱 **Runs anywhere** | Linux, macOS, Windows, Docker and Termux on Android. |
+
+---
+
+<a id="how-it-compares"></a>
+
+## ⚖️ How it compares
+
+NullWire is deliberately narrow: it lets an AI assistant look at your network traffic while the secrets in it are replaced before the model sees them. Other tools do other jobs, and some of them do those jobs better. Here is the honest picture.
+
+| | NullWire-MCP | mitmproxy | Langfuse | Presidio |
+|---|---|---|---|---|
+| **Built for** | Letting an AI assistant debug traffic with secrets scrubbed | Interactive proxy to inspect and modify HTTP(S) and WebSocket traffic | LLM tracing, evals and prompt management | Detecting and anonymizing personal data (PII) in text |
+| **Sees inside HTTPS** | Only through the reverse gateway; the plain proxy tunnels HTTPS blind | Yes, once you install its CA certificate | Not a proxy; traces come from your app's SDK | Not a proxy; you give it text |
+| **Secret redaction** | Built in, applied before anything reaches the model | No built-in redaction; scriptable with Python add-ons | You write your own masking function (SDK `mask` callback) | Built in (patterns and NER), aimed mainly at personal data |
+| **Where data lives** | RAM only (last 50 flows), never written to disk | In memory; saved to a file only if you choose to | Stored in its database (Cloud or self-hosted) | Stays in your own process |
+| **Runtime** | One static Go binary, no dependencies | Python-based tool | Cloud, or self-hosted (web, worker, Postgres, ClickHouse, Redis) | Python package, or Docker with a REST API |
+| **Best when** | You want an AI assistant to debug traffic without leaking keys | You need full traffic inspection and modification | You monitor LLM apps in production | You clean PII out of text pipelines |
+
+NullWire does not replace mitmproxy for full HTTPS interception, Langfuse for production tracing, or Presidio for PII pipelines. If one of those fits your job, use it. If you want your assistant to see traffic and never the secrets in it, that is what NullWire is for.
+
+*These comparisons come from each project's own documentation. If something is out of date, please open an issue.*
 
 ---
 
@@ -632,23 +655,25 @@ go test -race ./...
 
 | File | Purpose |
 |---|---|
-| `main.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
-| `ws.go` | WebSocket frame reader and capture (read-only taps) |
-| `inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
-| `scrub_extra.go` | JSON array, XML and base64 redaction |
+| `main.go` | Tiny entry point (keeps `go install github.com/VoxNode-ux/nullwire-mcp@latest` working) |
+| `internal/app/app.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
+| `internal/app/ws.go` | WebSocket frame reader and capture (read-only taps) |
+| `internal/app/inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
+| `internal/app/scrub_extra.go` | JSON array, XML and base64 redaction |
 | `internal/vendors/` | Vendor prefix tiers |
-| `cloud_secrets.go` | Prefix-less cloud credentials (AWS, Azure, Cloudflare) and their headers |
-| `scan.go`, `env_scan.go`, `toml_scan.go`, `yaml_scan.go`, `zip_scan.go`, `history_scan.go` | The `scan` command |
-| `protect.go`, `protect_helpers.go` | The `protect` command |
+| `internal/app/cloud_secrets.go` | Prefix-less cloud credentials (AWS, Azure, Cloudflare) and their headers |
+| `internal/scan/` | The `scan` command (`scan.go`, `env_scan.go`, `toml_scan.go`, `yaml_scan.go`, `zip_scan.go`, `history_scan.go`, plus the small `Scrubber` interface in `scrubber.go`) |
+| `internal/protect/` | The `protect` command |
 | `internal/install/` | The `install` command (client config editing) |
-| `scripts/install.sh`, `scripts/install.ps1` | Installers for macOS, Linux, Termux and Windows |
+| `internal/wasm/` | Compiles the scrubber to WebAssembly for the live demo (`scripts/build-wasm.sh`) |
+| `scripts/` | Installers for macOS, Linux, Termux and Windows (`install.sh`, `install.ps1`, `termux-install.sh`) |
 | `npm/` | The `npx` launcher (no dependencies, no install script) |
 | `packaging/` | Homebrew, Scoop, AUR, winget and Chocolatey templates, `render.sh`, Nix package, `gh` extension and asdf/mise plugin sources |
 | `flake.nix`, `nfpm.yaml` | Nix flake; `.deb`/`.rpm`/`.apk` package definition |
 | `python/` | The `pip` / `pipx` launcher |
-| `docs/` | GitHub Pages site and the short install URL |
-| `bench_test.go`, `chaos_test.go` | Benchmarks and network fault-injection tests |
-| `feature_test.go` | Tests for the features above |
+| `docs/` | GitHub Pages site (live redactor demo) and the short install URL |
+| `internal/app/bench_test.go`, `internal/app/chaos_test.go` | Benchmarks and network fault-injection tests |
+| `internal/app/feature_test.go` | Tests for the features above |
 
 </details>
 

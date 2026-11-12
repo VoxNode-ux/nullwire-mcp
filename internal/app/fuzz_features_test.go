@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"fmt"
@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-func isAlnum(s string, min, max int) bool {
-	if len(s) < min || len(s) > max {
+func isAlnum(s string, minLen, maxLen int) bool {
+	if len(s) < minLen || len(s) > maxLen {
 		return false
 	}
 	for _, c := range s {
