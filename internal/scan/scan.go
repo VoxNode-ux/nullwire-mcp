@@ -1,4 +1,4 @@
-package app
+package scan
 
 import (
 	"bytes"
@@ -50,7 +50,7 @@ func (t *scanTotals) record(ok bool, hits, tokens, ips int) {
 }
 
 // scanByType picks the scanner from the file name.
-func scanByType(s *Scrubber, path string, report *strings.Builder) (bool, int, int, int) {
+func scanByType(s Scrubber, path string, report *strings.Builder) (bool, int, int, int) {
 	name := filepath.Base(path)
 	lower := strings.ToLower(name)
 	switch {
@@ -60,26 +60,26 @@ func scanByType(s *Scrubber, path string, report *strings.Builder) (bool, int, i
 		ok, hits, tokens := scanTOMLFile(s, path, report)
 		return ok, hits, tokens, 0
 	case strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml"):
-		ok, hits, tokens := scanYAMLFile(s, path, report)
+		ok, hits, tokens := ScanYAMLFile(s, path, report)
 		return ok, hits, tokens, 0
 	case strings.HasSuffix(lower, ".zip"):
-		ok, hits, tokens := scanZipFile(s, path, report)
+		ok, hits, tokens := ScanZipFile(s, path, report)
 		return ok, hits, tokens, 0
 	default:
-		return scanFile(s, path, report)
+		return ScanFile(s, path, report)
 	}
 }
 
 // scanKV scrubs one "key<sep>value" pair so the field-name rules apply to it.
 // found is true when the value held a secret, or when the key name alone says
 // the value should be hidden. shown is what is safe to print.
-func scanKV(s *Scrubber, key, sep, val string) (shown string, n int, found bool) {
+func scanKV(s Scrubber, key, sep, val string) (shown string, n int, found bool) {
 	scrubbed, n := s.ScrubText(key + sep + val)
 	if n > 0 {
 		return strings.TrimPrefix(scrubbed, key+sep), n, true
 	}
 	if envSecretNames.MatchString(lastSegment(key)) {
-		return hiddenValue, 0, true
+		return HiddenValue, 0, true
 	}
 	return "", 0, false
 }
@@ -104,11 +104,11 @@ func walkTree(root string, visit func(path string, d fs.DirEntry)) {
 	})
 }
 
-func runScan(args []string) int { return runScanTo(os.Stdout, os.Stderr, args) }
+func Run(args []string) int { return RunTo(os.Stdout, os.Stderr, args) }
 
-// runScanTo is runScan with explicit output writers, so callers (and tests)
+// RunTo is Run with explicit output writers, so callers (and tests)
 // never have to swap the process-wide os.Stdout.
-func runScanTo(out, errw io.Writer, args []string) int {
+func RunTo(out, errw io.Writer, args []string) int {
 	fset := flag.NewFlagSet("scan", flag.ContinueOnError)
 	fset.SetOutput(errw)
 	discover := fset.Bool("discover", false, "auto-discover common MCP config locations under $HOME")
@@ -197,7 +197,7 @@ func runScanTo(out, errw io.Writer, args []string) int {
 			switch {
 			case strings.HasSuffix(lower, ".json"):
 				if looksLikeMCPConfig(path) && once(path) {
-					t.record(scanFile(scrub, path, report))
+					t.record(ScanFile(scrub, path, report))
 				}
 			case envFileNames(name):
 				if once(path) {
@@ -210,12 +210,12 @@ func runScanTo(out, errw io.Writer, args []string) int {
 				}
 			case *includeYAML && (strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml")):
 				if once(path) {
-					ok, hits, tokens := scanYAMLFile(scrub, path, report)
+					ok, hits, tokens := ScanYAMLFile(scrub, path, report)
 					t.record(ok, hits, tokens, 0)
 				}
 			case *includeZIP && strings.HasSuffix(lower, ".zip"):
 				if once(path) {
-					ok, hits, tokens := scanZipFile(scrub, path, report)
+					ok, hits, tokens := ScanZipFile(scrub, path, report)
 					t.record(ok, hits, tokens, 0)
 				}
 			}
@@ -227,7 +227,7 @@ func runScanTo(out, errw io.Writer, args []string) int {
 			if !once(p) {
 				continue
 			}
-			ok, hits, tokens := scanHistoryFile(scrub, p, report)
+			ok, hits, tokens := ScanHistoryFile(scrub, p, report)
 			t.record(ok, hits, tokens, 0)
 		}
 	}
@@ -310,7 +310,7 @@ func looksLikeMCPConfig(path string) bool {
 	return len(probe.MCPServers) > 0 || len(probe.Servers) > 0 || len(probe.MCP) > 0
 }
 
-func scanFile(s *Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens, ips int) {
+func ScanFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens, ips int) {
 	raw, err := readScanFile(path)
 	if err != nil {
 		fmt.Fprintf(report, "✗ %s: %v\n", path, err)

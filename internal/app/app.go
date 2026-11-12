@@ -34,6 +34,8 @@ import (
 	"time"
 
 	"github.com/VoxNode-ux/nullwire-mcp/internal/install"
+	"github.com/VoxNode-ux/nullwire-mcp/internal/protect"
+	"github.com/VoxNode-ux/nullwire-mcp/internal/scan"
 	"github.com/VoxNode-ux/nullwire-mcp/internal/vendors"
 )
 
@@ -2118,10 +2120,10 @@ func fatalf(format string, args ...any) {
 // Main runs the nullwire-mcp command line and returns when it is done.
 func Main() {
 	if len(os.Args) > 1 && os.Args[1] == "scan" {
-		os.Exit(runScan(os.Args[2:]))
+		os.Exit(scan.Run(os.Args[2:]))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "protect" {
-		os.Exit(runProtect(os.Args[2:]))
+		os.Exit(protect.Run(os.Args[2:]))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "install" {
 		os.Exit(install.Run(os.Args[2:]))

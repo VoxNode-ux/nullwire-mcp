@@ -1,4 +1,4 @@
-package app
+package scan
 
 import (
 	"bufio"
@@ -44,10 +44,10 @@ func historyPaths() []string {
 	return out
 }
 
-// scanHistoryFile reports how many history lines contain secrets. It never
+// ScanHistoryFile reports how many history lines contain secrets. It never
 // prints the lines themselves: a line that holds one secret may well hold
 // others the scrubber does not recognise.
-func scanHistoryFile(s *Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens int) {
+func ScanHistoryFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens int) {
 	f, err := os.Open(path)
 	if err != nil {
 		fmt.Fprintf(report, "✗ %s: %v\n", path, err)

@@ -1,4 +1,4 @@
-package app
+package protect
 
 import (
 	"bytes"
@@ -7,13 +7,15 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+
+	"github.com/VoxNode-ux/nullwire-mcp/internal/scan"
 )
 
 // runScanQuiet runs a scan and prints its report to stderr, keeping stdout
 // free for the MCP protocol. It returns the scan's exit code.
 func runScanQuiet(args []string) int {
 	var buf bytes.Buffer
-	code := runScanTo(&buf, &buf, args)
+	code := scan.RunTo(&buf, &buf, args)
 	fmt.Fprintf(os.Stderr, "\r\033[K⚡ pre-scan (exit %d):\n%s\n", code, buf.String())
 	return code
 }

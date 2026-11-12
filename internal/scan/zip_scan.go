@@ -1,4 +1,4 @@
-package app
+package scan
 
 import (
 	"archive/zip"
@@ -19,9 +19,9 @@ const (
 	zipMaxEntries = 1000     // most entries looked at
 )
 
-// scanZipFile looks inside a ZIP archive (nothing is extracted to disk) and
+// ScanZipFile looks inside a ZIP archive (nothing is extracted to disk) and
 // reports which entries contain secrets. Entry text is never shown.
-func scanZipFile(s *Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens int) {
+func ScanZipFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens int) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		fmt.Fprintf(report, "✗ %s: %v\n", path, err)
