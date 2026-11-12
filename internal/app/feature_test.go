@@ -106,8 +106,8 @@ func fxFeed(p *wsParser, stream []byte, chunk int) {
 }
 
 // fxParse parses a stream and returns what a collector with room for max bytes holds.
-func fxParse(stream []byte, chunk, max int) (*wsCollector, *wsParser) {
-	c := newWSCollector(max)
+func fxParse(stream []byte, chunk, maxBytes int) (*wsCollector, *wsParser) {
+	c := newWSCollector(maxBytes)
 	p := newWSParser(c.add)
 	fxFeed(p, stream, chunk)
 	return c, p

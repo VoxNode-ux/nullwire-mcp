@@ -369,7 +369,7 @@ type vendorRule struct {
 	weak     bool
 }
 
-func buildVendorRule(prefixes []string, class string, min int, weak bool) (vendorRule, bool) {
+func buildVendorRule(prefixes []string, class string, minLen int, weak bool) (vendorRule, bool) {
 	if len(prefixes) == 0 {
 		return vendorRule{}, false
 	}
@@ -383,7 +383,7 @@ func buildVendorRule(prefixes []string, class string, min int, weak bool) (vendo
 	}
 	b.WriteString(`)`)
 	b.WriteString(class)
-	b.WriteString(fmt.Sprintf("{%d,}", min))
+	b.WriteString(fmt.Sprintf("{%d,}", minLen))
 	return vendorRule{re: regexp.MustCompile(b.String()), prefixes: prefixes, weak: weak}, true
 }
 
@@ -1390,7 +1390,7 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.T
 	}
 	var pre []byte
 	if n := brw.Reader.Buffered(); n > 0 {
-		if b, _ := brw.Reader.Peek(n); len(b) > 0 {
+		if b, _ := brw.Peek(n); len(b) > 0 {
 			pre = append([]byte(nil), b...)
 		}
 	}
@@ -1445,13 +1445,13 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 	}
 	var pre []byte
 	if n := brw.Reader.Buffered(); n > 0 {
-		if b, _ := brw.Reader.Peek(n); len(b) > 0 {
+		if b, _ := brw.Peek(n); len(b) > 0 {
 			pre = append([]byte(nil), b...)
 		}
 	}
 
 	var clientRWC io.ReadWriteCloser = client
-	var upstreamRWC io.ReadWriteCloser = rwc
+	var upstreamRWC = rwc
 	var wsUp, wsDown *wsCollector
 	if isWS {
 		// Read-only taps: every byte is forwarded untouched and a copy is
@@ -1491,11 +1491,9 @@ func parseDNSServers(spec string) ([]string, error) {
 		if s == "" {
 			continue
 		}
-		host, port := s, "53"
+		host, port := strings.Trim(s, "[]"), "53"
 		if h, p, err := net.SplitHostPort(s); err == nil {
 			host, port = h, p
-		} else {
-			host = strings.Trim(s, "[]")
 		}
 		if net.ParseIP(host) == nil {
 			return nil, fmt.Errorf("-dns: %q is not an IP address", s)
@@ -1919,9 +1917,7 @@ func buildCurl(e FlowEntry) string {
 	}
 	sortStrings(names)
 	body := e.RequestBody
-	if strings.HasSuffix(body, truncMarker) {
-		body = strings.TrimSuffix(body, truncMarker)
-	}
+	body = strings.TrimSuffix(body, truncMarker)
 	if strings.HasPrefix(body, "[encoded body omitted") {
 		body = ""
 	}

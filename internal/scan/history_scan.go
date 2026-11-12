@@ -79,8 +79,8 @@ func ScanHistoryFile(s Scrubber, path string, report *strings.Builder) (ok bool,
 	return true, hits, tokens
 }
 
-func newLineScanner(r io.Reader, max int) *bufio.Scanner {
+func newLineScanner(r io.Reader, maxLine int) *bufio.Scanner {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64*1024), max)
+	sc.Buffer(make([]byte, 64*1024), maxLine)
 	return sc
 }

@@ -99,6 +99,13 @@ jobs:
         run: |
           set -euo pipefail
           git worktree add "$RUNNER_TEMP/base" "origin/$BASE_REF"
+          if [ ! -f "$RUNNER_TEMP/base/internal/app/app.go" ]; then
+            {
+              echo '### Benchmark comparison skipped'
+              echo "The base branch ($BASE_REF) does not have the internal/app layout yet, so there is nothing to compare."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           mkdir -p "$RUNNER_TEMP/base/internal/app" && cp internal/app/bench_test.go "$RUNNER_TEMP/base/internal/app/"   # the base may not have the benchmarks yet
           (cd "$RUNNER_TEMP/base" && go test -run='^$' -bench=. -benchmem -count=6 ./internal/app | tee "$GITHUB_WORKSPACE/old.txt")
           {
