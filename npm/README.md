@@ -90,7 +90,7 @@ brew install VoxNode-ux/nullwire/nullwire-mcp                                   
 scoop bucket add nullwire https://github.com/VoxNode-ux/scoop-nullwire           # Windows
 scoop install nullwire-mcp
 ```
-Both packages are generated from the templates in [`packaging/`](packaging/README.md).
+Both packages are generated from the templates in [`packaging/`](https://github.com/VoxNode-ux/nullwire-mcp/tree/main/packaging).
 </details>
 
 <details>
@@ -518,7 +518,7 @@ If you find a secret NullWire missed, please open an issue with a *fake* sample 
 | Linux RISC-V 64 (QEMU) | 🟡 emulated | smoke test, silent notifications, end-to-end redaction |
 | Linux ARM64 (Android / Termux) | ✅ verified on device | live upstream proxy, redaction tags, `export_sanitized_curl`, reverse gateway, guards (needs `termux-chroot`) |
 
-🟡 *emulated* means run under QEMU, not on real hardware. Details are in [docs/test-results.md](docs/test-results.md).
+🟡 *emulated* means run under QEMU, not on real hardware. Details are in [docs/test-results.md](https://github.com/VoxNode-ux/nullwire-mcp/blob/main/docs/test-results.md).
 
 ---
 
