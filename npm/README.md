@@ -539,18 +539,19 @@ go test -race ./...
 
 | File | Purpose |
 |---|---|
-| `main.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
-| `ws.go` | WebSocket frame reader and capture (read-only taps) |
-| `inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
-| `scrub_extra.go` | JSON array, XML and base64 redaction |
-| `vendors.go` | Vendor prefix tiers |
-| `scan.go`, `env_scan.go`, `toml_scan.go`, `yaml_scan.go`, `zip_scan.go`, `history_scan.go` | The `scan` command |
-| `protect.go`, `protect_helpers.go` | The `protect` command |
-| `install.go` | The `install` command (client config editing) |
+| `main.go` | Tiny entry point (keeps `go install github.com/VoxNode-ux/nullwire-mcp@latest` working) |
+| `internal/app/app.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
+| `internal/app/ws.go` | WebSocket frame reader and capture (read-only taps) |
+| `internal/app/inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
+| `internal/app/scrub_extra.go` | JSON array, XML and base64 redaction |
+| `internal/app/vendors.go` | Vendor prefix tiers |
+| `internal/app/scan.go`, `internal/app/env_scan.go`, `internal/app/toml_scan.go`, `internal/app/yaml_scan.go`, `internal/app/zip_scan.go`, `internal/app/history_scan.go` | The `scan` command |
+| `internal/app/protect.go`, `internal/app/protect_helpers.go` | The `protect` command |
+| `internal/app/install.go` | The `install` command (client config editing) |
 | `scripts/install.sh`, `scripts/install.ps1` | Installers for macOS, Linux, Termux and Windows |
 | `npm/` | The `npx` launcher (no dependencies, no install script) |
 | `packaging/` | Homebrew and Scoop templates and `render.sh` |
-| `feature_test.go` | Tests for the features above |
+| `internal/app/feature_test.go` | Tests for the features above |
 
 </details>
 
