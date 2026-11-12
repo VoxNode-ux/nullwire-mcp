@@ -1652,11 +1652,11 @@ func bodyText(h http.Header, b []byte) string {
 	return string(b)
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
 		return s
 	}
-	return s[:max] + truncMarker
+	return s[:maxLen] + truncMarker
 }
 
 func (a *App) capture(f rawFlow) {
