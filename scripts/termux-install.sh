@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/sh
 # Build, test and install nullwire-mcp v1.2.0 on Termux.
-# Run from the project folder:  sh termux-install.sh
+# Run from the project folder:  sh scripts/termux-install.sh
 set -eu
 
 pkg install -y ca-certificates golang git >/dev/null
