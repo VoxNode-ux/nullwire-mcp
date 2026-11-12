@@ -4,7 +4,7 @@ import "strings"
 
 // Scrubber is the part of the redaction engine that the scanner needs.
 type Scrubber interface {
-ScrubText(in string) (string, int)
+	ScrubText(in string) (string, int)
 }
 
 // NewScrubber builds the Scrubber that Run uses. The app package sets it at
@@ -12,10 +12,10 @@ ScrubText(in string) (string, int)
 var NewScrubber func() (Scrubber, error)
 
 func containsAny(s string, subs []string) bool {
-for _, sub := range subs {
-if strings.Contains(s, sub) {
-return true
-}
-}
-return false
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }

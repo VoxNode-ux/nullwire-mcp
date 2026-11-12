@@ -322,8 +322,8 @@ func ScanFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, 
 		return false, 0, 0, 0
 	}
 	fmt.Fprintf(report, "✓ %s\n", path)
-	tokBefore := s.Tokens.Load()
-	ipBefore := s.IPs.Load()
+	tokBefore := s.TokenCount()
+	ipBefore := s.IPCount()
 	walkJSON(doc, "", func(jsonPath, value string) string {
 		scrubbed, n := s.ScrubText(value)
 		switch {
@@ -336,8 +336,8 @@ func ScanFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, 
 		}
 		return value
 	})
-	tokens = int(s.Tokens.Load() - tokBefore)
-	ips = int(s.IPs.Load() - ipBefore)
+	tokens = int(s.TokenCount() - tokBefore)
+	ips = int(s.IPCount() - ipBefore)
 	if hits == 0 {
 		fmt.Fprintf(report, "   (no secrets found)\n")
 	}
