@@ -32,6 +32,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/VoxNode-ux/nullwire-mcp/internal/install"
+	"github.com/VoxNode-ux/nullwire-mcp/internal/vendors"
 )
 
 const (
@@ -204,7 +207,7 @@ type Scrubber struct {
 	extraSensitive map[string]bool
 	ignoreHeaders  map[string]bool
 	extraPatterns  []*regexp.Regexp
-	vendorGate     []string     // lower-cased prefixes for the cheap pre-check
+	vendorGate     *vendors.Gate // Aho-Corasick pre-check over every prefix (run on lower-cased text)
 	vendorRules    []vendorRule // strong, weak, DSN and custom prefix rules
 
 	reBearer          *regexp.Regexp
@@ -240,6 +243,9 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
 			extra[h] = true
 		}
+	}
+	for _, h := range cloudSensitiveHeaders {
+		extra[h] = true
 	}
 	ignore := make(map[string]bool, len(cfg.IgnoreHeaders))
 	for _, h := range cfg.IgnoreHeaders {
@@ -281,9 +287,9 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		min      int
 		weak     bool
 	}{
-		{DefaultVendorPrefixes, vendorTokenClass, 16, false},
-		{DefaultWeakVendorPrefixes, vendorTokenClass, 20, true},
-		{DefaultDSNPrefixes, vendorDSNClass, 8, false},
+		{vendors.DefaultVendorPrefixes, vendorTokenClass, 16, false},
+		{vendors.DefaultWeakVendorPrefixes, vendorTokenClass, 20, true},
+		{vendors.DefaultDSNPrefixes, vendorDSNClass, 8, false},
 		{customPrefixes, vendorTokenClass, 8, false},
 	} {
 		if r, ok := buildVendorRule(spec.prefixes, spec.class, spec.min, spec.weak); ok {
@@ -302,7 +308,7 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		extraSensitive: extra,
 		ignoreHeaders:  ignore,
 		extraPatterns:  extras,
-		vendorGate:     gate,
+		vendorGate:     vendors.NewGate(gate),
 		vendorRules:    rules,
 		reBearer:       regexp.MustCompile(`(?i)(Bearer|Basic|Token)\s+([A-Za-z0-9._~+/=-]{8,})`),
 		reSensitiveHeader: regexp.MustCompile(`(?i)^(authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|proxy-authorization)$`),
@@ -403,7 +409,7 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 	lower := strings.ToLower(in)
 
 	preJWT := strings.Contains(in, "eyJ")
-	preVendor := containsAny(lower, s.vendorGate)
+	preVendor := s.vendorGate.Match(lower)
 	preAPIKey := containsAny(lower, []string{"sk-", "ghp_", "github_pat_", "aiza", "xox", "akia"})
 	preUserInfo := strings.Contains(in, "://") && strings.Contains(in, "@")
 	preBearer := containsAny(lower, []string{"bearer", "basic", "token"})
@@ -492,6 +498,10 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 			return s.tag("TOKEN", m)
 		})
 	}
+
+	var nCloud int
+	out, nCloud = s.scrubCloudSecrets(out, lower)
+	count += nCloud
 
 	var nStrict int
 	out, nStrict = s.scrubStrictFields(out)
@@ -2113,7 +2123,7 @@ func main() {
 		os.Exit(runProtect(os.Args[2:]))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "install" {
-		os.Exit(runInstall(os.Args[2:]))
+		os.Exit(install.Run(os.Args[2:]))
 	}
 
 	port := flag.Int("port", 8080, "TCP port for the diagnostic proxy (always bound to 127.0.0.1)")
