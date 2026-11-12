@@ -41,7 +41,7 @@ NullWire sits between your app and the network. It records what passes through, 
 | 🪶 **Zero dependencies** | Go standard library only. One static binary, nothing to install. |
 | 🧠 **RAM only** | The last 50 flows live in memory. The server never writes a file, and a stop signal clears the buffer. (`install` edits your MCP client configs, but only when you run it.) |
 | 🔒 **Loopback only** | The proxy binds to `127.0.0.1`. A DNS-rebinding guard answers only loopback `Host` headers. |
-| 🧽 **Layered redaction** | Private keys, JSON/XML/query secrets, JWTs, 50+ vendor key formats, IPs, secrets hiding in base64, and a randomness detector for keys nobody has seen before. |
+| 🧽 **Layered redaction** | Private keys, JSON/XML/query secrets, JWTs, 200+ vendor key formats, cloud credentials (AWS, Azure, Cloudflare) with or without a prefix, IPs, secrets hiding in base64, and a randomness detector for keys nobody has seen before. |
 | 🛡️ **Fail-closed shields** | Bodies that can't be inspected are refused or flagged, never silently passed to the model. |
 | 🔌 **HTTP, HTTPS and WebSocket** | Plain proxying, blind `CONNECT` tunnels, a reverse gateway for full HTTPS visibility, and WebSocket text capture in both directions. |
 | 🔁 **Safe replay** | Export any captured request as a `curl` command with secrets swapped for environment variables. |
@@ -346,14 +346,16 @@ Every URL, header, request body and response body passes through these layers, i
 | 4 | **URL credentials** | `user:password@host` in any URL or connection string | `postgres://app:pw@db/prod` |
 | 5 | **Auth schemes** | `Bearer`, `Basic` and `Token` credentials | `Authorization: Bearer …` |
 | 6 | **JWTs** | Three-part `eyJ…` tokens | |
-| 7 | **Vendor keys** | 50+ formats in three tiers (below) | `AKIA…`, `ghp_…`, `sk-ant-…`, `SG.…` |
+| 7 | **Vendor keys** | 200+ prefixes in three tiers (below), plus webhook URLs and connection strings | `AKIA…`, `ghp_…`, `sk-ant-…`, `cfut_…`, `SG.…` |
 | 8 | **Secret-named fields** | `key: value` or `key=value` pairs where the *name* says secret and the value is 12 to 256 characters | `x-custom-auth: …`, `session=…` |
 | 9 | **Your patterns** | Regexes from the [config file](#configuration) | |
 | 10 | **IP addresses** | IPv4 (strictly validated) and IPv6, except loopback and unspecified | `203.0.113.9` |
 | 11 | **Base64** | Base64 or URL-safe base64 whose *decoded* text contains a secret. Images and other binary data are left alone. | `eyJhcGlfa2V5…` |
 | 12 | **Randomness detector** | 16 to 128 character tokens that look machine-generated: mixed case or digits, high Shannon entropy, few vowels. UUIDs are exempt. | an unknown vendor's key |
 
-**Headers.** `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, `Api-Key`, `X-Auth-Token` and `Proxy-Authorization` are always redacted, plus any you add.
+**Headers.** `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, `Api-Key`, `X-Auth-Token` and `Proxy-Authorization` are always redacted, plus common cloud and developer-tool headers (`X-Auth-Key`, `Ocp-Apim-Subscription-Key`, `X-Amz-Security-Token`, `X-Goog-Api-Key`, `Private-Token`, `X-Vault-Token`, `Apikey`, and others), plus any you add. Use `ignore_headers` to opt a header out.
+
+**Cloud credentials without a prefix.** AWS secret access keys, Azure storage and Service Bus keys, Azure AD client secrets (`…8Q~…`) and SQL connection-string passwords have no vendor prefix. They are caught by the name they are stored under (`SecretAccessKey`, `AccountKey`, `SharedAccessKey`, `client_secret`, `Password=` in a connection string), by their shape (a standalone 40-character random base64 string, an Azure AD secret), or by the header they travel in. Cloudflare API tokens are caught by `Authorization: Bearer`, `X-Auth-Key`, the new `cfut_`/`cfat_` prefixes, or the randomness detector.
 
 **Vendor tiers.** Matching all prefixes the same way would redact ordinary words, so they are tiered:
 
@@ -634,10 +636,11 @@ go test -race ./...
 | `ws.go` | WebSocket frame reader and capture (read-only taps) |
 | `inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
 | `scrub_extra.go` | JSON array, XML and base64 redaction |
-| `vendors.go` | Vendor prefix tiers |
+| `internal/vendors/` | Vendor prefix tiers |
+| `cloud_secrets.go` | Prefix-less cloud credentials (AWS, Azure, Cloudflare) and their headers |
 | `scan.go`, `env_scan.go`, `toml_scan.go`, `yaml_scan.go`, `zip_scan.go`, `history_scan.go` | The `scan` command |
 | `protect.go`, `protect_helpers.go` | The `protect` command |
-| `install.go` | The `install` command (client config editing) |
+| `internal/install/` | The `install` command (client config editing) |
 | `scripts/install.sh`, `scripts/install.ps1` | Installers for macOS, Linux, Termux and Windows |
 | `npm/` | The `npx` launcher (no dependencies, no install script) |
 | `packaging/` | Homebrew, Scoop, AUR, winget and Chocolatey templates, `render.sh`, Nix package, `gh` extension and asdf/mise plugin sources |
