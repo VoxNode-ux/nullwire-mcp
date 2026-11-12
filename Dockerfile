@@ -17,4 +17,3 @@ USER nonroot:nonroot
 # port (-p) cannot reach it. On Linux use `--network host` to reach it from
 # the host's own 127.0.0.1.
 ENTRYPOINT ["/usr/local/bin/nullwire-mcp"]
- 
