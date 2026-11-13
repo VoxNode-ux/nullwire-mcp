@@ -155,30 +155,27 @@ jobs:
           choco pack
           choco push "nullwire-mcp.${TAG#v}.nupkg" --source https://push.chocolatey.org/ --api-key "$CHOCO_API_KEY"
 
-  pypi:
+    pypi:
     name: PyPI
     runs-on: ubuntu-24.04
-    env:
-      TAG: ${{ inputs.tag }}
-      PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Build and upload the launcher
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # pinned
+        with:
+          python-version: "3.12"
+      - name: Build the package
+        working-directory: python
         run: |
-          set -euo pipefail
-          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::bad tag: $TAG"; exit 1 ;; esac
-          if [ -z "$PYPI_TOKEN" ]; then
-            echo "::notice::PYPI_TOKEN is not set; skipping PyPI"
-            exit 0
-          fi
-          VER="${TAG#v}"
-          cd python
-          sed -i "s/^version = .*/version = \"$VER\"/" pyproject.toml
-          sed -i "s/^__version__ = .*/__version__ = \"$VER\"/" src/nullwire_mcp/__init__.py
-          python3 -m venv "$RUNNER_TEMP/venv"
-          . "$RUNNER_TEMP/venv/bin/activate"
-          pip install build twine
+          sed -i "s/^version = .*/version = \"${TAG#v}\"/" pyproject.toml
+          sed -i "s/^__version__ = .*/__version__ = \"${TAG#v}\"/" src/nullwire_mcp/__init__.py
+          python -m pip install build
           python -m build
-          TWINE_USERNAME=__token__ TWINE_PASSWORD="$PYPI_TOKEN" twine upload --skip-existing dist/*
+      - name: Publish with trusted publishing
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: python/dist/
