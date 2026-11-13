@@ -332,8 +332,7 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 }
 
 func (s *Scrubber) tag(kind, raw string) string {
-	h := sha256.New()
-	h.Write(s.nonce)
+	h := hmac.New(sha256.New, s.nonce)
 	h.Write([]byte(raw))
 	return "[REDACTED_" + kind + "#" + hex.EncodeToString(h.Sum(nil))[:6] + "]"
 }
