@@ -32,7 +32,7 @@ func readScanFile(path string) ([]byte, error) {
 	if fi.Size() > maxScanFile {
 		return nil, fmt.Errorf("file is larger than %d MiB, skipped", maxScanFile>>20)
 	}
-	return os.ReadFile(path)
+	return os.ReadFile(path) // #nosec G304 -- the path is the file the user asked us to scan
 }
 
 // scanTotals adds up the results of every scanned file.
@@ -336,8 +336,8 @@ func ScanFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, 
 		}
 		return value
 	})
-	tokens = int(s.TokenCount() - tokBefore)
-	ips = int(s.IPCount() - ipBefore)
+	tokens = int(s.TokenCount() - tokBefore) // #nosec G115 -- the delta is bounded by the size of one file
+	ips = int(s.IPCount() - ipBefore) // #nosec G115 -- the delta is bounded by the size of one file
 	if hits == 0 {
 		fmt.Fprintf(report, "   (no secrets found)\n")
 	}
