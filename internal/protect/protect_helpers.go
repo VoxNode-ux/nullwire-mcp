@@ -28,7 +28,7 @@ func reexecServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "nullwire-mcp protect: cannot locate self: %v\n", err)
 		return 1
 	}
-	cmd := exec.Command(self, args...)
+	cmd := exec.Command(self, args...) // #nosec G204 -- re-runs this same executable
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Env = os.Environ()
 	if err := cmd.Start(); err != nil {
