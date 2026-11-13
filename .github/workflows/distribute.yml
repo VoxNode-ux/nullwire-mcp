@@ -155,9 +155,11 @@ jobs:
           choco pack
           choco push "nullwire-mcp.${TAG#v}.nupkg" --source https://push.chocolatey.org/ --api-key "$CHOCO_API_KEY"
 
-    pypi:
+      pypi:
     name: PyPI
     runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ inputs.tag }}
     permissions:
       contents: read
       id-token: write
@@ -165,12 +167,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # pinned
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.12"
       - name: Build the package
         working-directory: python
         run: |
+          set -euo pipefail
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::bad tag: $TAG"; exit 1 ;; esac
           sed -i "s/^version = .*/version = \"${TAG#v}\"/" pyproject.toml
           sed -i "s/^__version__ = .*/__version__ = \"${TAG#v}\"/" src/nullwire_mcp/__init__.py
           python -m pip install build
