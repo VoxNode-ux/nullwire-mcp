@@ -178,7 +178,7 @@ func loadSecretsConfig(path string) (*SecretsConfig, error) {
 	if path == "" {
 		return &SecretsConfig{}, nil
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- the path is the -secrets-config file the user passed
 	if err != nil {
 		return nil, fmt.Errorf("-secrets-config %s: %v", path, err)
 	}
@@ -1523,7 +1523,7 @@ func addPEMPath(pool *x509.CertPool, path string) (bool, error) {
 		return false, err
 	}
 	if !fi.IsDir() {
-		pem, err := os.ReadFile(path)
+		pem, err := os.ReadFile(path) // #nosec G304 -- the path is a CA file the user configured
 		if err != nil {
 			return false, err
 		}
@@ -1538,7 +1538,7 @@ func addPEMPath(pool *x509.CertPool, path string) (bool, error) {
 		if e.IsDir() {
 			continue
 		}
-		pem, err := os.ReadFile(path + "/" + e.Name())
+		pem, err := os.ReadFile(path + "/" + e.Name()) // #nosec G304 -- inside the CA folder the user configured
 		if err != nil {
 			continue
 		}
