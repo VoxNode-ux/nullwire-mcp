@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>nullwire-mcp</id>
+    <version>@@VERSION@@</version>
+    <title>NullWire-MCP</title>
+    <authors>VoxNode-ux</authors>
+    <owners>VoxNode-ux</owners>
+    <projectUrl>https://github.com/VoxNode-ux/nullwire-mcp</projectUrl>
+    <licenseUrl>https://github.com/VoxNode-ux/nullwire-mcp/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/VoxNode-ux/nullwire-mcp</projectSourceUrl>
+    <bugTrackerUrl>https://github.com/VoxNode-ux/nullwire-mcp/issues</bugTrackerUrl>
+    <tags>mcp proxy dlp secrets debugging cli</tags>
+    <summary>RAM-only traffic inspector for AI assistants that scrubs secrets first</summary>
+    <description>A zero-dependency network inspector and MCP server. Your AI assistant can debug HTTP, HTTPS and WebSocket traffic while every secret is scrubbed before the model sees it.
+
+After installing, register it with your MCP clients: `nullwire-mcp install --client all`.
+Remove the entries before uninstalling: `nullwire-mcp install --uninstall --client all`.</description>
+    <releaseNotes>https://github.com/VoxNode-ux/nullwire-mcp/releases/tag/@@TAG@@</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

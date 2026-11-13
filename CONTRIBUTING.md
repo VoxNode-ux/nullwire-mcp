@@ -1,6 +1,6 @@
 # Contributing to NullWire-MCP
 
-Thanks for helping! The program is one `main.go`, with tests in `main_test.go` and `fuzz_test.go`, so it is easy to read end to end before you change anything.
+Thanks for helping! The code lives in `internal/app/` (start with `app.go`), with tests in `main_test.go` and `fuzz_test.go` beside it; the root `main.go` only starts it, so it is easy to read end to end before you change anything.
 
 ## Quick start
 
@@ -24,7 +24,7 @@ These are the project's core promises. PRs that break them will not be merged.
 4. **Loopback only.** No flag or option may bind the proxy to a non-loopback address.
 5. **Scrub before truncate.** Secrets must be redacted before any body is cut to its size limit.
 6. **Notifications stay silent.** Messages without an `id` must write zero bytes.
-7. **Be honest in docs.** If a change adds a limitation, update the README's "Honest scope" section.
+7. **Be honest in docs.** If a change adds a limitation, update the README's "Security model and honest limits" section.
 
 ## Good first contributions
 
@@ -36,9 +36,9 @@ These are the project's core promises. PRs that break them will not be merged.
 
 ## Adding or changing a scrubbing pattern
 
-1. Add the regex in `NewScrubber` in `main.go`.
+1. Add the regex in `NewScrubber` in `internal/app/app.go`.
 2. Handle it in `ScrubText` (or `ScrubHeaders` for headers).
-3. Add a test in `main_test.go` that checks:
+3. Add a test in `internal/app/main_test.go` that checks:
    - the secret does **not** appear in the output
    - equal secrets get equal tags, different secrets get different tags
    - harmless text is **not** over-redacted

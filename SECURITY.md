@@ -29,7 +29,7 @@ Please include:
 
 **Report privately:**
 
-- A way for a real secret to reach the agent's view in a shape the [documented scrubber](https://github.com/VoxNode-ux/nullwire-mcp#-security--protocol-engineering-deep-dive) is supposed to catch
+- A way for a real secret to reach the agent's view in a shape the [documented scrubber](https://github.com/VoxNode-ux/nullwire-mcp#-what-gets-redacted) is supposed to catch
 - Any way to make the proxy listen on a non-loopback address
 - Bypassing the DNS-rebinding guard (`403`) or the self-loop guard (`508`)
 - Anything that writes bytes other than JSON-RPC frames to `stdout`, or writes data to disk
@@ -38,14 +38,14 @@ Please include:
 
 **Public issue is fine:**
 
-- A secret *format* the scrubber does not yet recognise (for example a new vendor key prefix). Open a normal issue with a **fake** example of the shape. See [Honest scope](https://github.com/VoxNode-ux/nullwire-mcp#-honest-scope--known-limitations): redaction is pattern-based by design.
+- A secret *format* the scrubber does not yet recognise (for example a new vendor key prefix). Open a normal issue with a **fake** example of the shape. See [Honest scope](https://github.com/VoxNode-ux/nullwire-mcp#-security-model-and-honest-limits)): redaction is pattern-based by design.
 - Feature requests, such as IPv6 scrubbing or extra client configs
 
 ## Out of scope
 
 These are documented limitations, not vulnerabilities:
 
-- `HTTP CONNECT` returns `501` by design (no TLS interception)
+- `HTTP CONNECT` tunnels are blind by design: only the destination and byte counts are recorded (no TLS interception)
 - Your own app sees raw traffic; NullWire only protects the AI agent's view
 - OS-level swap or crash dumps can write RAM contents to disk
 - Unsigned release binaries (verify them with `SHA256SUMS.txt`)

@@ -1,0 +1,31 @@
+# Hooks for https://pre-commit.com. Use them from another repository:
+#
+#   repos:
+#     - repo: https://github.com/VoxNode-ux/nullwire-mcp
+#       rev: v1.2.0
+#       hooks:
+#         - id: nullwire-scan
+#
+# The hook runs `nullwire-mcp scan --fail` on the staged files and blocks the
+# commit (exit code 3) if one holds a secret. Findings are printed already
+# scrubbed, never as the real value.
+
+- id: nullwire-scan
+  name: NullWire secret scan
+  description: Block commits that contain secrets in MCP configs, .env, TOML or YAML files.
+  entry: nullwire-mcp scan --fail --yaml
+  language: golang
+  files: '(?i)(^|/)(\.env[^/]*|[^/]*\.env|\.mcp\.json|mcp\.json|mcp_config\.json|claude_desktop_config\.json|[^/]*[-_]mcp\.json|[^/]*\.toml|[^/]*\.ya?ml)$'
+  pass_filenames: true
+  require_serial: true
+
+# Same check, but uses a nullwire-mcp that is already on your PATH
+# (Homebrew, Scoop, apt, ...) instead of building it from source.
+- id: nullwire-scan-system
+  name: NullWire secret scan (installed binary)
+  description: Like nullwire-scan, using the nullwire-mcp already installed on this machine.
+  entry: nullwire-mcp scan --fail --yaml
+  language: system
+  files: '(?i)(^|/)(\.env[^/]*|[^/]*\.env|\.mcp\.json|mcp\.json|mcp_config\.json|claude_desktop_config\.json|[^/]*[-_]mcp\.json|[^/]*\.toml|[^/]*\.ya?ml)$'
+  pass_filenames: true
+  require_serial: true

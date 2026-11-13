@@ -1,4 +1,4 @@
-# Packaging: Homebrew and Scoop
+# Packaging: Homebrew, Scoop, AUR, winget, Chocolatey and friends
 
 The package files are generated, not written by hand. `render.sh` fills the two
 templates in this folder with a release's version and the checksums from its
@@ -45,3 +45,18 @@ checksum is missing or malformed, or if a `@@PLACEHOLDER@@` is left over.
   tooling can bump versions in the bucket and read hashes from `SHA256SUMS.txt`.
 - Uninstalling a package does not remove NullWire's entries from MCP client
   configs. Run `nullwire-mcp install --uninstall --client all` first.
+
+## More package managers
+
+`render.sh` also writes the files for the Arch User Repository, winget and
+Chocolatey (into `aur/`, `winget/` and `choco/` under the output folder). After a
+stable release, `.github/workflows/distribute.yml` renders and pushes all of
+them automatically when the matching secret is set. The first submission to
+winget, the AUR and Chocolatey is done by hand once. Other sources in this
+folder:
+
+| Folder | What it is | Lives in |
+|---|---|---|
+| `nix/package.nix` | Nix package used by `flake.nix` (and for nixpkgs) | this repo |
+| `gh-nullwire/` | GitHub CLI extension | its own repo `VoxNode-ux/gh-nullwire` |
+| `asdf-nullwire-mcp/` | asdf and mise plugin | its own repo `VoxNode-ux/asdf-nullwire-mcp` |

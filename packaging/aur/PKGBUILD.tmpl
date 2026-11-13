@@ -1,0 +1,22 @@
+# Maintainer: VoxNode-ux
+# Generated from packaging/aur/PKGBUILD.tmpl by packaging/render.sh.
+pkgname=nullwire-mcp-bin
+pkgver=@@VERSION@@
+pkgrel=1
+pkgdesc="RAM-only traffic inspector for AI assistants that scrubs secrets first"
+arch=('x86_64' 'aarch64')
+url="https://github.com/VoxNode-ux/nullwire-mcp"
+license=('MIT')
+provides=('nullwire-mcp')
+conflicts=('nullwire-mcp')
+source=("LICENSE-$pkgver::https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/v$pkgver/LICENSE")
+source_x86_64=("nullwire-mcp-$pkgver-x86_64::https://github.com/VoxNode-ux/nullwire-mcp/releases/download/v$pkgver/nullwire-linux-amd64")
+source_aarch64=("nullwire-mcp-$pkgver-aarch64::https://github.com/VoxNode-ux/nullwire-mcp/releases/download/v$pkgver/nullwire-linux-arm64")
+sha256sums=('SKIP')
+sha256sums_x86_64=('@@SHA_LINUX_AMD64@@')
+sha256sums_aarch64=('@@SHA_LINUX_ARM64@@')
+
+package() {
+  install -Dm755 "$srcdir/nullwire-mcp-$pkgver-$CARCH" "$pkgdir/usr/bin/nullwire-mcp"
+  install -Dm644 "$srcdir/LICENSE-$pkgver" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

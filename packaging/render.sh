@@ -6,8 +6,9 @@
 #   sh packaging/render.sh -v v1.2.0 -o out      # choose the tag and output folder
 #   sh packaging/render.sh -v v1.2.0 -s dist/SHA256SUMS.txt   # offline, from a local file
 #
-# Output: <out>/nullwire-mcp.rb (Homebrew) and <out>/nullwire-mcp.json (Scoop).
-# It stops if any checksum is missing or is not 64 hex characters, and if any
+# Output: <out>/nullwire-mcp.rb (Homebrew), <out>/nullwire-mcp.json (Scoop),
+# <out>/aur/ (PKGBUILD and .SRCINFO), <out>/winget/ (3 manifests) and
+# <out>/choco/ (nuspec and tools/). It stops if any checksum is missing or is not 64 hex characters, and if any
 # @@PLACEHOLDER@@ is left over.
 
 set -eu
@@ -71,6 +72,9 @@ l_arm=$(sha_for nullwire-linux-arm64)
 l_amd=$(sha_for nullwire-linux-amd64)
 w_amd=$(sha_for nullwire-windows-amd64.exe)
 w_arm=$(sha_for nullwire-windows-arm64.exe)
+w_amd_up=$(printf '%s' "$w_amd" | tr 'a-f' 'A-F')
+w_arm_up=$(printf '%s' "$w_arm" | tr 'a-f' 'A-F')
+rel_date=$(date -u +%Y-%m-%d)
 
 mkdir -p "$out"
 render() {
@@ -83,6 +87,9 @@ render() {
     -e "s|@@SHA_LINUX_AMD64@@|$l_amd|g" \
     -e "s|@@SHA_WINDOWS_AMD64@@|$w_amd|g" \
     -e "s|@@SHA_WINDOWS_ARM64@@|$w_arm|g" \
+    -e "s|@@SHA_WINDOWS_AMD64_UPPER@@|$w_amd_up|g" \
+    -e "s|@@SHA_WINDOWS_ARM64_UPPER@@|$w_arm_up|g" \
+    -e "s|@@DATE@@|$rel_date|g" \
     "$1" > "$2"
   if grep -n '@@' "$2" >/dev/null; then
     grep -n '@@' "$2" >&2
@@ -93,4 +100,14 @@ render() {
 render "$here/homebrew/nullwire-mcp.rb.tmpl"   "$out/nullwire-mcp.rb"
 render "$here/scoop/nullwire-mcp.json.tmpl" "$out/nullwire-mcp.json"
 
-printf 'Rendered %s for %s:\n  %s\n  %s\n' "$version" "$tag" "$out/nullwire-mcp.rb" "$out/nullwire-mcp.json"
+mkdir -p "$out/aur" "$out/winget" "$out/choco/tools"
+render "$here/aur/PKGBUILD.tmpl"  "$out/aur/PKGBUILD"
+render "$here/aur/SRCINFO.tmpl"   "$out/aur/.SRCINFO"
+render "$here/winget/VoxNode.NullWire.yaml.tmpl"            "$out/winget/VoxNode.NullWire.yaml"
+render "$here/winget/VoxNode.NullWire.installer.yaml.tmpl"  "$out/winget/VoxNode.NullWire.installer.yaml"
+render "$here/winget/VoxNode.NullWire.locale.en-US.yaml.tmpl" "$out/winget/VoxNode.NullWire.locale.en-US.yaml"
+render "$here/chocolatey/nullwire-mcp.nuspec.tmpl"          "$out/choco/nullwire-mcp.nuspec"
+render "$here/chocolatey/tools/chocolateyinstall.ps1.tmpl"  "$out/choco/tools/chocolateyinstall.ps1"
+render "$here/chocolatey/tools/VERIFICATION.txt.tmpl"       "$out/choco/tools/VERIFICATION.txt"
+
+printf 'Rendered %s for %s into %s\n  Homebrew, Scoop, AUR, winget, Chocolatey\n' "$version" "$tag" "$out"

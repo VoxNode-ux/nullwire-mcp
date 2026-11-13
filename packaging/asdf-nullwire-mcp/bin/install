@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck source=../lib/utils.bash
+source "$(dirname "$0")/../lib/utils.bash"
+[ "${ASDF_INSTALL_TYPE:-version}" = "version" ] || fail "only released versions can be installed"
+mkdir -p "$ASDF_INSTALL_PATH/bin"
+install -m 0755 "$ASDF_DOWNLOAD_PATH/$(asset_name)" "$ASDF_INSTALL_PATH/bin/nullwire-mcp"
+"$ASDF_INSTALL_PATH/bin/nullwire-mcp" install --list >/dev/null \
+  || fail "the installed binary did not run"
