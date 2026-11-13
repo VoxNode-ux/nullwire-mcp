@@ -1,8 +1,6 @@
 name: Code quality
 
-# Lint, coverage and performance benchmarks. Lint and benchmarks are advisory
-# at first (they report but do not fail the build); remove `continue-on-error`
-# once the first findings are cleaned up.
+# Lint, coverage and performance benchmarks.
 
 on:
   push:
@@ -17,7 +15,6 @@ jobs:
   lint:
     name: golangci-lint
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -62,12 +59,11 @@ jobs:
           go tool cover -func=coverage.out | tail -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Upload to Codecov (skipped until CODECOV_TOKEN is set)
         if: env.CODECOV_TOKEN != ''
-        # TODO: pin to a full commit hash like the other actions (run "Pin helper").
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: coverage.out
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          fail_ci_if_error: true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: coverage-profile
@@ -77,7 +73,6 @@ jobs:
   bench:
     name: Benchmarks (benchstat)
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
