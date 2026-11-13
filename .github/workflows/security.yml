@@ -86,7 +86,6 @@ jobs:
   gosec:
     name: Security patterns in the Go code (gosec)
     runs-on: ubuntu-24.04
-    continue-on-error: true   # advisory until the first findings are triaged
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
