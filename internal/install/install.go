@@ -322,7 +322,7 @@ func writeFileAtomic(path string, data []byte) (backup string, err error) {
 		path = realPath // keep a symlinked dotfile a symlink
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", err
 	}
 	mode := os.FileMode(0o600)
@@ -365,7 +365,7 @@ func writeFileAtomic(path string, data []byte) (backup string, err error) {
 }
 
 func readIfExists(path string) ([]byte, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- path is a known client config file
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -432,7 +432,7 @@ func applyClaudeCode(o installOptions) (status string, err error) {
 		return "would run: claude " + strings.Join(cmds[len(cmds)-1], " "), nil
 	}
 	for i, a := range cmds {
-		out, err := exec.Command("claude", a...).CombinedOutput()
+		out, err := exec.Command("claude", a...).CombinedOutput() // #nosec G204 -- fixed program name, arguments come from the install options
 		last := i == len(cmds)-1
 		if err != nil && (last || o.uninstall) {
 			if o.uninstall {
