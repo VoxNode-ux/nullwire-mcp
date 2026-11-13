@@ -180,7 +180,7 @@ func (p *wsParser) consume(b []byte) {
 	for i := range b {
 		c := b[i]
 		if p.masked {
-			c ^= p.maskKey[(p.pos+uint64(i))&3]
+			c ^= p.maskKey[(p.pos+uint64(i))&3] // #nosec G115 -- i is a non-negative index into b
 		}
 		if len(p.msg) >= wsMaxMessage {
 			p.msgOver = true
