@@ -48,7 +48,7 @@ func historyPaths() []string {
 // prints the lines themselves: a line that holds one secret may well hold
 // others the scrubber does not recognise.
 func ScanHistoryFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, tokens int) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- the path is the file the user asked us to scan
 	if err != nil {
 		fmt.Fprintf(report, "✗ %s: %v\n", path, err)
 		return false, 0, 0
