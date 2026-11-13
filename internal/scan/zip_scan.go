@@ -31,7 +31,7 @@ func ScanZipFile(s Scrubber, path string, report *strings.Builder) (ok bool, hit
 		fmt.Fprintf(report, "✗ %s: archive larger than %d MiB (Zip Bomb Shield)\n", path, zipMaxArchive>>20)
 		return false, 0, 0
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- the path is the archive the user asked us to scan
 	if err != nil {
 		fmt.Fprintf(report, "✗ %s: %v\n", path, err)
 		return false, 0, 0
