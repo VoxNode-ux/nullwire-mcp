@@ -10,7 +10,6 @@ jobs:
   smoke:
     name: Smoke test ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -35,7 +34,6 @@ jobs:
 
       - name: Redaction end-to-end (local upstream, no internet)
         id: e2e
-        continue-on-error: true
         shell: bash
         run: |
           PY=$(command -v python3 || command -v python)
