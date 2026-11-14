@@ -53,7 +53,7 @@ jobs:
           check-latest: true
           cache: false
       - name: Run the tests with coverage
-        run: go test -covermode=atomic -coverprofile=coverage.out ./...
+        run: go test -coverpkg=./... -covermode=atomic -coverprofile=coverage.out ./...
       - name: Coverage summary
         run: |
           go tool cover -func=coverage.out | tail -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
