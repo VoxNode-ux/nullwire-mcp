@@ -9,6 +9,7 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -331,9 +332,10 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 	}, nil
 }
 
+// tag returns a short label for a redacted value. It is a keyed hash (HMAC-SHA256 with a random per-run key), cut to six hex characters,
+// so the same value gets the same label within one run and the label cannot be used to guess the value. It is never stored.
 func (s *Scrubber) tag(kind, raw string) string {
-	h := sha256.New()
-	h.Write(s.nonce)
+	h := hmac.New(sha256.New, s.nonce)
 	h.Write([]byte(raw))
 	return "[REDACTED_" + kind + "#" + hex.EncodeToString(h.Sum(nil))[:6] + "]"
 }
