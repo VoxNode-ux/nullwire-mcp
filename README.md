@@ -131,8 +131,8 @@ sudo apt install ./nullwire-mcp_1.2.0_amd64.deb
 sudo dnf install ./nullwire-mcp-1.2.0-1.x86_64.rpm
 # Alpine (packages are not signed with an Alpine key)
 sudo apk add --allow-untrusted ./nullwire-mcp_1.2.0_x86_64.apk
-# Arch Linux (AUR)
-yay -S nullwire-mcp-bin
+# Arch Linux (AUR): coming soon, waiting for AUR registration to reopen.
+# Until then use the release binary, Nix, or the install script.
 # Nix
 nix run github:VoxNode-ux/nullwire-mcp
 ```
@@ -646,7 +646,7 @@ go test -race ./...
 - **Release transparency:** every release is built with Go 1.26 and includes `SHA256SUMS.txt`, a CycloneDX SBOM (`nullwire-sbom.cdx.json`) and a signed build provenance attestation, which you can verify with `gh attestation verify`. The same proof is attached to each release as `nullwire-provenance.intoto.jsonl`. The `go vet` and `go test -race` logs of every CI run are saved as a `test-logs` artifact for 30 days. Pushes to `main` update a rolling `latest` pre-release; numbered tags produce stable releases. Pull requests never publish anything.
 - **Quality checks:** `quality.yml` runs golangci-lint (errcheck, staticcheck, revive, ineffassign), reports test coverage (Codecov) and compares benchmarks against the base branch with `benchstat`. Run the benchmarks yourself with `go test -run='^$' -bench=. -benchmem ./...`. `chaos_test.go` injects network faults (slowloris, dropped connections, malformed and truncated streams) and checks that nothing crashes or leaks.
 - **Supply chain:** releases are signed with keyless cosign, the Docker image is signed and scanned with Trivy every week, `reproducible.yml` rebuilds the binaries on four different runners and requires identical checksums, and `security.yml` (weekly) runs `govulncheck`, `gosec` and the fuzz targets. Verify a download with `cosign verify-blob --bundle nullwire-linux-amd64.sigstore.json --certificate-identity-regexp 'https://github.com/VoxNode-ux/nullwire-mcp/\.github/workflows/release\.yml@.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com nullwire-linux-amd64`.
-- **Releases:** a stable tag publishes the release, the `.deb`/`.rpm`/`.apk` packages, the npm package (with provenance), the Homebrew and Scoop taps, the AUR, winget, Chocolatey, PyPI and the official MCP Registry. Release notes are grouped by pull request label (`.github/release.yml`).
+- **Releases:** a stable tag publishes the release, the `.deb`/`.rpm`/`.apk` packages, the npm package (with provenance), the Homebrew and Scoop taps, the AUR (once the package is published), winget, Chocolatey, PyPI and the official MCP Registry. Release notes are grouped by pull request label (`.github/release.yml`).
 - **Fuzzing:** the scrubber, the IPv6 and vendor-key matchers and the WebSocket frame reader have fuzz targets. They check that no secret survives scrubbing, that results don't depend on how input is chunked, and that nothing panics.
 - **CI:** checks the shell and Node installers for syntax errors, runs `go vet` and the race detector, cross-compiles static binaries for all 9 platforms (Linux x86-64, ARM64, ARMv7 and RISC-V 64; macOS Intel and Apple Silicon; Windows x86-64 and ARM64; FreeBSD x86-64), and publishes a multi-arch Docker image (amd64 and arm64). `smoke.yml` and `smoke-extra.yml` run on demand (Actions → Run workflow): end-to-end redaction tests on Ubuntu, macOS (Apple Silicon and Intel), Windows (x86-64 and ARM64), a FreeBSD VM, and QEMU-emulated Linux ARMv7 and RISC-V 64. Security checks run `govulncheck` and the fuzz targets. GitHub Actions are pinned to full commit hashes.
 
