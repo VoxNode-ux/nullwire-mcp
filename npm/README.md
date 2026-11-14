@@ -108,8 +108,7 @@ sudo apt install ./nullwire-mcp_1.2.0_amd64.deb
 sudo dnf install ./nullwire-mcp-1.2.0-1.x86_64.rpm
 # Alpine (packages are not signed with an Alpine key)
 sudo apk add --allow-untrusted ./nullwire-mcp_1.2.0_x86_64.apk
-# Arch Linux (AUR)
-yay -S nullwire-mcp-bin
+# Arch Linux (AUR): coming soon, once AUR registration reopens.
 # Nix
 nix run github:VoxNode-ux/nullwire-mcp
 ```
