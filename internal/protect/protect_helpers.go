@@ -20,10 +20,13 @@ func runScanQuiet(args []string) int {
 	return code
 }
 
+// executable returns the path of the running program. Tests replace it.
+var executable = os.Executable
+
 // reexecServe runs this program again with args and passes the signals it
 // receives on to the child, so stopping protect also stops the server.
 func reexecServe(args []string) int {
-	self, err := os.Executable()
+	self, err := executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "nullwire-mcp protect: cannot locate self: %v\n", err)
 		return 1
