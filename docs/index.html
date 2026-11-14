@@ -48,6 +48,8 @@
   button { font: inherit; cursor: pointer; }
   .chip { font-size: .85rem; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 999px; padding: .25rem .8rem; transition: border-color .15s, color .15s; }
   .chip:hover, .chip:focus-visible { border-color: var(--accent); color: var(--accent); outline: none; }
+  .chip.custom { border-style: dashed; border-color: var(--accent); color: var(--accent); }
+  .chip.custom:hover, .chip.custom:focus-visible { background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .state { display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: var(--muted); }
   .dot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--muted); opacity: .6; }
   .dot.on { background: var(--ok); opacity: 1; box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 20%, transparent); }
@@ -122,12 +124,13 @@ document.documentElement.classList.add("js");
         <button class="chip" data-sample="jwt">JWT</button>
         <button class="chip" data-sample="db">Database URL</button>
         <button class="chip" data-sample="gh">GitHub token</button>
+        <button class="chip custom" id="custom">Try your own</button>
       </div>
       <div class="state"><span class="dot" id="dot"></span><span id="status">Loading the engine…</span></div>
     </div>
     <div class="panes">
       <div class="pane">
-        <label for="in">What your tool sends</label>
+        <label for="in">What your tool sends (paste or type anything)</label>
         <textarea id="in" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="Paste a request, a log line or a config…"></textarea>
       </div>
       <div class="pane">
@@ -292,6 +295,11 @@ scoop install nullwire-mcp</pre>
   $("chips").addEventListener("click", (e) => {
     const key = e.target.dataset && e.target.dataset.sample;
     if (key && samples[key]) { input.value = samples[key]; render(); }
+  });
+  $("custom").addEventListener("click", () => {
+    input.value = "";
+    input.focus();
+    render();
   });
 
   document.querySelectorAll("[data-copy]").forEach((b) => {
