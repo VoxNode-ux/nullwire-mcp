@@ -50,13 +50,13 @@ var (
 	reAzureADSecret = regexp.MustCompile(`[A-Za-z0-9_.~-]{3}8Q~[A-Za-z0-9_.~-]{30,}`)
 )
 
-// scrubCloudSecrets runs the cloud rules. lower is the lower-cased text, passed
-// in so it is not computed twice.
-func (s *Scrubber) scrubCloudSecrets(in, lower string) (string, int) {
+// scrubCloudSecrets runs the cloud rules. gm is the scrubGate result for the
+// text, computed once by the caller.
+func (s *Scrubber) scrubCloudSecrets(in string, gm uint32) (string, int) {
 	out := in
 	count := 0
 
-	if containsAny(lower, cloudGate) {
+	if gm&gateCloud != 0 {
 		out = reCloudNamedSecret.ReplaceAllStringFunc(out, func(m string) string {
 			g := reCloudNamedSecret.FindStringSubmatch(m)
 			if g == nil {
@@ -66,7 +66,7 @@ func (s *Scrubber) scrubCloudSecrets(in, lower string) (string, int) {
 			s.Tokens.Add(1)
 			return g[1] + s.tag("KEY", g[2])
 		})
-		if strings.Contains(lower, "pass") || strings.Contains(lower, "pwd") {
+		if gm&gateCloudPass != 0 {
 			out = reCloudConnPassword.ReplaceAllStringFunc(out, func(m string) string {
 				g := reCloudConnPassword.FindStringSubmatch(m)
 				if g == nil || strings.HasPrefix(g[2], "[REDACTED_") {

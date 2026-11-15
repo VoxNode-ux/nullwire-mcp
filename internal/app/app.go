@@ -219,6 +219,7 @@ func loadSecretsConfig(path string) (*SecretsConfig, error) {
 
 type Scrubber struct {
 	nonce          []byte
+	taint          *taintRing // keyed hashes of secrets redacted earlier in this run
 	extraSensitive map[string]bool
 	ignoreHeaders  map[string]bool
 	extraPatterns  []*regexp.Regexp
@@ -326,6 +327,7 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 
 	return &Scrubber{
 		nonce:          nonce,
+		taint:          newTaintRing(nonce),
 		allow:          allow,
 		extraSensitive: extra,
 		ignoreHeaders:  ignore,
@@ -354,6 +356,9 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 // tag returns a short label for a redacted value. It is a keyed hash (HMAC-SHA256 with a random per-run key), cut to six hex characters,
 // so the same value gets the same label within one run and the label cannot be used to guess the value. It is never stored.
 func (s *Scrubber) tag(kind, raw string) string {
+	if s.taint != nil && (kind == "TOKEN" || kind == "KEY") {
+		s.taint.add(raw)
+	}
 	h := hmac.New(sha256.New, s.nonce)
 	h.Write([]byte(raw))
 	return "[REDACTED_" + kind + "#" + hex.EncodeToString(h.Sum(nil))[:6] + "]"
@@ -453,14 +458,15 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	}
 	// Stage 2: the deterministic rules (keys, secret fields, credentials, vendor
 	// formats, your own patterns, IP addresses and base64).
-	lower := strings.ToLower(in)
+	// One zero-allocation pass answers every pre-check below.
+	gm := scrubGate.Match(in)
 
-	preJWT := strings.Contains(in, "eyJ")
+	preJWT := gm&gateJWT != 0 && strings.Contains(in, "eyJ")
 	preVendor := s.vendorGate.Match(in)
-	preAPIKey := containsAny(lower, []string{"sk-", "ghp_", "github_pat_", "aiza", "xox", "akia"})
+	preAPIKey := gm&gateAPIKey != 0
 	preUserInfo := strings.Contains(in, "://") && strings.Contains(in, "@")
-	preBearer := containsAny(lower, []string{"bearer", "basic", "token"})
-	preSecretKey := containsAny(lower, []string{"token", "secret", "password", "passwd", "session_id", "api_key", "apikey", "key=", `"key"`})
+	preBearer := gm&gateBearer != 0
+	preSecretKey := gm&gateSecretKey != 0
 
 	out := in
 
@@ -501,7 +507,7 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 			return g[1] + s.tag("TOKEN", g[2])
 		})
 	}
-	if strings.Contains(in, "<") && containsAny(lower, xmlSecretHints) {
+	if strings.Contains(in, "<") && gm&gateXML != 0 {
 		out = s.scrubXMLSecrets(out, &count)
 	}
 	if preUserInfo {
@@ -557,7 +563,7 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	}
 
 	var nCloud int
-	out, nCloud = s.scrubCloudSecrets(out, lower)
+	out, nCloud = s.scrubCloudSecrets(out, gm)
 	count += nCloud
 
 	var nStrict int
@@ -594,9 +600,18 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	})
 	}
 
+	var nPAN int
+	out, nPAN = s.scrubPANs(out)
+	count += nPAN
+
 	if o.allowB64 && hasBase64Run(out) {
 		out = s.scrubBase64(out, &count)
 	}
+
+	// Secrets redacted earlier in this run are redacted again by identity.
+	var nTaint int
+	out, nTaint = s.scrubTainted(out)
+	count += nTaint
 
 	// Stage 3: the randomness heuristics, which are guesses and so run last.
 	if !o.skipEntropy {
@@ -782,6 +797,9 @@ func looksLikeTokenMax(s string, maxLen int) bool {
 	}
 	if !hasTokenSignal(s) {
 		return false
+	}
+	if useLogOdds {
+		return tokenLogOdds(s) > 0
 	}
 	if vowelRatio(s) > entropyMaxVowel {
 		return false
