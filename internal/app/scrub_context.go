@@ -250,7 +250,10 @@ func (s *Scrubber) scrubUnwrapped(in string, ctx ScrubContext) (string, int) {
 				continue
 			}
 			prefix, v := dec[m[2]:m[3]], dec[m[4]:m[5]]
-			if strings.HasPrefix(v, "[REDACTED_") || isAllowMarkOnly(v) || isPlaceholderValue(v) {
+			// Also test the text as written: decoding turns the placeholder
+			// "%DB_PASSWORD%" into "\xdb_PASSWORD%", which no longer looks like one.
+			orig := in[idx[m[4]]:idx[m[5]]]
+			if strings.HasPrefix(v, "[REDACTED_") || isAllowMarkOnly(v) || isPlaceholderValue(v) || isPlaceholderValue(orig) {
 				continue
 			}
 			if r < 2 && benignBareKey(prefix, v) {
@@ -272,7 +275,8 @@ func (s *Scrubber) scrubUnwrapped(in string, ctx ScrubContext) (string, int) {
 			if len(m) < 6 || m[4] < 0 {
 				continue
 			}
-			if v := dec[m[4]:m[5]]; strings.HasPrefix(v, "[REDACTED_") || isAllowMarkOnly(v) || isPlaceholderValue(v) {
+			orig := in[idx[m[4]]:idx[m[5]]]
+			if v := dec[m[4]:m[5]]; strings.HasPrefix(v, "[REDACTED_") || isAllowMarkOnly(v) || isPlaceholderValue(v) || isPlaceholderValue(orig) {
 				continue
 			}
 			add(m[4], m[5])
