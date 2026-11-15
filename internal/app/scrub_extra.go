@@ -35,7 +35,7 @@ func (s *Scrubber) scrubJSONSecretArrays(in string, count *int) string {
 		}
 		items := reQuotedString.ReplaceAllStringFunc(g[2], func(q string) string {
 			inner := q[1 : len(q)-1]
-			if inner == "" || strings.HasPrefix(inner, "[REDACTED_") || isAllowMarkOnly(inner) || isPlaceholderValue(inner) {
+			if inner == "" || strings.HasPrefix(inner, "[REDACTED_") || isAllowMarkOnly(inner) || isPlaceholderValue(inner) || benignBareKey(g[1], inner) {
 				return q
 			}
 			*count++
