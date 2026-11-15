@@ -132,11 +132,29 @@ func looksLikeAWSSecretKey(c string) bool {
 // scrubAWSSecretKeys redacts a standalone AWS-style secret access key found
 // anywhere in text, even with no field name next to it.
 func (s *Scrubber) scrubAWSSecretKeys(in string) (string, int) {
-	if len(in) < 40 || !strings.ContainsAny(in, "/+") {
+	spans := awsSecretKeySpans(in)
+	if len(spans) == 0 {
 		return in, 0
 	}
 	var b strings.Builder
-	count, last := 0, 0
+	last := 0
+	for _, sp := range spans {
+		b.WriteString(in[last:sp.start])
+		b.WriteString(s.tag("KEY", in[sp.start:sp.end]))
+		s.Tokens.Add(1)
+		last = sp.end
+	}
+	b.WriteString(in[last:])
+	return b.String(), len(spans)
+}
+
+// awsSecretKeySpans returns where standalone AWS-style secret access keys sit
+// in in. It allocates only when it finds one.
+func awsSecretKeySpans(in string) []secretSpan {
+	if len(in) < 40 || !strings.ContainsAny(in, "/+") {
+		return nil
+	}
+	var spans []secretSpan
 	for i := 0; i < len(in); {
 		if !isAWSSecretByte(in[i]) {
 			i++
@@ -147,19 +165,11 @@ func (s *Scrubber) scrubAWSSecretKeys(in string) (string, int) {
 			j++
 		}
 		if j-i == 40 && awsKeyBoundaryOK(in, i, j) && looksLikeAWSSecretKey(in[i:j]) {
-			b.WriteString(in[last:i])
-			b.WriteString(s.tag("KEY", in[i:j]))
-			s.Tokens.Add(1)
-			count++
-			last = j
+			spans = append(spans, secretSpan{start: i, end: j})
 		}
 		i = j
 	}
-	if count == 0 {
-		return in, 0
-	}
-	b.WriteString(in[last:])
-	return b.String(), count
+	return spans
 }
 
 // awsKeyBoundaryOK rejects a 40-character run that is only a piece of a longer

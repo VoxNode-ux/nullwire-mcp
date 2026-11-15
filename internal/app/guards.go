@@ -8,8 +8,10 @@ import (
 // proseAfterScheme reports whether "Basic <word>" or "Token <word>" is ordinary
 // English ("invalid token provided") rather than a credential. Bearer is always
 // treated as a credential. Real tokens have digits, capitals or symbols.
-func proseAfterScheme(scheme, tok string) bool {
-	if strings.EqualFold(scheme, "bearer") {
+func proseAfterScheme(scheme, tok string, ctx ScrubContext) bool {
+	// In a header, query or path the value after the scheme is a credential,
+	// however short or lowercase; only free text can be prose.
+	if ctx != ContextBody || strings.EqualFold(scheme, "bearer") {
 		return false
 	}
 	for i := 0; i < len(tok); i++ {
@@ -90,7 +92,16 @@ func replaceIPv4(s *Scrubber, in string, count *int) string {
 	for _, m := range idx {
 		start, end := m[0], m[1]
 		if start >= 2 && in[start-1] == '/' && isWordByte(in[start-2]) {
-			continue
+			// Skip a version number after "Product/" but not an address in a
+			// URL path: walk back over the word before the slash and skip only
+			// if that word is not itself preceded by a slash.
+			w := start - 2
+			for w > 0 && isWordByte(in[w-1]) {
+				w--
+			}
+			if w == 0 || in[w-1] != '/' {
+				continue
+			}
 		}
 		addr, err := netip.ParseAddr(in[start:end])
 		if err != nil || !addr.Is4() {

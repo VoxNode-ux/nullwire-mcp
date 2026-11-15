@@ -1,6 +1,9 @@
 package app
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // ScrubContext says where a piece of text came from, because the same text
 // deserves different rules in different places.
@@ -153,7 +156,17 @@ func unwrapEscapes(in string) (string, []int32) {
 	return string(dec), idx
 }
 
-type secretSpan struct{ start, end int }
+// secretSpan is a stretch of the decoded text to redact. kind is the tag kind;
+// empty means TOKEN.
+type secretSpan struct {
+	start, end int
+	kind       string
+}
+
+// reUserInfoWide is reUserInfo for decoded text: the password may hold a
+// decoded "@" ("p%40ss" becomes "p@ss"), so it runs to the LAST "@" before the
+// first "/" or space.
+var reUserInfoWide = regexp.MustCompile(`(://[^/\s:@]+:)([^/\s"'<>]+)(@)`)
 
 // scrubUnwrapped finds secrets that are hidden by URL-encoding or by escaped
 // JSON quotes. It decodes a read-only copy, runs the deterministic rules on
@@ -168,11 +181,12 @@ func (s *Scrubber) scrubUnwrapped(in string) (string, int) {
 	dec, idx := unwrapEscapes(in)
 
 	var spans []secretSpan
-	add := func(a, b int) {
+	addKind := func(a, b int, kind string) {
 		if b > a {
-			spans = append(spans, secretSpan{a, b})
+			spans = append(spans, secretSpan{a, b, kind})
 		}
 	}
+	add := func(a, b int) { addKind(a, b, "") }
 	if s.vendorGate.Match(dec) {
 		for _, vr := range s.vendorRules {
 			for _, m := range vr.re.FindAllStringIndex(dec, -1) {
@@ -201,6 +215,28 @@ func (s *Scrubber) scrubUnwrapped(in string) (string, int) {
 			}
 		}
 	}
+	if strings.Contains(dec, "-----BEGIN") {
+		for _, m := range s.rePEM.FindAllStringIndex(dec, -1) {
+			addKind(m[0], m[1], "KEY")
+		}
+	}
+	if strings.Contains(dec, "://") && strings.Contains(dec, "@") {
+		for _, m := range reUserInfoWide.FindAllStringSubmatchIndex(dec, -1) {
+			if len(m) < 6 || m[4] < 0 {
+				continue
+			}
+			if v := dec[m[4]:m[5]]; strings.HasPrefix(v, "[REDACTED_") || isAllowMarkOnly(v) || isPlaceholderValue(v) {
+				continue
+			}
+			add(m[4], m[5])
+		}
+	}
+	for _, sp := range awsSecretKeySpans(dec) {
+		addKind(sp.start, sp.end, "KEY")
+	}
+	for _, sp := range panSpans(dec) {
+		addKind(sp.start, sp.end, "PAN")
+	}
 	if len(spans) == 0 {
 		return in, 0
 	}
@@ -222,7 +258,11 @@ func (s *Scrubber) scrubUnwrapped(in string) (string, int) {
 			continue
 		}
 		b.WriteString(in[last:from])
-		b.WriteString(s.tag("TOKEN", dec[sp.start:sp.end]))
+		kind := sp.kind
+		if kind == "" {
+			kind = "TOKEN"
+		}
+		b.WriteString(s.tag(kind, dec[sp.start:sp.end]))
 		s.Tokens.Add(1)
 		count++
 		last, lastDec = to, sp.end

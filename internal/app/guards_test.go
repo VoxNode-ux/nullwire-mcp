@@ -106,8 +106,14 @@ func TestResourceIDsAndVersionsSurvive(t *testing.T) {
 
 func TestBase64ImageDoesNotExhaustSecretBudget(t *testing.T) {
 	s, _ := NewScrubber()
-	img := strings.Repeat("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4", 6000) // ~330 KB binary-looking
-	secret := "Zm9vOnNrX2xpdmVfYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo="           // base64 of a key
-	_, n := s.ScrubTextIn("data:image/png;base64,"+img+" tok="+secret, ContextBody)
-	_ = n // behaviour check only: must not panic or hang with the separate budget
+	// Five ~67 KB runs separated by spaces: each is under b64MaxEncoded (88 KB)
+	// so it is decoded, and together they are over b64Budget (256 KB) of
+	// binary-looking base64. The secret after them must still be found.
+	chunk := strings.Repeat("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4", 1200) // 67,200 bytes
+	img := strings.Join([]string{chunk, chunk, chunk, chunk, chunk}, " ")
+	secret := "Zm9vOnNrX2xpdmVfYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo=" // base64 of a key
+	out, n := s.ScrubTextIn("data:image/png;base64,"+img+" tok="+secret, ContextBody)
+	if n == 0 || strings.Contains(out, secret) {
+		t.Errorf("secret after binary base64 images was not redacted (n=%d)", n)
+	}
 }

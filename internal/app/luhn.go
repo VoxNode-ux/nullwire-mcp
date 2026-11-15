@@ -44,11 +44,29 @@ func panNetworkOK(d []byte, n int) bool {
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
 func (s *Scrubber) scrubPANs(in string) (string, int) {
-	if len(in) < 13 {
+	spans := panSpans(in)
+	if len(spans) == 0 {
 		return in, 0
 	}
-	var b []byte
-	count, last := 0, 0
+	b := make([]byte, 0, len(in)+32)
+	last := 0
+	for _, sp := range spans {
+		b = append(b, in[last:sp.start]...)
+		b = append(b, s.tag("PAN", in[sp.start:sp.end])...)
+		s.Tokens.Add(1)
+		last = sp.end
+	}
+	b = append(b, in[last:]...)
+	return string(b), len(spans)
+}
+
+// panSpans returns where payment card numbers sit in in. It allocates only
+// when it finds one.
+func panSpans(in string) []secretSpan {
+	if len(in) < 13 {
+		return nil
+	}
+	var spans []secretSpan
 	var d [20]byte
 	for i := 0; i < len(in); {
 		if !isDigit(in[i]) {
@@ -98,19 +116,8 @@ func (s *Scrubber) scrubPANs(in string) (string, int) {
 			i = k
 			continue
 		}
-		if b == nil {
-			b = make([]byte, 0, len(in)+32)
-		}
-		b = append(b, in[last:i]...)
-		b = append(b, s.tag("PAN", in[i:end])...)
-		s.Tokens.Add(1)
-		count++
-		last = end
+		spans = append(spans, secretSpan{start: i, end: end})
 		i = end
 	}
-	if count == 0 {
-		return in, 0
-	}
-	b = append(b, in[last:]...)
-	return string(b), count
+	return spans
 }

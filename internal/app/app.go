@@ -528,7 +528,7 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	if preBearer {
 		out = s.reBearer.ReplaceAllStringFunc(out, func(m string) string {
 			g := s.reBearer.FindStringSubmatch(m)
-			if g == nil || proseAfterScheme(g[1], g[2]) {
+			if g == nil || proseAfterScheme(g[1], g[2], o.ctx) {
 				return m
 			}
 			count++
@@ -627,7 +627,7 @@ func isKeyByte(c byte) bool {
 // skipping quotes and spaces: `"api_key": ` gives api_key.
 func keyBefore(in string, i int) string {
 	j := i
-	for j > 0 && (in[j-1] == ' ' || in[j-1] == '"' || in[j-1] == '\'') {
+	for j > 0 && (in[j-1] == ' ' || in[j-1] == '"' || in[j-1] == '\'' || in[j-1] == '\\') {
 		j--
 	}
 	k := j
@@ -750,14 +750,21 @@ func (s *Scrubber) scrubStrictFieldsMax(in string, maxVal int) (string, int) {
 			continue
 		}
 		start := i + 1
-		for start < len(in) && (in[start] == ' ' || in[start] == '"' || in[start] == '\'') {
-			start++
+		for start < len(in) {
+			if c := in[start]; c == ' ' || c == '"' || c == '\'' {
+				start++
+			} else if c == '\\' && start+1 < len(in) && in[start+1] == '"' {
+				start += 2 // escaped quote, as in {\"custom_key\":\"...\"}
+			} else {
+				break
+			}
 		}
 		end := start
-		for end < len(in) && in[end] != ' ' && in[end] != '"' && in[end] != '\'' && in[end] != ',' && in[end] != '\n' && in[end] != '}' && in[end] != '&' {
+		for end < len(in) && in[end] != ' ' && in[end] != '"' && in[end] != '\'' && in[end] != ',' && in[end] != '\n' && in[end] != '}' && in[end] != '&' &&
+			!(in[end] == '\\' && end+1 < len(in) && in[end+1] == '"') {
 			end++
 		}
-		if start < len(in) && (in[start] == '%' || strings.HasPrefix(in[start:], "${") || strings.HasPrefix(in[start:], "{{")) {
+		if start < len(in) && ((in[start] == '%' && strings.IndexByte(in[start+1:end], '%') > 0) || strings.HasPrefix(in[start:], "${") || strings.HasPrefix(in[start:], "{{")) {
 			continue // template: the end scan would stop at its brace
 		}
 		if end-start < 12 || end-start > maxVal {
