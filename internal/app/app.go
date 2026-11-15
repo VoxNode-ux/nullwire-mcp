@@ -486,7 +486,7 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 			}
 			// Stage 1 may already have replaced this value with its own tag. Leave
 			// that tag exactly as it is: tagging a tag corrupts it.
-			if strings.HasPrefix(g[2], "[REDACTED_") {
+			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) {
 				return m
 			}
 			count++
@@ -499,7 +499,7 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 			if g == nil {
 				return m
 			}
-			if strings.HasPrefix(g[2], "[REDACTED_") {
+			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) {
 				return m
 			}
 			count++
@@ -516,7 +516,7 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 			if g == nil {
 				return m
 			}
-			if strings.HasPrefix(g[2], "[REDACTED_") {
+			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) {
 				return m
 			}
 			count++
@@ -586,18 +586,18 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 
 	if !o.skipIP && maybeIPv4(out) {
 		out = s.reIPv4.ReplaceAllStringFunc(out, func(m string) string {
-		addr, err := netip.ParseAddr(m)
-		if err != nil || !addr.Is4() {
-			return m
-		}
-		canon := addr.String()
-		if canon == "127.0.0.1" || canon == "0.0.0.0" {
-			return m
-		}
-		count++
-		s.IPs.Add(1)
-		return s.tag("IP", canon)
-	})
+			addr, err := netip.ParseAddr(m)
+			if err != nil || !addr.Is4() {
+				return m
+			}
+			canon := addr.String()
+			if canon == "127.0.0.1" || canon == "0.0.0.0" {
+				return m
+			}
+			count++
+			s.IPs.Add(1)
+			return s.tag("IP", canon)
+		})
 	}
 
 	var nPAN int
@@ -648,9 +648,46 @@ func keyBefore(in string, i int) string {
 	return in[k:j]
 }
 
+// nonSecretFields lists common API/DB/metadata field names that end in "key" or
+// contain hints like "secret"/"token"/"api" without holding actual secrets.
+// Adapted from Gitleaks' generic-api-key allowlist (MIT License, Zachary Rice).
+var nonSecretFields = map[string]bool{
+	"public_key": true, "public-key": true, "publickey": true,
+	"primary_key": true, "primary-key": true, "primarykey": true,
+	"foreign_key": true, "foreign-key": true, "foreignkey": true,
+	"partition_key": true, "partition-key": true, "partitionkey": true,
+	"sort_key": true, "sort-key": true, "sortkey": true,
+	"schema_key": true, "schema-key": true,
+	"bucket_key": true, "bucket-key": true,
+	"idempotency_key": true, "idempotency-key": true, "idempotencykey": true,
+	"cache_key": true, "cache-key": true, "cachekey": true,
+	"key_id": true, "key-id": true, "keyid": true,
+	"key_name": true, "key-name": true, "keyname": true,
+	"key_alias": true, "key-alias": true,
+	"key_type": true, "key-type": true,
+	"key_size": true, "key-size": true,
+	"key_length": true, "key-length": true,
+	"secret_name": true, "secret-name": true,
+	"secret_size": true, "secret-size": true,
+	"secret_length": true, "secret-length": true,
+	"api_id": true, "api-id": true,
+	"api_name": true, "api-name": true,
+	"api_version": true, "api-version": true,
+	"api_endpoint": true, "api-endpoint": true,
+	"api_url": true, "api-url": true,
+	"token_endpoint": true, "token-endpoint": true,
+	"token_url": true, "token-url": true,
+	"token_uri": true, "token-uri": true,
+	"credentials_id": true, "credentials-id": true,
+	"credentials_url": true, "credentials-url": true,
+	"credentials_endpoint": true, "credentials-endpoint": true,
+	"withcredentials": true, "author": true,
+	"monkey": true, "donkey": true, "turkey": true,
+}
+
 func secretishKey(key string) bool {
 	k := strings.ToLower(key)
-	if k == "" {
+	if k == "" || nonSecretFields[k] {
 		return false
 	}
 	if strings.HasSuffix(k, "key") || k == "sig" || strings.HasSuffix(k, "_sig") || strings.HasSuffix(k, "-sig") {
@@ -660,6 +697,36 @@ func secretishKey(key string) bool {
 		if strings.Contains(k, h) {
 			return true
 		}
+	}
+	return false
+}
+
+// isPlaceholderValue skips template expressions (${VAR}, ${{ secrets.X }},
+// {{var}}, %VAR%) and repeated dummy masks ("******", "xxxxxx") so CI YAML,
+// templates, and masked error messages remain debuggable.
+// Adapted from Gitleaks' global allowlist (MIT License, Zachary Rice).
+func isPlaceholderValue(s string) bool {
+	t := strings.TrimSpace(s)
+	if len(t) == 0 {
+		return false
+	}
+	switch strings.ToLower(t) {
+	case "true", "false", "null", "none", "undefined", "changeme", "changeit":
+		return true
+	}
+	if (strings.HasPrefix(t, "${") && strings.HasSuffix(t, "}")) ||
+		(strings.HasPrefix(t, "{{") && strings.HasSuffix(t, "}}")) ||
+		(len(t) > 2 && t[0] == '%' && t[len(t)-1] == '%' && !strings.ContainsAny(t[1:len(t)-1], " \t%")) {
+		return true
+	}
+	first := t[0]
+	if first == '*' || first == 'x' || first == 'X' || first == '.' || first == '-' {
+		for i := 1; i < len(t); i++ {
+			if t[i] != first {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }
@@ -700,7 +767,7 @@ func (s *Scrubber) scrubStrictFieldsMax(in string, maxVal int) (string, int) {
 			continue
 		}
 		val := in[start:end]
-		if strings.HasPrefix(val, "[REDACTED_") || strings.ContainsAny(val, "/.\\:") {
+		if strings.HasPrefix(val, "[REDACTED_") || hasAllowMark(val) || isPlaceholderValue(val) || strings.ContainsAny(val, "/.\\:") {
 			continue
 		}
 		b.WriteString(in[last:start])

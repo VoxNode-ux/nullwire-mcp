@@ -149,7 +149,7 @@ func (s *Scrubber) scrubWithAllowlist(in string, o scrubOpts) (string, int) {
 			}
 			// The value is not judged by its field name or its randomness, but a
 			// recognised secret format inside it is still redacted.
-			v, n := s.scrubLayersOpts(g[2], scrubOpts{ctx: ContextBody, skipEntropy: true, skipIP: true})
+			v, n := s.scrubLayersOpts(g[2], scrubOpts{allowB64: true, ctx: ContextBody, skipEntropy: true, skipIP: true})
 			count += n
 			b.WriteString(work[last:m[0]])
 			b.WriteString(hold(g[1] + v + g[3]))
@@ -178,3 +178,23 @@ func (s *Scrubber) scrubWithAllowlist(in string, o scrubOpts) (string, int) {
 	}
 	return out, count
 }
+
+// isAllowMarkOnly reports whether s is a single allowlist placeholder
+// ("\x00NW0\x00"), so Stage 2 secret-field rules leave it alone while still
+// catching mixed values like "REAL_SECRET_\x00NW0\x00".
+func isAllowMarkOnly(s string) bool {
+	if !strings.HasPrefix(s, allowMark) || !strings.HasSuffix(s, "\x00") || len(s) <= len(allowMark)+1 {
+		return false
+	}
+	for i := len(allowMark); i < len(s)-1; i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// hasAllowMark reports whether s contains any allowlist placeholder. A
+// strict-field value that holds one was partly exempted by the user, so the
+// heuristic leaves the whole value alone rather than destroying the placeholder.
+func hasAllowMark(s string) bool { return strings.Contains(s, allowMark) }
