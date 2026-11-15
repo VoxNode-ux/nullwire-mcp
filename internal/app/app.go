@@ -454,7 +454,7 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	count := 0
 	{
 		var n int
-		in, n = s.scrubUnwrapped(in)
+		in, n = s.scrubUnwrapped(in, o.ctx)
 		count += n
 	}
 	// Stage 2: the deterministic rules (keys, secret fields, credentials, vendor
@@ -760,11 +760,11 @@ func (s *Scrubber) scrubStrictFieldsMax(in string, maxVal int) (string, int) {
 			}
 		}
 		end := start
-		for end < len(in) && in[end] != ' ' && in[end] != '"' && in[end] != '\'' && in[end] != ',' && in[end] != '\n' && in[end] != '}' && in[end] != '&' &&
+		for end < len(in) && in[end] != ' ' && in[end] != '"' && in[end] != '\'' && in[end] != ',' && in[end] != '\n' && in[end] != '}' && in[end] != '&' && in[end] != ';' &&
 			!(in[end] == '\\' && end+1 < len(in) && in[end+1] == '"') {
 			end++
 		}
-		if start < len(in) && ((in[start] == '%' && strings.IndexByte(in[start+1:end], '%') > 0) || strings.HasPrefix(in[start:], "${") || strings.HasPrefix(in[start:], "{{")) {
+		if start < len(in) && ((in[start] == '%' && isPlaceholderValue(in[start:end])) || strings.HasPrefix(in[start:], "${") || strings.HasPrefix(in[start:], "{{")) {
 			continue // template: the end scan would stop at its brace
 		}
 		if end-start < 12 || end-start > maxVal {
