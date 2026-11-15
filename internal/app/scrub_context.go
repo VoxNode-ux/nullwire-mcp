@@ -106,9 +106,9 @@ func unwrapHexVal(c byte) int {
 	return -1
 }
 
-// needsUnwrap reports whether in holds a percent-escape ("%41") or an escaped
-// quote or backslash (`\"`, `\\`). It does not allocate, so ordinary text
-// never pays for the unwrap pass.
+// needsUnwrap reports whether in holds a percent-escape ("%41"), an escaped
+// quote, backslash or slash (`\"`, `\\`, `\/`) or an ASCII "\uXXXX" escape.
+// It does not allocate, so ordinary text never pays for the unwrap pass.
 func needsUnwrap(in string) bool {
 	if strings.IndexByte(in, '%') < 0 && strings.IndexByte(in, '\\') < 0 {
 		return false
@@ -120,7 +120,10 @@ func needsUnwrap(in string) bool {
 				return true
 			}
 		case '\\':
-			if in[i+1] == '"' || in[i+1] == '\\' {
+			if in[i+1] == '"' || in[i+1] == '\\' || in[i+1] == '/' {
+				return true
+			}
+			if _, ok := unicodeEscapeASCII(in, i); ok {
 				return true
 			}
 		}
@@ -128,8 +131,30 @@ func needsUnwrap(in string) bool {
 	return false
 }
 
-// unwrapEscapes decodes one level of "%XX", `\"` and `\\`. It returns the
-// decoded text and a map from each decoded byte to where it started in the
+// unicodeEscapeASCII decodes a JSON "\uXXXX" escape at in[i:] when it stands
+// for an ASCII byte (\u003d is "=", \u0026 is "&"). Serializers such as Go's
+// encoding/json write <, >, & and = that way, which splits a key=value or URL.
+// Escapes for non-ASCII characters and surrogates are left alone.
+func unicodeEscapeASCII(in string, i int) (byte, bool) {
+	if i+6 > len(in) || in[i] != '\\' || in[i+1] != 'u' {
+		return 0, false
+	}
+	v := 0
+	for k := 2; k < 6; k++ {
+		h := unwrapHexVal(in[i+k])
+		if h < 0 {
+			return 0, false
+		}
+		v = v<<4 | h
+	}
+	if v >= 0x80 {
+		return 0, false
+	}
+	return byte(v), true
+}
+
+// unwrapEscapes decodes one level of "%XX", `\"`, `\\`, `\/` and ASCII
+// "\uXXXX". It returns the decoded text and a map from each decoded byte to where it started in the
 // original: idx has len(dec)+1 entries, and decoded bytes dec[a:b] came from
 // in[idx[a]:idx[b]].
 func unwrapEscapes(in string) (string, []int32) {
@@ -142,10 +167,20 @@ func unwrapEscapes(in string) (string, []int32) {
 			dec = append(dec, byte(unwrapHexVal(in[i+1])<<4|unwrapHexVal(in[i+2])))
 			idx = append(idx, int32(i))
 			i += 3
-		case c == '\\' && i+1 < len(in) && (in[i+1] == '"' || in[i+1] == '\\'):
+		case c == '\\' && i+1 < len(in) && (in[i+1] == '"' || in[i+1] == '\\' || in[i+1] == '/'):
 			dec = append(dec, in[i+1])
 			idx = append(idx, int32(i))
 			i += 2
+		case c == '\\' && i+6 <= len(in) && in[i+1] == 'u':
+			if u, ok := unicodeEscapeASCII(in, i); ok {
+				dec = append(dec, u)
+				idx = append(idx, int32(i))
+				i += 6
+				continue
+			}
+			dec = append(dec, c)
+			idx = append(idx, int32(i))
+			i++
 		default:
 			dec = append(dec, c)
 			idx = append(idx, int32(i))

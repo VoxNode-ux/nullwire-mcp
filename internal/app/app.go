@@ -795,17 +795,30 @@ func isEntropyCandidate(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
 }
 
+// isHexLike reports whether s is hex digits with at least one letter a-f. A
+// run of only decimal digits is a number (timestamp, id), not a hex secret.
 func isHexLike(s string) bool {
+	hasLetter := false
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
 		case c >= '0' && c <= '9':
-		case c >= 'a' && c <= 'f':
-		case c >= 'A' && c <= 'F':
+		case (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'):
+			hasLetter = true
 		default:
 			return false
 		}
 	}
-	return true
+	return hasLetter
+}
+
+// isAllDigits reports whether s is non-empty and holds only 0-9.
+func isAllDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 func hasTokenSignal(s string) bool {
@@ -867,6 +880,12 @@ func looksLikeTokenMax(s string, maxLen int) bool {
 		return false
 	}
 
+	// A run of only decimal digits is a number (nanosecond timestamp, order or
+	// account id). Digits alone score as random under the log-odds model, so
+	// without this a 19-digit timestamp sits right at the threshold.
+	if isAllDigits(s) {
+		return false
+	}
 	h := shannonEntropyBits(s)
 	if isHexLike(s) {
 		return h >= entropyHexMin

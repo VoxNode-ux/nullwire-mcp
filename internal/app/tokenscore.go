@@ -2,6 +2,8 @@ package app
 
 import "math"
 
+//go:generate go run ../../tools/bigramgen -benign ../.. -synthetic 20000 -out bigram_trained.go
+
 // Token scoring that replaces the hard entropy/vowel cliffs with one smooth
 // log-odds score: positive means "looks like a secret".
 //
@@ -31,8 +33,9 @@ const (
 var (
 	// bigram[a<<7|b] is the evidence (int8) that the pair a,b belongs to
 	// natural text or code identifiers. Seeded from character-class rules and
-	// common English/code pairs; replace it with a table trained on your own
-	// corpus (go:generate) for best results.
+	// common English/code pairs. "go generate" trains it on a real corpus and
+	// writes the pairs it has enough evidence for to bigram_trained.go, which
+	// overrides the seed values.
 	bigram [128 * 128]int8
 	// plogp[c] = c*log2(c), for incremental window entropy.
 	plogp [entropyWindow + 1]float64
@@ -83,6 +86,13 @@ func init() {
 					bigram[int(x)<<7|int(y)] = 6
 				}
 			}
+		}
+	}
+	// Pairs with enough evidence in the trained corpus (see bigram_trained.go)
+	// replace the seed values, including the common-pair floor above.
+	for _, e := range trainedBigram {
+		if e.a < 128 && e.b < 128 {
+			bigram[int(e.a)<<7|int(e.b)] = e.v
 		}
 	}
 }
