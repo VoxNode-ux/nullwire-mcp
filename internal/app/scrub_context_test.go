@@ -152,7 +152,6 @@ func TestEntropyExemptHeaders(t *testing.T) {
 	h.Set("X-Amz-Request-Id", val)
 	h.Set("Cf-Ray", val)
 	h.Set("Tracestate", val)
-	h.Set("X-Other", val)
 	m, _ := s.ScrubHeaders(h)
 
 	for _, name := range []string{"X-Request-Id", "X-Correlation-Id", "Etag", "If-None-Match", "If-Match",
@@ -160,6 +159,10 @@ func TestEntropyExemptHeaders(t *testing.T) {
 		if m[name] != val {
 			t.Errorf("%s should not be touched by the entropy check, got %q", name, m[name])
 		}
+	}
+	other, _ := s.ScrubHeaders(http.Header{"X-Other": {val}})
+	if other["X-Other"] == val {
+		t.Errorf("ordinary header should be redacted, got %q", other["X-Other"])
 	}
 	if got := m["Traceparent"]; got != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
 		t.Errorf("Traceparent should be left alone, got %q", got)
