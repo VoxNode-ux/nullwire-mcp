@@ -131,8 +131,8 @@ sudo apt install ./nullwire-mcp_1.2.0_amd64.deb
 sudo dnf install ./nullwire-mcp-1.2.0-1.x86_64.rpm
 # Alpine (packages are not signed with an Alpine key)
 sudo apk add --allow-untrusted ./nullwire-mcp_1.2.0_x86_64.apk
-# Arch Linux (AUR): coming soon, waiting for AUR registration to reopen.
-# Until then use the release binary, Nix, or the install script.
+# Arch Linux (AUR)
+yay -S nullwire-mcp-bin
 # Nix
 nix run github:VoxNode-ux/nullwire-mcp
 ```
@@ -374,9 +374,13 @@ Every URL, header, request body and response body passes through these layers, i
 | 9 | **Your patterns** | Regexes from the [config file](#configuration) | |
 | 10 | **IP addresses** | IPv4 (strictly validated) and IPv6, except loopback and unspecified | `203.0.113.9` |
 | 11 | **Base64** | Base64 or URL-safe base64 whose *decoded* text contains a secret. Images and other binary data are left alone. | `eyJhcGlfa2V5…` |
-| 12 | **Randomness detector** | 16 to 128 character tokens that look machine-generated: mixed case or digits, high Shannon entropy, few vowels. UUIDs are exempt. | an unknown vendor's key |
+| 12 | **Randomness detector** | 16 to 128 character tokens in bodies, and up to 2,048 characters in headers and URLs, that look machine-generated: mixed case or digits, high Shannon entropy, few vowels. UUIDs are exempt. | an unknown vendor's key |
 
 **Headers.** `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, `Api-Key`, `X-Auth-Token` and `Proxy-Authorization` are always redacted, plus common cloud and developer-tool headers (`X-Auth-Key`, `Ocp-Apim-Subscription-Key`, `X-Amz-Security-Token`, `X-Goog-Api-Key`, `Private-Token`, `X-Vault-Token`, `Apikey`, and others), plus any you add. Use `ignore_headers` to opt a header out.
+
+**Headers and URLs are scrubbed more strictly than bodies.** A header value or a URL is one short value at a time, so a long random-looking run there is almost always a secret. Header and query text get the longer randomness limit above, a longer limit for secret-named fields (2,048 instead of 256 characters), and a rule for standalone 32, 40 and 64 digit hex values (the size of MD5, SHA-1 and SHA-256 webhook secrets and signatures). Bodies keep the looser rules to avoid false positives. `ETag`, `If-None-Match`, `If-Match`, `X-Request-Id`, `X-Correlation-Id` and `Traceparent` are exempt from the randomness checks because they carry identifiers and content hashes, not secrets.
+
+**Secrets hidden by encoding.** A key written with URL-encoding (`%73k_live_…`, or digits as `%39%38…`) or inside double-escaped JSON (`{\"api_key\":\"…\"}`) is found on a decoded copy and redacted in place. Escaping outside the secret is left exactly as it was, so escaped JSON stays valid. The encoded and the plain form of one secret get the same `[REDACTED_TOKEN#…]` tag. Text with no escapes never takes this path.
 
 **Cloud credentials without a prefix.** AWS secret access keys, Azure storage and Service Bus keys, Azure AD client secrets (`…8Q~…`) and SQL connection-string passwords have no vendor prefix. They are caught by the name they are stored under (`SecretAccessKey`, `AccountKey`, `SharedAccessKey`, `client_secret`, `Password=` in a connection string), by their shape (a standalone 40-character random base64 string, an Azure AD secret), or by the header they travel in. Cloudflare API tokens are caught by `Authorization: Bearer`, `X-Auth-Key`, the new `cfut_`/`cfat_` prefixes, or the randomness detector.
 
@@ -419,7 +423,7 @@ Prefixes are matched case-sensitively, so `asiapacific_region` is left alone.
 | In-flight capture buffer | 64 KiB request, 512 KiB response |
 | Scrub window past the stored size | 8 KiB |
 | Decoded gzip/deflate | 1 MiB |
-| Randomness detector | 16 to 128 characters |
+| Randomness detector | 16 to 128 characters in bodies, 16 to 2,048 in headers and URLs |
 
 ---
 
@@ -434,6 +438,8 @@ Pass `-secrets-config path/to/file.json` to tune redaction without recompiling. 
   "sensitive_headers":     ["X-Company-Auth", "X-Api-Signature"],
   "ignore_url_substrings": ["/healthz", "/metrics"],
   "ignore_headers":        ["User-Agent"],
+  "ignore_fields":         ["session_ttl", "key"],
+  "ignore_patterns":       ["pk_test_[A-Za-z0-9]{24}"],
   "custom_vendors": [
     { "name": "Internal DB", "prefix": "db_prod_", "pattern": "" },
     { "name": "Acme Auth",   "prefix": "acme_",    "pattern": "acme_[a-zA-Z0-9]{32}" }
@@ -449,10 +455,14 @@ Pass `-secrets-config path/to/file.json` to tune redaction without recompiling. 
 | `sensitive_headers` | Header values that are always redacted, like `Authorization`. `-scrub-headers a,b` adds more from the command line. |
 | `ignore_url_substrings` | Flows whose URL contains one of these are **never recorded** (health checks, metrics). |
 | `ignore_headers` | Header values that are left as they are. |
+| `ignore_fields` | **Body** fields whose value is left as it is, matched by name without regard to case: a JSON member (`"key": "…"`), `key=value` in a query string, form or env file, or an XML element. A recognised secret format inside the value (a vendor key, a JWT, a private key, a password in a URL) is still redacted. Headers and URLs are not affected. |
+| `ignore_patterns` | **Body** text that matches one of these regexes is left completely alone, for known harmless values such as a public test key. A pattern that matches the empty string or any character is refused at startup, because it would exempt everything. |
 | `custom_vendors` | `prefix` redacts anything with 8+ token characters after it. `pattern` is an optional full regex. |
 | `extra_regex_patterns` | Extra regexes; every match is redacted. |
 
 Patterns use Go's RE2 syntax, which runs in linear time, so a bad pattern cannot freeze the proxy.
+
+**Fixing a false positive yourself.** If a harmless value in a body is redacted, add its field name to `ignore_fields`, or a pattern that matches just that value to `ignore_patterns`. This changes nothing for anyone else: with neither list set, the defaults are exactly as shipped. The two lists apply to bodies only. For headers use `ignore_headers`, and for a whole URL use `ignore_url_substrings`.
 
 ---
 
@@ -646,7 +656,7 @@ go test -race ./...
 - **Release transparency:** every release is built with Go 1.26 and includes `SHA256SUMS.txt`, a CycloneDX SBOM (`nullwire-sbom.cdx.json`) and a signed build provenance attestation, which you can verify with `gh attestation verify`. The same proof is attached to each release as `nullwire-provenance.intoto.jsonl`. The `go vet` and `go test -race` logs of every CI run are saved as a `test-logs` artifact for 30 days. Pushes to `main` update a rolling `latest` pre-release; numbered tags produce stable releases. Pull requests never publish anything.
 - **Quality checks:** `quality.yml` runs golangci-lint (errcheck, staticcheck, revive, ineffassign), reports test coverage (Codecov) and compares benchmarks against the base branch with `benchstat`. Run the benchmarks yourself with `go test -run='^$' -bench=. -benchmem ./...`. `chaos_test.go` injects network faults (slowloris, dropped connections, malformed and truncated streams) and checks that nothing crashes or leaks.
 - **Supply chain:** releases are signed with keyless cosign, the Docker image is signed and scanned with Trivy every week, `reproducible.yml` rebuilds the binaries on four different runners and requires identical checksums, and `security.yml` (weekly) runs `govulncheck`, `gosec` and the fuzz targets. Verify a download with `cosign verify-blob --bundle nullwire-linux-amd64.sigstore.json --certificate-identity-regexp 'https://github.com/VoxNode-ux/nullwire-mcp/\.github/workflows/release\.yml@.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com nullwire-linux-amd64`.
-- **Releases:** a stable tag publishes the release, the `.deb`/`.rpm`/`.apk` packages, the npm package (with provenance), the Homebrew and Scoop taps, the AUR (once the package is published), winget, Chocolatey, PyPI and the official MCP Registry. Release notes are grouped by pull request label (`.github/release.yml`).
+- **Releases:** a stable tag publishes the release, the `.deb`/`.rpm`/`.apk` packages, the npm package (with provenance), the Homebrew and Scoop taps, the AUR, winget, Chocolatey, PyPI and the official MCP Registry. Release notes are grouped by pull request label (`.github/release.yml`).
 - **Fuzzing:** the scrubber, the IPv6 and vendor-key matchers and the WebSocket frame reader have fuzz targets. They check that no secret survives scrubbing, that results don't depend on how input is chunked, and that nothing panics.
 - **CI:** checks the shell and Node installers for syntax errors, runs `go vet` and the race detector, cross-compiles static binaries for all 9 platforms (Linux x86-64, ARM64, ARMv7 and RISC-V 64; macOS Intel and Apple Silicon; Windows x86-64 and ARM64; FreeBSD x86-64), and publishes a multi-arch Docker image (amd64 and arm64). `smoke.yml` and `smoke-extra.yml` run on demand (Actions → Run workflow): end-to-end redaction tests on Ubuntu, macOS (Apple Silicon and Intel), Windows (x86-64 and ARM64), a FreeBSD VM, and QEMU-emulated Linux ARMv7 and RISC-V 64. Security checks run `govulncheck` and the fuzz targets. GitHub Actions are pinned to full commit hashes.
 
@@ -687,7 +697,7 @@ go test -race ./...
 | **`415 Unsupported Media Type` from NullWire** | Your client sent a request body compressed with `br` or `zstd`. Send it uncompressed or gzipped, or start with `-allow-uninspectable`. |
 | **`403 reverse gateway only answers loopback Host headers`** | Reach the gateway as `127.0.0.1`, `localhost` or `[::1]` on the proxy port. |
 | **`certificate signed by unknown authority` (Termux or a corporate network)** | Add the CA with `-cacert`. |
-| **A harmless value shows as `[REDACTED_TOKEN#…]`** | The randomness detector matched a long random-looking identifier. Add its URL to `ignore_url_substrings` or tell us the shape. |
+| **A harmless value shows as `[REDACTED_TOKEN#…]`** | The randomness detector matched a long random-looking identifier. If it is in a body, add the field name to `ignore_fields` or a matching pattern to `ignore_patterns`; if it is in a header, use `ignore_headers`; to skip a whole URL, use `ignore_url_substrings`. Or tell us the shape. |
 | **`install` says a config is "not plain JSON"** | The file has comments or a syntax error, so it was left untouched. Fix it, or use `install --print` and paste the entry yourself. |
 | **`address already in use`** | Another NullWire (or program) uses the port. Pick another with `-port`. |
 | **The assistant sees no flows** | Check the status bar's `RAM Ring: n/50`. If it stays at 0, your traffic isn't going through the proxy. |
