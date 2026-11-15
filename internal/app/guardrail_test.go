@@ -51,8 +51,8 @@ func TestGuardrail_ConcurrentStress(t *testing.T) {
 	payloads := []payload{
 		{`Authorization: Bearer ghp_1234567890abcdef1234567890abcdef1234`, "ghp_1234567890abcdef1234567890abcdef1234", ""},
 		{`{"card": "4532015112830366", "user": "getCustomerProfile"}`, "4532015112830366", "getCustomerProfile"},
-		{string(bytes.Repeat([]byte("A"), 4096)) + " sk-ant-api03-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c", "", ""}, // no assert until verified
-		{"\xff\xfe\xfd_invalid_utf8_with_secret_x9K2mQpL7vR4wZ8nJ3cF6hB5", "", ""},                        // no assert until verified
+		{string(bytes.Repeat([]byte("A"), 4096)) + " sk-ant-api03-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c", "sk-ant-api03-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c", ""},
+		{"\xff\xfe\xfd_invalid_utf8_with_secret_x9K2mQpL7vR4wZ8nJ3cF6hB5", "x9K2mQpL7vR4wZ8nJ3cF6hB5", ""},
 	}
 
 	var wg sync.WaitGroup
@@ -78,4 +78,50 @@ func TestGuardrail_ConcurrentStress(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+// scrubUnwrapped runs first whenever the text holds any %XX or \" escape, so it
+// must apply the same false-positive guards as the later rules.
+func TestGuardrail_UnwrapKeepsStageTwoGuards(t *testing.T) {
+	s, _ := NewScrubber()
+	keep := map[string]string{
+		"bare key":    `{"msg": "hi \"there\"", "key": "submit"}`,
+		"prose token": `{"msg": "hi \"there\"", "err": "Invalid token provided"}`,
+		"env ref":     `{"msg": "hi \"there\"", "api_key": "${OPENAI_API_KEY}"}`,
+		"conn string": `Server=db;Password=******;Uid=app`,
+	}
+	for name, in := range keep {
+		in := in
+		t.Run(name, func(t *testing.T) {
+			if out, n := s.ScrubTextIn(in, ContextBody); n != 0 || out != in {
+				t.Fatalf("false positive:\nwant: %s\ngot:  %s", in, out)
+			}
+		})
+	}
+}
+
+func TestGuardrail_UserInfoKeepsHostAndQuery(t *testing.T) {
+	s, _ := NewScrubber()
+	in := `https://user:p%40ss@db.internal?email=admin@corp.com`
+	out, n := s.ScrubTextIn(in, ContextBody)
+	if n == 0 || strings.Contains(out, "p%40ss") {
+		t.Fatalf("password leaked: %s", out)
+	}
+	if !strings.Contains(out, "@db.internal?email=admin@corp.com") {
+		t.Fatalf("host or query destroyed: %s", out)
+	}
+}
+
+func TestGuardrail_PercentPrefixedSecret(t *testing.T) {
+	s, _ := NewScrubber()
+	for _, in := range []string{`password=%FOO%bar_real_secret`, `password=%mysecret1234`} {
+		if out, n := s.ScrubTextIn(in, ContextBody); n == 0 || strings.Contains(out, "real_secret") || strings.Contains(out, "mysecret1234") {
+			t.Errorf("leaked: %q -> %q", in, out)
+		}
+	}
+	if in := `password=%DB_PASSWORD%`; true {
+		if out, _ := s.ScrubTextIn(in, ContextBody); out != in {
+			t.Errorf("placeholder redacted: %q", out)
+		}
+	}
 }
