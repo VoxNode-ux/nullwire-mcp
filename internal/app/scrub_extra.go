@@ -22,6 +22,7 @@ var xmlSecretHints = []string{"password", "passwd", "pwd", "secret", "token", "a
 const (
 	b64MaxEncoded = 88 * 1024  // longest base64 run that is decoded
 	b64Budget     = 256 * 1024 // most base64 text decoded in one call
+	b64Waste      = 4 * 1024 * 1024 // most base64 that decodes to binary, per call
 )
 
 // scrubJSONSecretArrays redacts every string in an array that sits under a
@@ -113,15 +114,17 @@ func decodeBase64Text(s string) ([]byte, bool) {
 // text with no secret, are left as they were.
 func (s *Scrubber) scrubBase64(in string, count *int) string {
 	budget := b64Budget
+	waste := b64Waste // runs that decode to binary are charged here instead
 	return reB64Candidate.ReplaceAllStringFunc(in, func(m string) string {
-		if budget <= 0 || len(m) > b64MaxEncoded || !isBase64Like(m) {
+		if budget <= 0 || waste <= 0 || len(m) > b64MaxEncoded || !isBase64Like(m) {
+			return m
+		}
+		decoded, ok := decodeBase64Text(m)
+		if !ok {
+			waste -= len(m)
 			return m
 		}
 		budget -= len(m)
-		decoded, ok := decodeBase64Text(m)
-		if !ok {
-			return m
-		}
 		if _, n := s.scrubLayers(string(decoded), false); n == 0 {
 			return m
 		}

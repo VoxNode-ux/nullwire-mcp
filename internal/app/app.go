@@ -368,6 +368,7 @@ func (s *Scrubber) ResetCounters() {
 	s.Tokens.Store(0)
 	s.Cookies.Store(0)
 	s.IPs.Store(0)
+	s.taint.clear()
 }
 
 func containsAny(s string, subs []string) bool {
@@ -486,7 +487,7 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 			}
 			// Stage 1 may already have replaced this value with its own tag. Leave
 			// that tag exactly as it is: tagging a tag corrupts it.
-			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) {
+			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) || benignBareKey(g[1], g[2]) {
 				return m
 			}
 			count++
@@ -499,7 +500,7 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 			if g == nil {
 				return m
 			}
-			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) {
+			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) || benignBareKey(g[1], g[2]) {
 				return m
 			}
 			count++
@@ -527,7 +528,7 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	if preBearer {
 		out = s.reBearer.ReplaceAllStringFunc(out, func(m string) string {
 			g := s.reBearer.FindStringSubmatch(m)
-			if g == nil {
+			if g == nil || proseAfterScheme(g[1], g[2]) {
 				return m
 			}
 			count++
@@ -585,19 +586,7 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	}
 
 	if !o.skipIP && maybeIPv4(out) {
-		out = s.reIPv4.ReplaceAllStringFunc(out, func(m string) string {
-			addr, err := netip.ParseAddr(m)
-			if err != nil || !addr.Is4() {
-				return m
-			}
-			canon := addr.String()
-			if canon == "127.0.0.1" || canon == "0.0.0.0" {
-				return m
-			}
-			count++
-			s.IPs.Add(1)
-			return s.tag("IP", canon)
-		})
+		out = replaceIPv4(s, out, &count)
 	}
 
 	var nPAN int
@@ -608,13 +597,13 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 		out = s.scrubBase64(out, &count)
 	}
 
-	// Secrets redacted earlier in this run are redacted again by identity.
-	var nTaint int
-	out, nTaint = s.scrubTainted(out)
-	count += nTaint
-
-	// Stage 3: the randomness heuristics, which are guesses and so run last.
+	// Stage 3: identity matching against earlier redactions, then the
+	// randomness heuristics, which are guesses and so run last. Both are skipped
+	// for exempt headers and allowlisted fields.
 	if !o.skipEntropy {
+		var nTaint int
+		out, nTaint = s.scrubTainted(out)
+		count += nTaint
 		if o.ctx == ContextHeader || o.ctx == ContextQuery {
 			var nHex int
 			out, nHex = s.scrubHexSecrets(out)
@@ -683,6 +672,16 @@ var nonSecretFields = map[string]bool{
 	"credentials_endpoint": true, "credentials-endpoint": true,
 	"withcredentials": true, "author": true,
 	"monkey": true, "donkey": true, "turkey": true,
+	"translation_key": true, "translation-key": true, "translationkey": true,
+	"i18n_key": true, "i18n-key": true, "i18nkey": true,
+	"react_key": true, "react-key": true, "reactkey": true,
+	"token_type": true, "token-type": true, "tokentype": true,
+	"token_scope": true, "token-scope": true, "tokenscope": true,
+	"session_state": true, "session-state": true, "sessionstate": true,
+	"signature_algorithm": true, "signature-algorithm": true, "signaturealgorithm": true,
+	"password_policy": true, "password-policy": true, "passwordpolicy": true,
+	"auth_method": true, "auth-method": true, "authmethod": true,
+	"authorizer": true,
 }
 
 func secretishKey(key string) bool {
@@ -854,6 +853,10 @@ func looksLikeTokenMax(s string, maxLen int) bool {
 	}
 
 	if n == 36 && s[8] == '-' && s[13] == '-' && s[18] == '-' && s[23] == '-' {
+		return false
+	}
+
+	if benignResourceID(s) {
 		return false
 	}
 
@@ -2072,7 +2075,7 @@ func (a *App) toolInspect(args json.RawMessage) map[string]any {
 	return toolResult(text, false)
 }
 
-var reTag = regexp.MustCompile(`\[REDACTED_(TOKEN|COOKIE|IP|KEY)#[0-9a-f]{6}\]`)
+var reTag = regexp.MustCompile(`\[REDACTED_(TOKEN|COOKIE|IP|KEY|PAN)#[0-9a-f]{6}\]`)
 
 func envFor(kind string) string {
 	switch kind {
@@ -2082,6 +2085,8 @@ func envFor(kind string) string {
 		return "NULLWIRE_IP"
 	case "KEY":
 		return "NULLWIRE_PRIVATE_KEY"
+	case "PAN":
+		return "NULLWIRE_CARD_NUMBER"
 	default:
 		return "NULLWIRE_AUTH_TOKEN"
 	}

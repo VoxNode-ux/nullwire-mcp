@@ -59,7 +59,7 @@ func (s *Scrubber) scrubCloudSecrets(in string, gm uint32) (string, int) {
 	if gm&gateCloud != 0 {
 		out = reCloudNamedSecret.ReplaceAllStringFunc(out, func(m string) string {
 			g := reCloudNamedSecret.FindStringSubmatch(m)
-			if g == nil {
+			if g == nil || strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) {
 				return m
 			}
 			count++
@@ -69,7 +69,7 @@ func (s *Scrubber) scrubCloudSecrets(in string, gm uint32) (string, int) {
 		if gm&gateCloudPass != 0 {
 			out = reCloudConnPassword.ReplaceAllStringFunc(out, func(m string) string {
 				g := reCloudConnPassword.FindStringSubmatch(m)
-				if g == nil || strings.HasPrefix(g[2], "[REDACTED_") {
+				if g == nil || strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) {
 					return m
 				}
 				count++

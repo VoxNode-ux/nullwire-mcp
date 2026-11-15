@@ -109,6 +109,20 @@ func (t *taintRing) contains(run string) bool {
 	return false
 }
 
+// clear forgets every stored hash (clear_ram_buffer).
+func (t *taintRing) clear() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	clear(t.set)
+	t.ring = [taintCap]uint64{}
+	t.pos = 0
+	t.filled = 0
+	t.size.Store(0)
+	t.mu.Unlock()
+}
+
 // scrubTainted redacts runs that match a previously redacted secret.
 func (s *Scrubber) scrubTainted(in string) (string, int) {
 	t := s.taint
