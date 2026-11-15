@@ -165,8 +165,8 @@ type secretSpan struct {
 
 // reUserInfoWide is reUserInfo for decoded text: the password may hold a
 // decoded "@" ("p%40ss" becomes "p@ss"), so it runs to the LAST "@" before the
-// first "/" or space.
-var reUserInfoWide = regexp.MustCompile(`(://[^/\s:@]+:)([^/\s"'<>]+)(@)`)
+// first "/", "?", "#" or space.
+var reUserInfoWide = regexp.MustCompile(`(://[^/\s:@]+:)([^/\s"'<>?#]+)(@)`)
 
 // scrubUnwrapped finds secrets that are hidden by URL-encoding or by escaped
 // JSON quotes. It decodes a read-only copy, runs the deterministic rules on
@@ -174,7 +174,7 @@ var reUserInfoWide = regexp.MustCompile(`(://[^/\s:@]+:)([^/\s"'<>]+)(@)`)
 // Everything outside the secrets is untouched, so escaped JSON stays valid
 // JSON. The tag is made from the decoded (canonical) secret, so the raw and
 // the encoded form of one secret get the same tag.
-func (s *Scrubber) scrubUnwrapped(in string) (string, int) {
+func (s *Scrubber) scrubUnwrapped(in string, ctx ScrubContext) (string, int) {
 	if len(in) > unwrapMaxLen || !needsUnwrap(in) {
 		return in, 0
 	}
@@ -205,14 +205,26 @@ func (s *Scrubber) scrubUnwrapped(in string) (string, int) {
 	for _, m := range s.reAPIKey.FindAllStringIndex(dec, -1) {
 		add(m[0], m[1])
 	}
-	// The three rules below capture the secret as group 2.
-	for _, re := range [...]interface {
+	// The three rules below capture the secret as group 2 (the text up to it is
+	// group 1). They apply the same false-positive guards as scrubLayersOpts.
+	for r, re := range [...]interface {
 		FindAllStringSubmatchIndex(string, int) [][]int
 	}{s.reJSONSecret, s.reQuerySecret, s.reBearer} {
 		for _, m := range re.FindAllStringSubmatchIndex(dec, -1) {
-			if len(m) >= 6 && m[4] >= 0 {
-				add(m[4], m[5])
+			if len(m) < 6 || m[4] < 0 {
+				continue
 			}
+			prefix, v := dec[m[2]:m[3]], dec[m[4]:m[5]]
+			if strings.HasPrefix(v, "[REDACTED_") || isAllowMarkOnly(v) || isPlaceholderValue(v) {
+				continue
+			}
+			if r < 2 && benignBareKey(prefix, v) {
+				continue
+			}
+			if r == 2 && proseAfterScheme(prefix, v, ctx) {
+				continue
+			}
+			add(m[4], m[5])
 		}
 	}
 	if strings.Contains(dec, "-----BEGIN") {
