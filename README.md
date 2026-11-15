@@ -619,7 +619,7 @@ NullWire is a *diagnostic* tool. Be clear-eyed about what it does and does not p
 - **Brotli and Zstd bodies are never decoded** (the standard library can't, and pulling in a package would break the zero-dependency rule). They are refused (requests) or flagged (responses).
 - **WebSocket flows appear when the connection closes.** Messages compressed with `permessage-deflate` can't be read, so NullWire drops the client's extension offer to keep frames readable.
 - **An XML secret element that contains nested markup** is not covered by the XML layer.
-- **Upstream connections use HTTP/1.1.** HTTP/2 and gRPC bodies are not captured.
+- **HTTP/2 text bodies are captured; binary bodies are not.** HTTP/2 and h2c text and JSON bodies are scrubbed like HTTP/1.1. Binary protobuf and gRPC message bodies are skipped, and `Grpc-Status` and `Grpc-Message` trailers are scrubbed.
 
 If you find a secret NullWire missed, please open an issue with a *fake* sample that has the same shape. Never post a real one.
 
