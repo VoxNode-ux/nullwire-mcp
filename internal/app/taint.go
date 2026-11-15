@@ -19,6 +19,9 @@ const (
 	taintStride  = 12   // distance between stored windows
 	taintMaxSub  = 8    // most windows stored per secret
 	taintMaxScan = 2048 // longest run that is scanned window by window
+	// Only material at least this random is tracked: periodic hex and filler
+	// repeat their own windows and would redact unrelated values.
+	taintMinEntropy = 3.0
 )
 
 type taintRing struct {
@@ -59,7 +62,7 @@ func (t *taintRing) insertLocked(h uint64) {
 // taintSubMin characters or more, so short tokens are never cut into pieces
 // that could match ordinary text.
 func (t *taintRing) add(raw string) {
-	if len(raw) < taintMinLen {
+	if len(raw) < taintMinLen || shannonEntropyBits(raw) < taintMinEntropy {
 		return
 	}
 	var hs [1 + taintMaxSub]uint64
@@ -68,6 +71,9 @@ func (t *taintRing) add(raw string) {
 	nh++
 	if len(raw) >= taintSubMin {
 		for off := 0; off+taintWin <= len(raw) && nh < len(hs); off += taintStride {
+			if shannonEntropyBits(raw[off:off+taintWin]) < taintMinEntropy {
+				continue
+			}
 			hs[nh] = siphash24(t.k0, t.k1, raw[off:off+taintWin])
 			nh++
 		}
@@ -83,6 +89,9 @@ func (t *taintRing) add(raw string) {
 func (t *taintRing) contains(run string) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	if shannonEntropyBits(run) < taintMinEntropy {
+		return false
+	}
 	if _, ok := t.set[siphash24(t.k0, t.k1, run)]; ok {
 		return true
 	}
@@ -90,6 +99,9 @@ func (t *taintRing) contains(run string) bool {
 		return false
 	}
 	for off := 0; off+taintWin <= len(run); off++ {
+		if shannonEntropyBits(run[off:off+taintWin]) < taintMinEntropy {
+			continue
+		}
 		if _, ok := t.set[siphash24(t.k0, t.k1, run[off:off+taintWin])]; ok {
 			return true
 		}
