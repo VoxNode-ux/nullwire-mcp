@@ -119,9 +119,9 @@ func TestGuardrail_PercentPrefixedSecret(t *testing.T) {
 			t.Errorf("leaked: %q -> %q", in, out)
 		}
 	}
-	if in := `password=%DB_PASSWORD%`; true {
-		if out, _ := s.ScrubTextIn(in, ContextBody); out != in {
-			t.Errorf("placeholder redacted: %q", out)
-		}
+	// "%DB" looks like a percent-escape, so this also exercises the unwrap pass.
+	in := `password=%DB_PASSWORD%`
+	if out, _ := s.ScrubTextIn(in, ContextBody); out != in {
+		t.Errorf("placeholder redacted: %q", out)
 	}
 }
