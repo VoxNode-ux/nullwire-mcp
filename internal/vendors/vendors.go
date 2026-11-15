@@ -35,6 +35,9 @@ var DefaultVendorPrefixes = []string{
 	// Source hosting, CI and package registries
 	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
 	"glpat-", "glptt-", "glrt-", "gldt-", "glft-", "glimt-", "glagent-",
+	"glffct-",          // GitLab feature flag client token
+	"p8e-",             // Adobe OAuth client secret
+	"bedrock-api-key-", // AWS Bedrock short-lived API key
 	"glsoat-", "glcbt-", "gloas-",
 	"ATATT3", "ATCTT3", "ATBB", "bkua_", "CCIPAT_", "CLOJARS_",
 	"npm_", "pypi-AgEI", "pypi-AgEN", "rubygems_", "dckr_pat_", "dckr_oat_",
