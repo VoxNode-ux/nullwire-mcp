@@ -34,7 +34,7 @@ func (s *Scrubber) scrubJSONSecretArrays(in string, count *int) string {
 		}
 		items := reQuotedString.ReplaceAllStringFunc(g[2], func(q string) string {
 			inner := q[1 : len(q)-1]
-			if inner == "" || strings.HasPrefix(inner, "[REDACTED_") {
+			if inner == "" || strings.HasPrefix(inner, "[REDACTED_") || isAllowMarkOnly(inner) || isPlaceholderValue(inner) {
 				return q
 			}
 			*count++
@@ -54,7 +54,7 @@ func (s *Scrubber) scrubXMLSecrets(in string, count *int) string {
 			return m
 		}
 		trimmed := strings.TrimSpace(g[2])
-		if trimmed == "" || strings.HasPrefix(trimmed, "[REDACTED_") {
+		if trimmed == "" || strings.HasPrefix(trimmed, "[REDACTED_") || isAllowMarkOnly(trimmed) || isPlaceholderValue(trimmed) {
 			return m
 		}
 		*count++
