@@ -736,12 +736,10 @@ func isPlaceholderValue(s string) bool {
 // fires for 12-256 character values without spaces, slashes, dots or colons
 // (so URLs, paths and timestamps are left alone), and never for a field whose
 // name gives no hint: ordinary values like "model":"claude-opus-4-5" survive.
-func (s *Scrubber) scrubStrictFields(in string) (string, int) {
-	return s.scrubStrictFieldsMax(in, strictFieldMax)
-}
 
 // scrubStrictFieldsMax is scrubStrictFields with a limit on the value length:
 // 256 for bodies, 2048 for header and query contexts.
+
 func (s *Scrubber) scrubStrictFieldsMax(in string, maxVal int) (string, int) {
 	if len(in) < 12 {
 		return in, 0
@@ -759,6 +757,9 @@ func (s *Scrubber) scrubStrictFieldsMax(in string, maxVal int) (string, int) {
 		end := start
 		for end < len(in) && in[end] != ' ' && in[end] != '"' && in[end] != '\'' && in[end] != ',' && in[end] != '\n' && in[end] != '}' && in[end] != '&' {
 			end++
+		}
+		if start < len(in) && (in[start] == '%' || strings.HasPrefix(in[start:], "${") || strings.HasPrefix(in[start:], "{{")) {
+			continue // template: the end scan would stop at its brace
 		}
 		if end-start < 12 || end-start > maxVal {
 			continue
@@ -845,8 +846,6 @@ func shannonEntropyBits(s string) float64 {
 	return h
 }
 
-func looksLikeToken(s string) bool { return looksLikeTokenMax(s, entropyMaxLen) }
-
 // looksLikeTokenMax is looksLikeToken with a limit on the run length.
 func looksLikeTokenMax(s string, maxLen int) bool {
 	n := len(s)
@@ -875,10 +874,6 @@ func looksLikeTokenMax(s string, maxLen int) bool {
 		return h >= entropyLongMin
 	}
 	return h >= entropyShortMin
-}
-
-func (s *Scrubber) scrubHighEntropy(in string) (string, int) {
-	return s.scrubHighEntropyMax(in, entropyMaxLen)
 }
 
 func (s *Scrubber) scrubHighEntropyMax(in string, maxLen int) (string, int) {
