@@ -62,6 +62,13 @@ const (
 	entropyShortMin       = 3.6
 	entropyMaxVowel       = 0.25
 	hasTokenSignalAutoLen = 24
+
+	// Header and query values are single short values, so the randomness
+	// check looks at much longer runs there than in free-text bodies.
+	entropyMaxLenWide    = 2048
+	entropyHexWebhookMin = 2.0
+	strictFieldMax       = 256
+	strictFieldMaxWide   = 2048
 )
 
 var defaultAndroidDNS = []string{"1.1.1.1:53", "9.9.9.9:53"}
@@ -166,6 +173,8 @@ type SecretsConfig struct {
 	SensitiveHeaders    []string       `json:"sensitive_headers"`
 	IgnoreURLSubstrings []string       `json:"ignore_url_substrings"`
 	IgnoreHeaders       []string       `json:"ignore_headers"`
+	IgnoreFields        []string       `json:"ignore_fields"`   // body fields whose value is left as it is
+	IgnorePatterns      []string       `json:"ignore_patterns"` // body text matching one of these is left alone
 	CustomVendors       []VendorConfig `json:"custom_vendors"`
 	ExtraRegexPatterns  []ExtraPattern `json:"extra_regex_patterns"`
 }
@@ -195,6 +204,9 @@ func loadSecretsConfig(path string) (*SecretsConfig, error) {
 			return nil, fmt.Errorf("-secrets-config %s: extra_regex_patterns[%d] (%q): %v", path, i, p.Name, err)
 		}
 	}
+	if _, err := newAllowlist(c.IgnoreFields, c.IgnorePatterns); err != nil {
+		return nil, fmt.Errorf("-secrets-config %s: %v", path, err)
+	}
 	for i, v := range c.CustomVendors {
 		if v.Pattern != "" {
 			if _, err := regexp.Compile(v.Pattern); err != nil {
@@ -212,6 +224,7 @@ type Scrubber struct {
 	extraPatterns  []*regexp.Regexp
 	vendorGate     *vendors.Gate // Aho-Corasick pre-check over every prefix (run on lower-cased text)
 	vendorRules    []vendorRule // strong, weak, DSN and custom prefix rules
+	allow          *allowlist   // body exemptions from the user's config; nil when none are set
 
 	reBearer          *regexp.Regexp
 	reSensitiveHeader *regexp.Regexp
@@ -306,8 +319,14 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		}
 	}
 
+	allow, err := newAllowlist(cfg.IgnoreFields, cfg.IgnorePatterns)
+	if err != nil {
+		return nil, fmt.Errorf("secrets config: %v", err)
+	}
+
 	return &Scrubber{
 		nonce:          nonce,
+		allow:          allow,
 		extraSensitive: extra,
 		ignoreHeaders:  ignore,
 		extraPatterns:  extras,
@@ -402,24 +421,47 @@ func weakVendorMatchOK(m string, prefixes []string) bool {
 
 // ScrubText redacts everything NullWire recognises in in and returns the
 // result with the number of redactions.
-func (s *Scrubber) ScrubText(in string) (string, int) { return s.scrubLayers(in, true) }
+func (s *Scrubber) ScrubText(in string) (string, int) { return s.ScrubTextIn(in, ContextBody) }
+
+// ScrubTextIn is ScrubText for text whose origin is known. Header and query
+// contexts apply stricter rules than ContextBody (see ScrubContext).
+func (s *Scrubber) ScrubTextIn(in string, ctx ScrubContext) (string, int) {
+	o := scrubOpts{allowB64: true, ctx: ctx}
+	if s.allow != nil && ctx == ContextBody {
+		return s.scrubWithAllowlist(in, o)
+	}
+	return s.scrubLayersOpts(in, o)
+}
 
 // scrubLayers runs every rule. Base64 decoding is switched off for text that
 // was itself decoded from base64, so it never nests.
 func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
+	return s.scrubLayersOpts(in, scrubOpts{allowB64: allowB64})
+}
+
+func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	if in == "" {
 		return in, 0
 	}
+	// Stage 1: secrets hidden by URL-encoding or escaped quotes are replaced
+	// first, on the original text; it allocates only when such escapes exist.
+	count := 0
+	{
+		var n int
+		in, n = s.scrubUnwrapped(in)
+		count += n
+	}
+	// Stage 2: the deterministic rules (keys, secret fields, credentials, vendor
+	// formats, your own patterns, IP addresses and base64).
 	lower := strings.ToLower(in)
 
 	preJWT := strings.Contains(in, "eyJ")
-	preVendor := s.vendorGate.Match(lower)
+	preVendor := s.vendorGate.Match(in)
 	preAPIKey := containsAny(lower, []string{"sk-", "ghp_", "github_pat_", "aiza", "xox", "akia"})
 	preUserInfo := strings.Contains(in, "://") && strings.Contains(in, "@")
 	preBearer := containsAny(lower, []string{"bearer", "basic", "token"})
 	preSecretKey := containsAny(lower, []string{"token", "secret", "password", "passwd", "session_id", "api_key", "apikey", "key=", `"key"`})
 
-	count := 0
 	out := in
 
 	if strings.Contains(in, "-----BEGIN") {
@@ -436,6 +478,11 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 			if g == nil {
 				return m
 			}
+			// Stage 1 may already have replaced this value with its own tag. Leave
+			// that tag exactly as it is: tagging a tag corrupts it.
+			if strings.HasPrefix(g[2], "[REDACTED_") {
+				return m
+			}
 			count++
 			s.Tokens.Add(1)
 			return g[1] + s.tag("TOKEN", g[2]) + g[3]
@@ -444,6 +491,9 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 		out = s.reQuerySecret.ReplaceAllStringFunc(out, func(m string) string {
 			g := s.reQuerySecret.FindStringSubmatch(m)
 			if g == nil {
+				return m
+			}
+			if strings.HasPrefix(g[2], "[REDACTED_") {
 				return m
 			}
 			count++
@@ -458,6 +508,9 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 		out = s.reUserInfo.ReplaceAllStringFunc(out, func(m string) string {
 			g := s.reUserInfo.FindStringSubmatch(m)
 			if g == nil {
+				return m
+			}
+			if strings.HasPrefix(g[2], "[REDACTED_") {
 				return m
 			}
 			count++
@@ -508,7 +561,7 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 	count += nCloud
 
 	var nStrict int
-	out, nStrict = s.scrubStrictFields(out)
+	out, nStrict = s.scrubStrictFieldsMax(out, o.strictMax())
 	count += nStrict
 
 	for _, re := range s.extraPatterns {
@@ -519,11 +572,14 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 		})
 	}
 
-	var n6 int
-	out, n6 = s.scrubIPv6(out)
-	count += n6
+	if !o.skipIP {
+		var n6 int
+		out, n6 = s.scrubIPv6(out)
+		count += n6
+	}
 
-	out = s.reIPv4.ReplaceAllStringFunc(out, func(m string) string {
+	if !o.skipIP && maybeIPv4(out) {
+		out = s.reIPv4.ReplaceAllStringFunc(out, func(m string) string {
 		addr, err := netip.ParseAddr(m)
 		if err != nil || !addr.Is4() {
 			return m
@@ -536,14 +592,23 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 		s.IPs.Add(1)
 		return s.tag("IP", canon)
 	})
+	}
 
-	if allowB64 {
+	if o.allowB64 && hasBase64Run(out) {
 		out = s.scrubBase64(out, &count)
 	}
 
-	var nEntropy int
-	out, nEntropy = s.scrubHighEntropy(out)
-	count += nEntropy
+	// Stage 3: the randomness heuristics, which are guesses and so run last.
+	if !o.skipEntropy {
+		if o.ctx == ContextHeader || o.ctx == ContextQuery {
+			var nHex int
+			out, nHex = s.scrubHexSecrets(out)
+			count += nHex
+		}
+		var nEntropy int
+		out, nEntropy = s.scrubHighEntropyMax(out, o.entropyMax())
+		count += nEntropy
+	}
 	return out, count
 }
 
@@ -590,6 +655,12 @@ func secretishKey(key string) bool {
 // (so URLs, paths and timestamps are left alone), and never for a field whose
 // name gives no hint: ordinary values like "model":"claude-opus-4-5" survive.
 func (s *Scrubber) scrubStrictFields(in string) (string, int) {
+	return s.scrubStrictFieldsMax(in, strictFieldMax)
+}
+
+// scrubStrictFieldsMax is scrubStrictFields with a limit on the value length:
+// 256 for bodies, 2048 for header and query contexts.
+func (s *Scrubber) scrubStrictFieldsMax(in string, maxVal int) (string, int) {
 	if len(in) < 12 {
 		return in, 0
 	}
@@ -607,7 +678,7 @@ func (s *Scrubber) scrubStrictFields(in string) (string, int) {
 		for end < len(in) && in[end] != ' ' && in[end] != '"' && in[end] != '\'' && in[end] != ',' && in[end] != '\n' && in[end] != '}' && in[end] != '&' {
 			end++
 		}
-		if end-start < 12 || end-start > 256 {
+		if end-start < 12 || end-start > maxVal {
 			continue
 		}
 		if !secretishKey(keyBefore(in, i)) {
@@ -692,9 +763,12 @@ func shannonEntropyBits(s string) float64 {
 	return h
 }
 
-func looksLikeToken(s string) bool {
+func looksLikeToken(s string) bool { return looksLikeTokenMax(s, entropyMaxLen) }
+
+// looksLikeTokenMax is looksLikeToken with a limit on the run length.
+func looksLikeTokenMax(s string, maxLen int) bool {
 	n := len(s)
-	if n < entropyMinLen || n > entropyMaxLen {
+	if n < entropyMinLen || n > maxLen {
 		return false
 	}
 
@@ -719,6 +793,10 @@ func looksLikeToken(s string) bool {
 }
 
 func (s *Scrubber) scrubHighEntropy(in string) (string, int) {
+	return s.scrubHighEntropyMax(in, entropyMaxLen)
+}
+
+func (s *Scrubber) scrubHighEntropyMax(in string, maxLen int) (string, int) {
 	if len(in) < entropyMinLen {
 		return in, 0
 	}
@@ -735,7 +813,7 @@ func (s *Scrubber) scrubHighEntropy(in string) (string, int) {
 		}
 		cand := in[i:j]
 
-		if !strings.Contains(cand, "REDACTED_") && looksLikeToken(cand) {
+		if !strings.Contains(cand, "REDACTED_") && looksLikeTokenMax(cand, maxLen) {
 			b.WriteString(in[last:i])
 			b.WriteString(s.tag("TOKEN", cand))
 			s.Tokens.Add(1)
@@ -877,7 +955,7 @@ func (s *Scrubber) ScrubHeaders(h http.Header) (map[string]string, int) {
 				s.Cookies.Add(1)
 				count++
 			case (lname == "authorization" || lname == "proxy-authorization") && s.reBearer.MatchString(joined):
-				v, n := s.ScrubText(joined)
+				v, n := s.scrubHeaderValue(lname, joined)
 				out[name] = v
 				count += n
 			default:
@@ -887,7 +965,7 @@ func (s *Scrubber) ScrubHeaders(h http.Header) (map[string]string, int) {
 			}
 			continue
 		}
-		v, n := s.ScrubText(joined)
+		v, n := s.scrubHeaderValue(lname, joined)
 		out[name] = v
 		count += n
 	}
@@ -901,6 +979,10 @@ type App struct {
 	target              *url.URL
 	upstreams           map[string]*url.URL
 	transport           *http.Transport
+	h2cOnce             sync.Once
+	h2c                 *http.Transport
+	h1Once              sync.Once
+	h1                  *http.Transport
 	ignoreURLSubstrings []string
 	tunnels             atomic.Int64
 	tunnelIdle          time.Duration
@@ -1136,6 +1218,26 @@ type rawFlow struct {
 	respBody    []byte
 	latencyMs   int64
 	note        string
+
+	respTrailers http.Header // read after the body; gRPC puts its status here
+}
+
+// upgradeTransport returns a transport that never negotiates HTTP/2. An
+// upgrade (WebSocket or any other) exists only in HTTP/1.1, and an
+// HTTP/2-capable HTTPS server would otherwise answer the TLS handshake with h2.
+func (a *App) upgradeTransport() *http.Transport {
+	a.h1Once.Do(func() {
+		t := a.transport.Clone()
+		t.ForceAttemptHTTP2 = false
+		// A non-nil, empty map is the documented way to switch HTTP/2 off. The
+		// copied TLS settings may already offer "h2" (the main transport added it).
+		t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		if t.TLSClientConfig != nil {
+			t.TLSClientConfig.NextProtos = nil
+		}
+		a.h1 = t
+	})
+	return a.h1
 }
 
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1181,6 +1283,10 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		outReq.Header = copyHeaders(r.Header, "Accept-Encoding")
 	}
+	// gRPC servers look for "TE: trailers", so this one hop-by-hop value travels on.
+	if acceptsTrailers(r.Header) {
+		outReq.Header.Set("Te", "trailers")
+	}
 	// Response shield: never ask the server for an encoding NullWire cannot read.
 	restrictAcceptEncoding(outReq.Header, r.Header)
 	upgrade := isUpgradeRequest(r.Header)
@@ -1199,7 +1305,13 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	flow := rawFlow{started: start, method: r.Method, url: outURL.String(), reqHeaders: r.Header.Clone()}
 	outReq.Host = outURL.Host
-	resp, err := a.transport.RoundTrip(outReq)
+	rt := a.roundTripperFor(r, outURL)
+	if upgrade {
+		// Go keeps WebSocket on HTTP/1.1 by itself, but not other upgrade tokens,
+		// so every upgrade goes over a transport that cannot choose HTTP/2.
+		rt = a.upgradeTransport()
+	}
+	resp, err := rt.RoundTrip(outReq)
 	if err != nil {
 		msg := "nullwire-mcp: upstream error: " + err.Error()
 		http.Error(w, msg, http.StatusBadGateway)
@@ -1224,10 +1336,24 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		dst[k] = vs
 	}
 	w.WriteHeader(resp.StatusCode)
+	if resp.ContentLength < 0 {
+		// A stream of unknown length (server-sent events, gRPC): the client
+		// sees the headers now, not together with the first chunk.
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+	}
 	_, _ = io.Copy(&flushWriter{w: w}, io.TeeReader(resp.Body, respCap))
+	// Trailers are only known once the body has been read.
+	for k, vs := range resp.Trailer {
+		if len(vs) > 0 { // a declared trailer the server never sent has no value
+			w.Header()[http.TrailerPrefix+k] = append([]string(nil), vs...)
+		}
+	}
 	flow.reqBody = reqCap.Bytes()
 	flow.status = resp.StatusCode
 	flow.respHeaders = resp.Header.Clone()
+	flow.respTrailers = resp.Trailer.Clone()
 	flow.respBody = respCap.Bytes()
 	flow.latencyMs = time.Since(start).Milliseconds()
 	go a.capture(flow)
@@ -1672,7 +1798,7 @@ func (a *App) capture(f rawFlow) {
 	total := 0
 	note := f.note
 
-	u, n := a.scrub.ScrubText(f.url)
+	u, n := a.scrub.ScrubURL(f.url)
 	total += n
 	rh, n := a.scrub.ScrubHeaders(f.reqHeaders)
 	total += n
@@ -1692,6 +1818,16 @@ func (a *App) capture(f rawFlow) {
 	if len(f.respBody) > 0 && isProtobufContentType(f.respHeaders.Get("Content-Type")) {
 		rawRespBody = fmt.Sprintf("[protobuf/gRPC body not captured: %d bytes]", len(f.respBody))
 		note += " Protobuf/gRPC response body not captured (binary)."
+	}
+
+	if st, msg := grpcStatus(f); st != "" {
+		note += " gRPC status " + st
+		if msg != "" {
+			scrubbed, cnt := a.scrub.ScrubTextIn(msg, ContextHeader)
+			total += cnt
+			note += ": " + truncate(scrubbed, 200)
+		}
+		note += "."
 	}
 
 	if strings.HasPrefix(rawReqBody, "[encoded body omitted") {
@@ -1920,8 +2056,8 @@ func buildCurl(e FlowEntry) string {
 	sortStrings(names)
 	body := e.RequestBody
 	body = strings.TrimSuffix(body, truncMarker)
-	if strings.HasPrefix(body, "[encoded body omitted") {
-		body = ""
+	if strings.HasPrefix(body, "[encoded body omitted") || strings.HasPrefix(body, "[protobuf/gRPC body not captured") {
+		body = "" // a placeholder is not a body that can be replayed
 	}
 	source := e.URL + "\n" + body
 	for _, k := range names {
@@ -2181,7 +2317,7 @@ func Main() {
 
 	app := &App{
 		ring: NewRingBuffer(), scrub: scrub, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable,
-		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 32, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg},
+		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 32, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true},
 	}
 	if *target != "" {
 		def, named, err := parseTargets(*target)
@@ -2203,7 +2339,7 @@ func Main() {
 	}
 	app.port = tcpAddr.Port
 
-	srv := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
+	srv := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, Protocols: serverProtocols()}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			app.Logf("proxy server stopped: %v", err)
