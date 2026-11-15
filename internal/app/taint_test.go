@@ -49,3 +49,11 @@ func itoa(i int) string {
 	}
 	return string(b)
 }
+
+func TestTaintRingIgnoresPeriodicHex(t *testing.T) {
+	s, _ := NewScrubber()
+	_ = s.tag("TOKEN", strings.Repeat("abcde", 8))
+	if out, n := s.scrubTainted("id=" + strings.Repeat("abcde", 7)); n != 0 {
+		t.Fatalf("periodic hex matched the ring: %q", out)
+	}
+}
