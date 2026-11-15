@@ -66,6 +66,9 @@ var DefaultVendorPrefixes = []string{
 
 	// Private key material
 	"AGE-SECRET-KEY-",
+
+	// Encrypted or signed token formats: PASETO and Fernet
+	"v2.local.", "v2.public.", "v3.local.", "v3.public.", "v4.local.", "v4.public.", "gAAAAA",
 }
 
 // DefaultWeakVendorPrefixes also occur in ordinary words and identifiers
@@ -100,8 +103,9 @@ var DefaultDSNPrefixes = []string{
 
 // Gate is an Aho-Corasick automaton that answers one question: does the text
 // contain any of a fixed set of literals? It reads the text once, however many
-// literals there are. Literals are lower-cased when the gate is built, so run
-// Match on lower-cased text for a case-insensitive check.
+// literals there are. Literals are lower-cased when the gate is built and Match
+// lower-cases ASCII letters as it reads, so the check is case-insensitive and
+// callers pass the text as it is, with no lower-cased copy.
 type Gate struct {
 	class [256]uint8 // byte -> class; every byte no literal uses shares class 0
 	width int        // number of classes
@@ -182,7 +186,8 @@ func NewGate(literals ...[]string) *Gate {
 	return g
 }
 
-// Match reports whether text contains any of the gate's literals.
+// Match reports whether text contains any of the gate's literals, ignoring
+// ASCII case. It does not allocate.
 func (g *Gate) Match(text string) bool {
 	if g == nil || len(g.hit) <= 1 {
 		return false
@@ -190,7 +195,11 @@ func (g *Gate) Match(text string) bool {
 	n := g.width
 	s := 0
 	for i := 0; i < len(text); i++ {
-		s = int(g.next[s*n+int(g.class[text[i]])])
+		c := text[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		s = int(g.next[s*n+int(g.class[c])])
 		if g.hit[s] {
 			return true
 		}
