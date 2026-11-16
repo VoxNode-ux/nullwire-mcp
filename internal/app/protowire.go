@@ -292,6 +292,10 @@ func renderGRPCFrames(w *protoWriter, h http.Header, b []byte, limit int) bool {
 	shown := 0
 	budget := limit // text all compressed frames together may be decoded to
 	for len(b) >= 5 && shown < protoMaxFrames && !w.full {
+		if w.sb.Len() >= w.limit { // output is full: flag it, read no more frames
+			w.line(0, "")
+			break
+		}
 		flag := b[0]
 		l := binary.BigEndian.Uint32(b[1:5])
 		b = b[5:]
@@ -345,6 +349,10 @@ func renderGRPCFrames(w *protoWriter, h http.Header, b []byte, limit int) bool {
 		default:
 			w.line(0, "message %d:", shown)
 			if !renderProtoMessage(w, msg, 1) {
+				if cut && shown > 1 { // keep the frames already rendered
+					w.line(1, "…[message cut off]")
+					break
+				}
 				return false
 			}
 			if cut {
