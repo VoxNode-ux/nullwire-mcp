@@ -72,7 +72,7 @@ func addText(c *counts, text string) int {
 // synthetic returns n random secret-like strings (hex, base62, base64url) from
 // a fixed seed, so the generated table is reproducible.
 func synthetic(n int) []string {
-	r := rand.New(rand.NewSource(1))
+	r := rand.New(rand.NewSource(1)) // #nosec G404 -- the seed is fixed on purpose so the table is reproducible; nothing here is secret
 	alphabets := []string{
 		"0123456789abcdef",
 		"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
@@ -183,7 +183,7 @@ func main() {
 			default:
 				return nil
 			}
-			data, err := os.ReadFile(path)
+			data, err := os.ReadFile(path) // #nosec G304 -- path comes from walking the -benign folders the user passed
 			if err != nil {
 				return err
 			}
@@ -232,7 +232,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "bigramgen:", err)
 		os.Exit(1)
 	}
-	if err := os.WriteFile(*out, src, 0o644); err != nil {
+	if err := os.WriteFile(*out, src, 0o600); err != nil {
 		fmt.Fprintln(os.Stderr, "bigramgen:", err)
 		os.Exit(1)
 	}
