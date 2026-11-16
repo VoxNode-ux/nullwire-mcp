@@ -12,7 +12,7 @@ go test -v -race ./...    # needs cgo (gcc/clang) on most platforms
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
 ```
 
-Go 1.26+ is required.
+Go 1.27+ is required.
 
 ## Ground rules
 
