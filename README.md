@@ -8,7 +8,7 @@
 [![Security checks](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/security.yml/badge.svg)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/security.yml)
 [![Code quality](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/quality.yml/badge.svg)](https://github.com/VoxNode-ux/nullwire-mcp/actions/workflows/quality.yml)
 [![codecov](https://codecov.io/gh/VoxNode-ux/nullwire-mcp/graph/badge.svg)](https://codecov.io/gh/VoxNode-ux/nullwire-mcp)
-![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
+![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-2ea44f)
 ![Disk writes: 0](https://img.shields.io/badge/disk%20writes-0-2ea44f)
 ![MCP](https://img.shields.io/badge/MCP-stdio-7c3aed) 

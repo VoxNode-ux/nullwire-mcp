@@ -4,7 +4,7 @@
 
 ## Install the binary
 
-Pick whichever fits your machine. Every method checks the download against the release's `SHA256SUMS.txt` and installs nothing if it doesn't match. Release binaries also carry signed GitHub build provenance and keyless [cosign](https://docs.sigstore.dev/) signatures (`*.sigstore.json`), and each release includes a CycloneDX SBOM (`nullwire-sbom.cdx.json`).
+Pick whichever fits your machine. Every method checks the download against the release's `SHA256SUMS.txt` and installs nothing if it doesn't match. Release binaries also carry signed GitHub build provenance and keyless [cosign](https://docs.sigstore.dev/) signatures (`*.sigstore.json`, made with cosign v3: verify with cosign v3, or with v2.5+ and `--new-bundle-format`), and each release includes a CycloneDX SBOM (`nullwire-sbom.cdx.json`).
 
 <details open>
 <summary><b>With Node.js (no install step): <code>npx</code></b></summary>
@@ -102,9 +102,12 @@ All package files (Homebrew, Scoop, AUR, winget, Chocolatey) are generated from 
 |---|---|
 | Linux x86-64 / ARM64 (Raspberry Pi 4+, Termux) | `nullwire-linux-amd64` / `nullwire-linux-arm64` |
 | Linux ARMv7 (older Raspberry Pi) / RISC-V 64 | `nullwire-linux-armv7` / `nullwire-linux-riscv64` |
+| Linux x86 32-bit | `nullwire-linux-386` |
 | macOS Intel / Apple Silicon | `nullwire-darwin-amd64` / `nullwire-darwin-arm64` |
 | Windows x86-64 / ARM64 | `nullwire-windows-amd64.exe` / `nullwire-windows-arm64.exe` |
-| FreeBSD x86-64 | `nullwire-freebsd-amd64` |
+| FreeBSD x86-64 / ARM64 | `nullwire-freebsd-amd64` / `nullwire-freebsd-arm64` |
+| OpenBSD x86-64 / ARM64 | `nullwire-openbsd-amd64` / `nullwire-openbsd-arm64` |
+| NetBSD x86-64 / ARM64 | `nullwire-netbsd-amd64` / `nullwire-netbsd-arm64` |
 
 ```bash
 chmod +x nullwire-linux-amd64
@@ -122,7 +125,7 @@ go install github.com/VoxNode-ux/nullwire-mcp@latest
 git clone https://github.com/VoxNode-ux/nullwire-mcp && cd nullwire-mcp
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
 ```
-Go 1.26 or newer. There is nothing to `go get`: the module has no dependencies.
+Go 1.27 or newer. There is nothing to `go get`: the module has no dependencies.
 </details>
 
 <details>

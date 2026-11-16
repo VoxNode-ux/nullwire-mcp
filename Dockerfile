@@ -1,6 +1,6 @@
 # Build on the runner's own architecture and cross-compile for the target, so
 # multi-arch images need no emulation.
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS build
 ARG TARGETOS=linux
 ARG TARGETARCH
 WORKDIR /src

@@ -12,6 +12,12 @@ These smoke tests are run by hand (Actions → Run workflow) on the release buil
 | FreeBSD amd64 (VM) | pass | pass | pass | verified |
 | Linux ARMv7 (QEMU) | pass | pass | pass | emulated |
 | Linux RISC-V 64 (QEMU) | pass | pass | pass | emulated |
+| Linux x86 32-bit | not run yet | not run yet | not run yet | pending first run |
+| FreeBSD ARM64 (QEMU VM) | not run yet | not run yet | not run yet | pending first run |
+| OpenBSD amd64 (VM) | not run yet | not run yet | not run yet | pending first run |
+| OpenBSD ARM64 (QEMU VM) | not run yet | not run yet | not run yet | pending first run |
+| NetBSD amd64 (VM) | not run yet | not run yet | not run yet | pending first run |
+| NetBSD ARM64 (QEMU VM) | not run yet | not run yet | not run yet | pending first run |
 | Linux ARM64 (Android / Termux) | pass | pass | pass | verified on device, needs `termux-chroot` |
 
 Emulated = run under QEMU, not on real hardware.

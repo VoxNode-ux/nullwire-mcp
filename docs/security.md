@@ -66,6 +66,7 @@ If you find a secret NullWire missed, please open an issue with a *fake* sample 
 | FreeBSD amd64 (VM) | verified | smoke test, silent notifications, end-to-end redaction |
 | Linux ARMv7 (QEMU) | emulated | smoke test, silent notifications, end-to-end redaction |
 | Linux RISC-V 64 (QEMU) | emulated | smoke test, silent notifications, end-to-end redaction |
+| Linux x86 32-bit, FreeBSD ARM64, OpenBSD (amd64, ARM64), NetBSD (amd64, ARM64) | built in CI, smoke test pending first run | cross-compiled on every push |
 | Linux ARM64 (Android / Termux) | verified on device (v1.2.0 CA-bundle change awaiting a device re-check) | live upstream proxy, redaction tags, `export_sanitized_curl`, reverse gateway, guards (needs `termux-chroot`) |
 
 *emulated* means run under QEMU, not on real hardware. Details are in [test-results.md](test-results.md).
