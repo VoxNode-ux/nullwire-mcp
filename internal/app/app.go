@@ -763,11 +763,38 @@ func isPlaceholderValue(s string) bool {
 // 256 for bodies, 2048 for header and query contexts.
 
 func (s *Scrubber) scrubStrictFieldsMax(in string, maxVal int) (string, int) {
-	if len(in) < 12 {
+	ranges := strictFieldRanges(in, maxVal)
+	if len(ranges) == 0 {
 		return in, 0
 	}
 	var b strings.Builder
-	count, last := 0, 0
+	last := 0
+	for _, r := range ranges {
+		b.WriteString(in[last:r[0]])
+		b.WriteString(s.tag("TOKEN", in[r[0]:r[1]]))
+		s.Tokens.Add(1)
+		last = r[1]
+	}
+	b.WriteString(in[last:])
+	return b.String(), len(ranges)
+}
+
+// strictValueStop reports whether c ends an unquoted field value.
+func strictValueStop(c byte) bool {
+	switch c {
+	case ' ', '"', '\'', ',', '\n', '\r', '\t', '}', ']', ')', '&', ';':
+		return true
+	}
+	return false
+}
+
+// strictFieldRanges finds the [start, end) ranges of the values that
+// scrubStrictFieldsMax redacts.
+func strictFieldRanges(in string, maxVal int) [][2]int {
+	if len(in) < 12 {
+		return nil
+	}
+	var out [][2]int
 	for i := 0; i < len(in); i++ {
 		if in[i] != ':' && in[i] != '=' {
 			continue
@@ -783,8 +810,7 @@ func (s *Scrubber) scrubStrictFieldsMax(in string, maxVal int) (string, int) {
 			}
 		}
 		end := start
-		for end < len(in) && in[end] != ' ' && in[end] != '"' && in[end] != '\'' && in[end] != ',' && in[end] != '\n' && in[end] != '}' && in[end] != '&' && in[end] != ';' &&
-			(in[end] != '\\' || end+1 >= len(in) || in[end+1] != '"') {
+		for end < len(in) && !strictValueStop(in[end]) && (in[end] != '\\' || end+1 >= len(in) || in[end+1] != '"') {
 			end++
 		}
 		if start < len(in) && ((in[start] == '%' && isPlaceholderValue(in[start:end])) || strings.HasPrefix(in[start:], "${") || strings.HasPrefix(in[start:], "{{")) {
@@ -797,21 +823,47 @@ func (s *Scrubber) scrubStrictFieldsMax(in string, maxVal int) (string, int) {
 			continue
 		}
 		val := in[start:end]
-		if strings.HasPrefix(val, "[REDACTED_") || hasAllowMark(val) || isPlaceholderValue(val) || strings.ContainsAny(val, "/.\\:") {
+		if strings.HasPrefix(val, "[REDACTED_") || hasAllowMark(val) || isPlaceholderValue(val) || strings.ContainsAny(val, "\\:") {
 			continue
 		}
-		b.WriteString(in[last:start])
-		b.WriteString(s.tag("TOKEN", val))
-		s.Tokens.Add(1)
-		last = end
-		count++
+		if strings.ContainsAny(val, "/.") && !strictSlashDotOK(val) {
+			continue
+		}
+		out = append(out, [2]int{start, end})
 		i = end - 1
 	}
-	if count == 0 {
-		return in, 0
+	return out
+}
+
+var (
+	reStrictDate    = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(?:[Tt][0-9:.+Zz-]*)?$`)
+	reStrictVersion = regexp.MustCompile(`^[vV]?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?$`)
+	reStrictPath    = regexp.MustCompile(`^[a-z0-9._-]+(?:/[a-z0-9._-]+)+/?$`)
+)
+
+// strictSlashDotOK reports whether a value that holds "/" or "." may still be
+// a secret. Base64 signing and encryption keys use both characters; URLs,
+// paths, ISO dates, versions and plain dotted names do not count.
+func strictSlashDotOK(v string) bool {
+	if strings.Contains(v, "://") || strings.HasPrefix(v, "//") || strings.HasPrefix(v, "/") || strings.HasPrefix(v, "~/") || strings.HasPrefix(v, "./") || strings.HasPrefix(v, "../") {
+		return false
 	}
-	b.WriteString(in[last:])
-	return b.String(), count
+	if reStrictDate.MatchString(v) || reStrictVersion.MatchString(v) || reStrictPath.MatchString(v) {
+		return false
+	}
+	var lower, upper, digit bool
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; {
+		case c >= 'a' && c <= 'z':
+			lower = true
+		case c >= 'A' && c <= 'Z':
+			upper = true
+		case c >= '0' && c <= '9':
+			digit = true
+		}
+	}
+	// A key mixes cases or letters and digits; "com.example.app" does not.
+	return (lower && (upper || digit)) || (upper && digit)
 }
 
 func isEntropyCandidate(c byte) bool {
