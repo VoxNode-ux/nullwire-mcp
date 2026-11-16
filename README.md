@@ -11,10 +11,8 @@
 ![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-2ea44f)
 ![Disk writes: 0](https://img.shields.io/badge/disk%20writes-0-2ea44f)
-![MCP](https://img.shields.io/badge/MCP-stdio-7c3aed)
-
-<!-- OpenSSF Scorecard badge: add once results are published to the Scorecard API.
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/VoxNode-ux/nullwire-mcp/badge)](https://scorecard.dev/viewer/?uri=github.com/VoxNode-ux/nullwire-mcp)
+![MCP](https://img.shields.io/badge/MCP-stdio-7c3aed) 
+![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/VoxNode-ux/nullwire-mcp/badge)(https://scorecard.dev/viewer/?uri=github.com/VoxNode-ux/nullwire-mcp)
 -->
 
 [Quick start](#quick-start) · [Salted tags](#what-the-model-sees) · [How it works](#how-it-works) · [Honest limits](#honest-limits) · [Docs](#documentation)
