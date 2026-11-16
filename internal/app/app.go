@@ -1903,10 +1903,8 @@ func decodableEncoding(ce string) bool {
 	return false
 }
 
-func decodeBody(ce string, b []byte) (string, bool) { return decodeBodyMax(ce, b, decodedLimit) }
-
-// decodeBodyMax is decodeBody with its own limit on how much text a gzip or
-// deflate body is expanded to (the guard against compression bombs).
+// decodeBodyMax decodes a gzip or deflate body, expanding it to at most limit
+// bytes of text (the guard against compression bombs).
 func decodeBodyMax(ce string, b []byte, limit int) (string, bool) {
 	var rd io.Reader
 	switch strings.ToLower(strings.TrimSpace(ce)) {
