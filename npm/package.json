@@ -10,7 +10,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=16"
+    "node": ">=24"
   },
   "keywords": [
     "mcp",
