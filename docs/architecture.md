@@ -84,7 +84,7 @@ go test -race ./...
 | `internal/protect/` | The `protect` command |
 | `internal/install/` | The `install` command (client config editing) |
 | `internal/wasm/` | Compiles the scrubber to WebAssembly for the live demo (`scripts/build-wasm.sh`) |
-| `scripts/` | Installers for macOS, Linux, Termux and Windows (`install.sh`, `install.ps1`, `termux-install.sh`) |
+| `scripts/` | Installers for macOS, Linux, FreeBSD, OpenBSD, NetBSD, Termux and Windows (`install.sh`, `install.ps1`, `termux-install.sh`) |
 | `npm/` | The `npx` launcher (no dependencies, no install script) |
 | `packaging/` | Homebrew, Scoop, AUR, winget and Chocolatey templates, `render.sh`, Nix package, `gh` extension and asdf/mise plugin sources |
 | `flake.nix`, `nfpm.yaml` | Nix flake; `.deb`/`.rpm`/`.apk` package definition |
