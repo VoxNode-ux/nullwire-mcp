@@ -410,7 +410,7 @@ func buildVendorRule(prefixes []string, class string, minLen int, weak bool) (ve
 	}
 	b.WriteString(`)`)
 	b.WriteString(class)
-	b.WriteString(fmt.Sprintf("{%d,}", minLen))
+	fmt.Fprintf(&b, "{%d,}", minLen)
 	return vendorRule{re: regexp.MustCompile(b.String()), prefixes: prefixes, weak: weak}, true
 }
 
@@ -1377,7 +1377,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if hasBody {
 		outBody = io.TeeReader(r.Body, reqCap)
 	}
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), outBody)
+	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), outBody) // #nosec G704 -- a proxy forwards the client's own request by design; it listens on loopback only and resolveUpstream picks the destination
 	if err != nil {
 		http.Error(w, "nullwire-mcp: cannot build upstream request: "+err.Error(), http.StatusBadRequest)
 		return

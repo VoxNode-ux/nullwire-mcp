@@ -170,7 +170,7 @@ func unwrapEscapes(in string) (string, []int32) {
 		c := in[i]
 		switch {
 		case c == '%' && i+2 < len(in) && unwrapHexVal(in[i+1]) >= 0 && unwrapHexVal(in[i+2]) >= 0:
-			dec = append(dec, byte(unwrapHexVal(in[i+1])<<4|unwrapHexVal(in[i+2])))
+			dec = append(dec, byte(unwrapHexVal(in[i+1])<<4|unwrapHexVal(in[i+2]))) // #nosec G115 -- both nibbles were checked to be 0..15 above
 			idx = append(idx, idx32(i))
 			i += 3
 		case c == '\\' && i+1 < len(in) && (in[i+1] == '"' || in[i+1] == '\\' || in[i+1] == '/'):
