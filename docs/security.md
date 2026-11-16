@@ -24,6 +24,8 @@ NullWire is a *diagnostic* tool. Be clear-eyed about what it does and does not p
 - **A secret made only of decimal digits is not caught by the randomness detector**, because that is the shape of timestamps and ids. It is still redacted when it sits under a secret-looking name (`token`, `password`, …) or in a secret header.
 - **A password with a decoded `?` or `#`** in a URL is only partly matched by the URL-credentials rule, because those characters end the password field.
 - **HTTP/2 text bodies are captured; binary bodies are not.** HTTP/2 and h2c text and JSON bodies are scrubbed like HTTP/1.1. Protobuf and gRPC message bodies are decoded without a schema (see the table below), and `Grpc-Status` and `Grpc-Message` trailers are scrubbed. MessagePack and CBOR are the exception: they are read, as described below.
+- **GraphQL operation names are shown in a flow's note when they are plain identifiers that pass the scrubber.** A name that hides personal data in ordinary letters (for example `GetUser_alice`) cannot be told apart from a normal name and would be shown. Query text, variables and persisted-query hashes are never put in the note.
+- **`export_har` is built from the already-scrubbed ring buffer and written nowhere.** It adds no new data, its bodies are off unless you ask, and the reply is capped at 1 MiB.
 
 If you find a secret NullWire missed, please open an issue with a *fake* sample that has the same shape. Never post a real one.
 
@@ -40,6 +42,7 @@ If you find a secret NullWire missed, please open an issue with a *fake* sample 
 | **MessagePack and CBOR** | Bodies of type `application/msgpack` and `application/cbor` (also `+msgpack`, `+cbor`, `application/cbor-seq` and the usual `x-` variants) are walked read-only into JSON, which is then scrubbed like any other body. Map keys and UTF-8 strings are kept; binary strings and extension values are never stored, only a byte-count placeholder such as `"[binary 32 bytes]"`. A body cut off by a size limit is read as far as it goes. A body that can't be read at all is stored as a short placeholder with its size. |
 | **Size limits** | See the table below. A secret that straddles a limit is still scrubbed first, thanks to an 8 KiB scrub window. |
 | **Loopback only** | The proxy binds to `127.0.0.1`. The reverse gateway answers only loopback `Host` headers (`403` otherwise) and refuses to proxy to itself (`508`). |
+| **Explicit routes** | `-target-map` routes (`/_gw/<name>/`) are an allowlist: an unlisted name is a `404`, never forwarded anywhere. Local upstreams such as `127.0.0.1` are deliberately allowed, because they are ordinary development backends. A request may still choose its own upstream with an `X-Target-URL` header, but only from your own machine. |
 | **Tunnel limits** | At most 256 concurrent tunnels and upgraded connections, each closed after 10 minutes idle. |
 | **Clear on exit** | `SIGINT` and `SIGTERM` clear the ring buffer before the process exits. |
 
