@@ -49,7 +49,7 @@ func newMaskGate(groups ...maskGroup) *maskGate {
 	n := 1 // class 0: every byte no literal uses
 	for b := 0; b < 256; b++ {
 		if used[b] {
-			g.class[b] = uint8(n)
+			g.class[b] = uint8(n) // #nosec G115 -- literals are ASCII, so n stays far below 256
 			n++
 		}
 	}
@@ -68,7 +68,7 @@ func newMaskGate(groups ...maskGroup) *maskGate {
 				c := int(g.class[lit[i]])
 				t := g.next[s*n+c]
 				if t == 0 {
-					t = int32(len(g.out))
+					t = int32(len(g.out)) // #nosec G115 -- the automaton has a few hundred states
 					g.out = append(g.out, 0)
 					g.next = append(g.next, make([]int32, n)...)
 					g.next[s*n+c] = t

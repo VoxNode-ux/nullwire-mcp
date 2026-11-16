@@ -55,7 +55,7 @@ func (t *taintRing) insertLocked(h uint64) {
 	t.ring[t.pos] = h
 	t.set[h] = struct{}{}
 	t.pos = (t.pos + 1) % taintCap
-	t.size.Store(int32(len(t.set)))
+	t.size.Store(int32(len(t.set))) // #nosec G115 -- the set never holds more than taintCap (500) entries
 }
 
 // add records a redacted secret. Sub-windows are stored only for secrets of

@@ -157,6 +157,12 @@ func unicodeEscapeASCII(in string, i int) (byte, bool) {
 // "\uXXXX". It returns the decoded text and a map from each decoded byte to where it started in the
 // original: idx has len(dec)+1 entries, and decoded bytes dec[a:b] came from
 // in[idx[a]:idx[b]].
+// idx32 narrows a text offset for the offset map. unwrapEscapes only sees text
+// of at most unwrapMaxLen bytes, which is far below the int32 limit.
+func idx32(i int) int32 {
+	return int32(i) // #nosec G115 -- callers keep len(in) at or below unwrapMaxLen
+}
+
 func unwrapEscapes(in string) (string, []int32) {
 	dec := make([]byte, 0, len(in))
 	idx := make([]int32, 0, len(in)+1)
@@ -165,29 +171,29 @@ func unwrapEscapes(in string) (string, []int32) {
 		switch {
 		case c == '%' && i+2 < len(in) && unwrapHexVal(in[i+1]) >= 0 && unwrapHexVal(in[i+2]) >= 0:
 			dec = append(dec, byte(unwrapHexVal(in[i+1])<<4|unwrapHexVal(in[i+2])))
-			idx = append(idx, int32(i))
+			idx = append(idx, idx32(i))
 			i += 3
 		case c == '\\' && i+1 < len(in) && (in[i+1] == '"' || in[i+1] == '\\' || in[i+1] == '/'):
 			dec = append(dec, in[i+1])
-			idx = append(idx, int32(i))
+			idx = append(idx, idx32(i))
 			i += 2
 		case c == '\\' && i+6 <= len(in) && in[i+1] == 'u':
 			if u, ok := unicodeEscapeASCII(in, i); ok {
 				dec = append(dec, u)
-				idx = append(idx, int32(i))
+				idx = append(idx, idx32(i))
 				i += 6
 				continue
 			}
 			dec = append(dec, c)
-			idx = append(idx, int32(i))
+			idx = append(idx, idx32(i))
 			i++
 		default:
 			dec = append(dec, c)
-			idx = append(idx, int32(i))
+			idx = append(idx, idx32(i))
 			i++
 		}
 	}
-	idx = append(idx, int32(len(in)))
+	idx = append(idx, idx32(len(in)))
 	return string(dec), idx
 }
 

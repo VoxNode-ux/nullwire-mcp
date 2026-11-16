@@ -23,7 +23,7 @@ func siphash24(k0, k1 uint64, s string) uint64 {
 	}
 	b := uint64(n) << 56
 	for k := 0; i+k < n; k++ {
-		b |= uint64(s[i+k]) << (8 * uint(k))
+		b |= uint64(s[i+k]) << (8 * k)
 	}
 	v3 ^= b
 	v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
