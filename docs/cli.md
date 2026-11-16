@@ -17,6 +17,7 @@ nullwire-mcp install [options]       register NullWire with your MCP clients
 |---|---|---|
 | `-port` | `8080` | Proxy port. Always bound to `127.0.0.1`. |
 | `-target` | none | Reverse-gateway upstream: a URL and/or `name=URL` entries, comma-separated. |
+| `-target-map` | none | Fixed routes for clients that cannot send `X-Target-URL`: `name=URL` entries, comma-separated, reached as `/_gw/<name>/…`. See [fixed routes](#fixed-routes). |
 | `-cacert` | none | Extra CA certificates (a PEM file or a directory) for upstream HTTPS. |
 | `-dns` | `auto` | Upstream DNS: `auto`, `system`, or a comma list of IPs such as `1.1.1.1,9.9.9.9:53`. |
 | `-secrets-config` | none | Path to the [JSON config](#configuration). |
@@ -49,15 +50,37 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:8080/anthropic    # → https://api.a
 
 Names are letters, digits, `.`, `_` and `-` (up to 32 characters, case-insensitive). One unnamed URL may be added as the default for paths that match no name. An `X-Target-URL` header overrides everything for a single request.
 
+<a id="fixed-routes"></a>
+
+### Fixed routes with `-target-map`
+
+Some SDKs let you set a base URL but not a header, and a bare `/name/` prefix can collide with a real path of the default upstream. `-target-map` adds routes under a reserved `/_gw/` prefix instead:
+
+```bash
+nullwire-mcp -target https://api.example.com \
+  -target-map auth=https://auth.example.com,local=http://127.0.0.1:9000/v2
+
+export AUTH_BASE_URL=http://127.0.0.1:8080/_gw/auth        # → https://auth.example.com
+export LOCAL_BASE_URL=http://127.0.0.1:8080/_gw/local/items  # → http://127.0.0.1:9000/v2/items
+export API_BASE_URL=http://127.0.0.1:8080                  # → https://api.example.com (the default)
+```
+
+- **It is an allowlist, not open routing.** Only the names you list work. `/_gw/anything-else/…` gets a `404` that names the valid routes, and is never forwarded to the default upstream.
+- **Local backends are allowed.** A route may point at `127.0.0.1` or `localhost`, which is normal for development. The existing guards still apply: only loopback `Host` headers are answered, and a route that points back at NullWire itself is refused (`508`).
+- **Every entry needs a name** (`name=URL`), and a name cannot be used both here and in `-target`. Names listed in `-target` also work under `/_gw/`.
+- **The prefix is reserved only while `-target-map` is set.** Without it, `/_gw/…` is just a path.
+- Like named upstreams, the prefix must not be percent-encoded, and an `X-Target-URL` header still overrides everything for one request.
+
 <a id="mcp-tools"></a>
 
 ## MCP tools
 
-NullWire exposes three tools over stdio. It speaks MCP protocol versions `2026-07-28`, `2025-11-25` and `2024-11-05`, and accepts JSON-RPC batches.
+NullWire exposes four tools over stdio. It speaks MCP protocol versions `2026-07-28`, `2025-11-25` and `2024-11-05`, and accepts JSON-RPC batches.
 
 | Tool | What it does | Arguments |
 |---|---|---|
 | `inspect_traffic` | Returns recent scrubbed flows. | `limit` (1 to 50, default 10), `method`, `url_filter` |
+| `export_har` | Returns recent scrubbed flows as a HAR 1.2 document, built in memory. Nothing is written to disk. | `limit` (1 to 50, default 10), `method`, `url_contains`, `include_bodies` (default `false`) |
 | `export_sanitized_curl` | Rebuilds a captured request as a `curl` command. Redacted values become environment variables you fill in yourself. | `flow_id` (required) |
 | `clear_ram_buffer` | Clears all 50 slots and resets the counters. | none |
 
@@ -79,6 +102,10 @@ A flow looks like this (illustrative):
 ```
 
 **Tags are stable and correlatable.** `[REDACTED_TOKEN#a1b2c3]` is the first 6 hex characters of an HMAC-SHA256 of the secret, keyed with an ephemeral 256-bit random key held in RAM only. The same secret gets the same tag everywhere in one run, so your assistant can see that two requests used the *same* token without learning it. The key is new on every start, so tags can't be compared across restarts or reversed.
+
+**GraphQL calls are labelled.** A flow's `note` says which operation it was, for example `GraphQL mutation Login.`, so a list of `POST /graphql` calls can be told apart. NullWire reads `operationName`, the operation named in the query, JSON batches (`GraphQL batch of 3: query A, mutation B, ...`), `application/graphql` bodies, GET query strings and persisted queries (`extensions.persistedQuery`). Query text, variables and persisted-query hashes are never copied into the note. A name is shown only if it is a plain GraphQL name (letters, digits and `_`, up to 64 characters) that also passes through the scrubber unchanged; otherwise the note says `<invalid name>` or `<redacted>`.
+
+**HAR export is bounded.** `export_har` is meant for opening a capture in a HAR viewer without a huge reply. Bodies are left out unless you set `include_bodies`. `limit`, `method` and `url_contains` choose the flows. Whatever you ask for, the whole document is capped at 1 MiB: an entry that does not fit with its bodies is included without them (marked in its `_nullwire` block), and entries that still do not fit are counted in `omitted_for_size`. Entries are listed oldest first. Sizes are those of the stored, scrubbed text, and the HTTP version is reported as `unknown` because it is not recorded.
 
 Tag kinds: `TOKEN`, `COOKIE`, `IP`, `KEY` (private keys and prefix-less cloud keys) and `PAN` (payment card numbers).
 
@@ -176,7 +203,7 @@ The hook runs `nullwire-mcp scan --fail --yaml` on staged `.env`, MCP config, TO
 nullwire-mcp protect --target https://api.example.com --deep .
 ```
 
-It accepts the server options (`--port`, `--target`, `--cacert`, `--dns`, `--secrets-config`, `--scrub-headers`, `--allow-uninspectable`, `--max-body`, `--ws-deflate`) plus `--deep DIR`, `--history` and `--no-scan`. The scan report goes to stderr, so the MCP channel on stdout stays clean, and stop signals are passed on to the server.
+It accepts the server options (`--port`, `--target`, `--target-map`, `--cacert`, `--dns`, `--secrets-config`, `--scrub-headers`, `--allow-uninspectable`, `--max-body`, `--ws-deflate`) plus `--deep DIR`, `--history` and `--no-scan`. The scan report goes to stderr, so the MCP channel on stdout stays clean, and stop signals are passed on to the server.
 
 ## Troubleshooting
 
