@@ -32,6 +32,7 @@ This page lists the algorithms NullWire uses and where they live in `internal/ap
 - **Circular ring buffer.** 50 flows in RAM, overwritten oldest first. `app.go`.
 - **Overlap capture window.** 8 KiB beyond the size limit is captured before truncation and scrubbed with the body. `app.go`.
 - **Zip-bomb shield.** Size and entry limits on archives, and a decoded-size cap on gzip and base64 content. `scrub_extra.go`.
+- **permessage-deflate (opt-in).** One flate reader per direction, the last 32 KiB of output kept as the next message's dictionary under context takeover, with per-message and per-connection output caps. `ws.go`.
 - **WebSocket unmasking.** Client-to-server frames are XORed with the 4-byte masking key at index `(position + i) & 3`, on a read-only copy of the payload. `ws.go`.
 
 <a id="development"></a>
@@ -65,7 +66,10 @@ go test -race ./...
 | `internal/app/app.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
 | `internal/app/ws.go` | WebSocket frame reader and capture (read-only taps) |
 | `internal/app/inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
-| `internal/app/scrub_extra.go` | JSON array, XML and base64 redaction |
+| `internal/app/scrub_extra.go` | JSON array, XML, base64, hex, Base32 and Base58 redaction |
+| `internal/app/scrub_xml.go` | Nested XML, CDATA and escaped-XML redaction (`encoding/xml`) |
+| `internal/app/ws_live.go` | Live refresh of an open WebSocket's flow |
+| `internal/app/limits.go` | `-max-body` and the limits derived from it |
 | `internal/app/scrub_context.go` | Header, query and body contexts; the decode pass for URL-encoded and escaped secrets (`%XX`, `\"`, `\/`, `\uXXXX`) |
 | `internal/app/guards.go` | False-positive guards: bare `key` fields, prose after `Token`/`Basic`, resource ids, IPv4 handling |
 | `internal/app/siphash.go` | SipHash-2-4, the keyed hash behind the taint ring |
