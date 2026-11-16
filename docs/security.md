@@ -23,7 +23,7 @@ NullWire is a *diagnostic* tool. Be clear-eyed about what it does and does not p
 - **XML attributes are not read by the XML layer.** Secrets in element text (including nested and CDATA text) are covered; `<add key="Password" value="…"/>` relies on the other layers.
 - **A secret made only of decimal digits is not caught by the randomness detector**, because that is the shape of timestamps and ids. It is still redacted when it sits under a secret-looking name (`token`, `password`, …) or in a secret header.
 - **A password with a decoded `?` or `#`** in a URL is only partly matched by the URL-credentials rule, because those characters end the password field.
-- **HTTP/2 text bodies are captured; binary bodies are not.** HTTP/2 and h2c text and JSON bodies are scrubbed like HTTP/1.1. Binary protobuf and gRPC message bodies are skipped, and `Grpc-Status` and `Grpc-Message` trailers are scrubbed.
+- **HTTP/2 text bodies are captured; binary bodies are not.** HTTP/2 and h2c text and JSON bodies are scrubbed like HTTP/1.1. Binary protobuf and gRPC message bodies are skipped, and `Grpc-Status` and `Grpc-Message` trailers are scrubbed. MessagePack and CBOR are the exception: they are read, as described below.
 
 If you find a secret NullWire missed, please open an issue with a *fake* sample that has the same shape. Never post a real one.
 
@@ -37,6 +37,7 @@ If you find a secret NullWire missed, please open an issue with a *fake* sample 
 | **Response shield** | The client's `Accept-Encoding` is cut down to `gzip` and `deflate` before it reaches the server, so servers never answer in Brotli or Zstd. A client that offers nothing usable gets `identity`. |
 | **Unreadable bodies** | Any other encoded body is stored as a short placeholder with a visible warning in the flow's `note`. |
 | **Protobuf and gRPC** | Binary bodies are not stored. Only their size is recorded. |
+| **MessagePack and CBOR** | Bodies of type `application/msgpack` and `application/cbor` (also `+msgpack`, `+cbor`, `application/cbor-seq` and the usual `x-` variants) are walked read-only into JSON, which is then scrubbed like any other body. Map keys and UTF-8 strings are kept; binary strings and extension values are never stored, only a byte-count placeholder such as `"[binary 32 bytes]"`. A body cut off by a size limit is read as far as it goes. A body that can't be read at all is stored as a short placeholder with its size. |
 | **Size limits** | See the table below. A secret that straddles a limit is still scrubbed first, thanks to an 8 KiB scrub window. |
 | **Loopback only** | The proxy binds to `127.0.0.1`. The reverse gateway answers only loopback `Host` headers (`403` otherwise) and refuses to proxy to itself (`508`). |
 | **Tunnel limits** | At most 256 concurrent tunnels and upgraded connections, each closed after 10 minutes idle. |
