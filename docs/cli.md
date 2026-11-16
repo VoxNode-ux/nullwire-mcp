@@ -22,6 +22,8 @@ nullwire-mcp install [options]       register NullWire with your MCP clients
 | `-secrets-config` | none | Path to the [JSON config](#configuration). |
 | `-scrub-headers` | none | Extra header names to always redact. |
 | `-allow-uninspectable` | off | Forward request bodies that can't be inspected instead of refusing them with `415`. |
+| `-max-body` | none (32 KiB request, 256 KiB response) | Raise the stored body size for both requests and responses, for debugging large errors. Accepts a byte count or a `k`/`m` suffix: `-max-body 1m`. Between 32 KiB and 2 MiB; it never lowers a default. Secrets are scrubbed before the text is cut, so one that straddles the limit is still redacted. Memory: the ring keeps up to 50 flows, so `2m` can hold about 200 MiB of body text. |
+| `-ws-deflate` | off | Keep the WebSocket `permessage-deflate` offer and decode compressed text messages for capture. By default the offer is dropped so frames stay readable, which is safer. Decoding is capped per message and per connection (16 MiB) against compression bombs. |
 
 ## Capture modes
 
@@ -30,7 +32,7 @@ nullwire-mcp install [options]       register NullWire with your MCP clients
 | **Forward proxy** | `HTTP_PROXY=http://127.0.0.1:8080` and `http://` URLs | Full request and response, scrubbed |
 | **HTTPS tunnel** | `HTTPS_PROXY=http://127.0.0.1:8080` (`CONNECT`) | Only the target `host:port`, timing and byte counts. The encrypted payload is never opened. |
 | **Reverse gateway** | Point your app's base URL at `http://127.0.0.1:8080` and start with `-target https://…` (or send an `X-Target-URL` header) | Full HTTPS request and response, scrubbed. NullWire makes the TLS connection to the real server. |
-| **WebSocket** | Any `Upgrade: websocket` request through either proxy mode | Text messages in both directions, scrubbed, as one flow recorded when the connection closes. Frames are forwarded unmodified. |
+| **WebSocket** | Any `Upgrade: websocket` request through either proxy mode | Text messages in both directions, scrubbed, as one flow. The flow appears when the socket opens (status 101), is refreshed about every 500 ms while messages arrive (slower for very busy streams), and is finalized when the connection closes. Frames are forwarded unmodified. |
 
 > **Why no HTTPS interception?** Reading HTTPS from a forward proxy would require a custom root certificate installed on your machine. That is key material and a trust-store change, the opposite of a zero-footprint tool. The reverse gateway gets you the same visibility with no certificate games.
 
@@ -174,7 +176,7 @@ The hook runs `nullwire-mcp scan --fail --yaml` on staged `.env`, MCP config, TO
 nullwire-mcp protect --target https://api.example.com --deep .
 ```
 
-It accepts the server options (`--port`, `--target`, `--cacert`, `--dns`, `--secrets-config`, `--scrub-headers`, `--allow-uninspectable`) plus `--deep DIR`, `--history` and `--no-scan`. The scan report goes to stderr, so the MCP channel on stdout stays clean, and stop signals are passed on to the server.
+It accepts the server options (`--port`, `--target`, `--cacert`, `--dns`, `--secrets-config`, `--scrub-headers`, `--allow-uninspectable`, `--max-body`, `--ws-deflate`) plus `--deep DIR`, `--history` and `--no-scan`. The scan report goes to stderr, so the MCP channel on stdout stays clean, and stop signals are passed on to the server.
 
 ## Troubleshooting
 
