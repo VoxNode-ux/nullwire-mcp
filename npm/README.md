@@ -38,7 +38,7 @@ Redaction runs in three stages (unwrap, deterministic rules, match and score) ac
 - Redaction is pattern and heuristic based. A secret in an unanticipated shape that is also low in randomness can slip through, and the detector can redact a harmless long identifier.
 - A secret made only of decimal digits is not caught by the randomness detector. It is still redacted under a secret-looking field name or in a secret header.
 - Brotli and Zstd bodies are never decoded: requests are refused with `415` (unless you pass `-allow-uninspectable`) and responses are flagged.
-- Binary protobuf and gRPC bodies are not captured. WebSocket flows appear when the connection closes.
+- Protobuf and gRPC bodies are read without a schema (field numbers, no names), so only value-based rules apply, and a body that is not readable protobuf is not stored. gRPC-Web text mode and compression other than gzip and deflate are not decoded. WebSocket flows appear when the connection closes.
 - Release binaries carry signed build provenance, not OS-vendor code-signing certificates. Verify them with `SHA256SUMS.txt` and `gh attestation verify`.
 
 ## Documentation
