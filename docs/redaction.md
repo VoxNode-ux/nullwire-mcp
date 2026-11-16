@@ -66,6 +66,8 @@ Prefixes are matched case-sensitively, so `asiapacific_region` is left alone.
 
 **Bodies are decoded before scrubbing.** `gzip` and `deflate` (up to 1 MiB expanded, a decompression-bomb guard). `multipart/form-data` forms are split into fields; file parts keep only the field name, file name and size.
 
+**MessagePack and CBOR bodies are read, not stored as bytes.** Bodies of type `application/msgpack` and `application/cbor` (and `+msgpack`, `+cbor`) are walked read-only into JSON before scrubbing, so the rules above see `{"password":"…"}` as they would in a JSON body. Map keys and UTF-8 strings are copied. Binary strings and extension values are replaced by a byte-count placeholder such as `"[binary 32 bytes]"` and are never stored. CBOR items wrapped in tag 24 are read too. The type is taken from `Content-Type` only.
+
 ## Recent changes
 
 These are the redaction changes since 1.2.0. They are not yet in a tagged release.
