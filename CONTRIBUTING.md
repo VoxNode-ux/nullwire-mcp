@@ -31,7 +31,7 @@ These are the project's core promises. PRs that break them will not be merged.
 - **New secret formats:** add a pattern and a test (use fake values only)
 - **False-positive reports:** a harmless value that gets redacted (open an issue with a fake example of the shape)
 - **Client recipes:** config snippets for other MCP clients
-- **Platform reports:** Windows ARM64 is cross-compiled in CI but not run, so a test report helps a lot
+- **Platform reports:** Linux ARMv7 and RISC-V 64 are only run under QEMU, and the Termux CA-bundle change still needs a re-check on a real device, so reports from real hardware help a lot
 - **Docs:** typos, clearer examples, troubleshooting tips
 
 ## Adding or changing a scrubbing pattern
