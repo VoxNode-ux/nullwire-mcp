@@ -68,6 +68,12 @@ go test -race ./...
 | `internal/app/scrub_extra.go` | JSON array, XML and base64 redaction |
 | `internal/app/scrub_context.go` | Header, query and body contexts; the decode pass for URL-encoded and escaped secrets (`%XX`, `\"`, `\/`, `\uXXXX`) |
 | `internal/app/guards.go` | False-positive guards: bare `key` fields, prose after `Token`/`Basic`, resource ids, IPv4 handling |
+| `internal/app/siphash.go` | SipHash-2-4, the keyed hash behind the taint ring |
+| `internal/app/taint.go` | Cross-flow taint ring: redacts a secret by identity wherever it reappears |
+| `internal/app/gatemask.go` | Aho-Corasick bitmask gate that decides which rules are worth running |
+| `internal/app/allowlist.go` | Optional `ignore_fields` / `ignore_patterns` from the secrets config, to silence false positives in bodies |
+| `internal/app/h2.go` | HTTP/1.1 and plain-text HTTP/2 (h2c) serving, and the transport per upstream |
+| `internal/app/wiring.go` | Hands the app's scrubber to the `scan` package |
 | `internal/app/luhn.go` | Payment card number detection (network prefix, length, Luhn check) |
 | `internal/app/tokenscore.go` | Log-odds score behind the randomness detector |
 | `internal/app/bigram_trained.go` | Trained character-pair table (an empty stub until `go generate` runs) |
