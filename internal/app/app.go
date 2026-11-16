@@ -2015,6 +2015,13 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 		}
 	}
 
+	// GraphQL: say which operation the request was. The note holds only a name
+	// that is a plain identifier and passes the scrubber.
+	if gn, cnt := a.graphqlNote(f.method, f.url, f.reqHeaders.Get("Content-Type"), rawReqBody); gn != "" {
+		note += gn
+		total += cnt
+	}
+
 	if st, msg := grpcStatus(f); st != "" {
 		note += " gRPC status " + st
 		if msg != "" {
@@ -2135,6 +2142,19 @@ func toolDefinitions() []any {
 					"limit":      map[string]any{"type": "integer", "default": 10, "minimum": 1, "maximum": ringCapacity},
 					"method":     map[string]any{"type": "string"},
 					"url_filter": map[string]any{"type": "string"},
+				},
+				"additionalProperties": false,
+			},
+		},
+		map[string]any{
+			"name": "export_har", "description": "Returns recent scrubbed flows as a HAR 1.2 document, built in memory (nothing is written to disk). Bodies are left out unless include_bodies is true. The reply is capped at 1 MiB.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"limit":          map[string]any{"type": "integer", "default": 10, "minimum": 1, "maximum": ringCapacity},
+					"method":         map[string]any{"type": "string"},
+					"url_contains":   map[string]any{"type": "string"},
+					"include_bodies": map[string]any{"type": "boolean", "default": false},
 				},
 				"additionalProperties": false,
 			},
@@ -2354,6 +2374,8 @@ func (a *App) dispatchTo(req rpcRequest) *rpcResponse {
 		switch p.Name {
 		case "inspect_traffic":
 			result = a.toolInspect(p.Arguments)
+		case "export_har":
+			result = a.toolExportHAR(p.Arguments)
 		case "export_sanitized_curl":
 			result = a.toolExportCurl(p.Arguments)
 		case "clear_ram_buffer":
