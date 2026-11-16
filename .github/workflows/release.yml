@@ -28,7 +28,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
           cache: false
       - name: Check the installers for syntax errors
@@ -106,13 +106,31 @@ jobs:
           - goos: freebsd
             goarch: amd64
             artifact: nullwire-freebsd-amd64
+          - goos: linux
+            goarch: "386"
+            artifact: nullwire-linux-386
+          - goos: freebsd
+            goarch: arm64
+            artifact: nullwire-freebsd-arm64
+          - goos: openbsd
+            goarch: amd64
+            artifact: nullwire-openbsd-amd64
+          - goos: openbsd
+            goarch: arm64
+            artifact: nullwire-openbsd-arm64
+          - goos: netbsd
+            goarch: amd64
+            artifact: nullwire-netbsd-amd64
+          - goos: netbsd
+            goarch: arm64
+            artifact: nullwire-netbsd-arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
           cache: false
       - name: Cross-compile static binary
@@ -154,7 +172,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
           cache: false
       - name: Build, and push outside pull requests
@@ -177,7 +195,7 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.5 # 3e82f50a2839855693aacf7b3d0e7e2f30774cb4
+          go install github.com/sigstore/cosign/v3/cmd/cosign@v3.1.4 # 0e48502
           digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/meta.json")
           case "$digest" in sha256:*) ;; *) echo "::error::no image digest in the build metadata"; exit 1 ;; esac
           "$(go env GOPATH)/bin/cosign" sign --yes "${IMAGE}@${digest}"
@@ -185,7 +203,7 @@ jobs:
   release:
     name: Publish release
     needs: [build, docker]
-    # Runs after tests, all 9 builds and the Docker image pass, on every push, tag and manual run.
+    # Runs after tests, all 15 builds and the Docker image pass, on every push, tag and manual run.
     # Never on pull requests, so untrusted code can't touch your releases.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
@@ -210,7 +228,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
           cache: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -288,9 +306,11 @@ jobs:
         #   cosign verify-blob --bundle FILE.sigstore.json \
         #     --certificate-identity-regexp 'https://github.com/VoxNode-ux/nullwire-mcp/\.github/workflows/release\.yml@.*' \
         #     --certificate-oidc-issuer https://token.actions.githubusercontent.com FILE
+        # Bundles are written in cosign v3's format: verify with cosign v3, or with
+        # cosign v2.5+ and the extra flag --new-bundle-format.
         run: |
           set -euo pipefail
-          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.5 # 3e82f50a2839855693aacf7b3d0e7e2f30774cb4
+          go install github.com/sigstore/cosign/v3/cmd/cosign@v3.1.4 # 0e48502
           COSIGN="$(go env GOPATH)/bin/cosign"
           cd dist
           for f in nullwire-* SHA256SUMS.txt; do
@@ -307,7 +327,7 @@ jobs:
           set -euo pipefail
           REPO="$GITHUB_REPOSITORY"
           ROLL_TITLE="NullWire-MCP Latest Build (main)"
-          ROLL_NOTES="Automatic build of the latest commit on main (${GITHUB_SHA::7}). Tests and all 9 platform builds passed. Use a numbered release for a stable version."
+          ROLL_NOTES="Automatic build of the latest commit on main (${GITHUB_SHA::7}). Tests and all 15 platform builds passed. Use a numbered release for a stable version."
 
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release $TAG already exists: replacing its files."
