@@ -23,10 +23,10 @@ func isCBORContentType(ct string) bool {
 }
 
 // cborToJSON reads every CBOR item in in, one after another, and returns them
-// as JSON, one per line. complete is false when the input ended early, went
-// past a limit or was not valid CBOR.
-func cborToJSON(in []byte) (out string, complete bool) {
-	return walkBinary(in, (*binJSON).cborValue)
+// as JSON, one per line, at most limit bytes of it (0: the default). complete
+// is false when the input ended early, went past a limit or was not valid CBOR.
+func cborToJSON(in []byte, limit int) (out string, complete bool) {
+	return walkBinary(in, limit, (*binJSON).cborValue)
 }
 
 // cborHead reads the initial byte and its argument. For major type 7, arg
