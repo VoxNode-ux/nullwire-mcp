@@ -12,6 +12,7 @@ func Run(args []string) int {
 	pf := flag.NewFlagSet("protect", flag.ContinueOnError)
 	port := pf.Int("port", 8080, "TCP port for the diagnostic proxy (always 127.0.0.1)")
 	target := pf.String("target", "", "upstream base URL(s) (see main help)")
+	targetMap := pf.String("target-map", "", "fixed routes name=URL,... reached as /_gw/<name>/ (see main help)")
 	cacert := pf.String("cacert", "", "extra CA certificates (PEM file or directory)")
 	dnsSpec := pf.String("dns", "auto", "upstream DNS (see main help)")
 	secretsConfig := pf.String("secrets-config", "", "path to -secrets-config JSON")
@@ -51,6 +52,9 @@ func Run(args []string) int {
 	serveArgs := []string{"-port", fmt.Sprint(*port), "-dns", *dnsSpec}
 	if *target != "" {
 		serveArgs = append(serveArgs, "-target", *target)
+	}
+	if *targetMap != "" {
+		serveArgs = append(serveArgs, "-target-map", *targetMap)
 	}
 	if *cacert != "" {
 		serveArgs = append(serveArgs, "-cacert", *cacert)
