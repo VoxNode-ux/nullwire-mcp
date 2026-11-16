@@ -1993,28 +1993,25 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 		rawReqBody = a.scrubMultipart(ct, []byte(rawReqBody))
 	}
 	rawRespBody := bodyTextMax(f.respHeaders, f.respBody, lim.decoded)
-	// Protobuf and gRPC bodies are binary: storing their bytes helps nobody and
-	// cannot be scrubbed, so only their size is recorded.
+	// Protobuf and gRPC bodies are binary. They are read without a schema into
+	// text, which is scrubbed like any other body; the raw bytes are never
+	// stored. A body that is not readable protobuf records only its size.
 	if len(f.reqBody) > 0 && isProtobufContentType(f.reqHeaders.Get("Content-Type")) {
-		rawReqBody = fmt.Sprintf("[protobuf/gRPC body not captured: %d bytes]", len(f.reqBody))
-		note += " Protobuf/gRPC request body not captured (binary)."
-	}
-	if len(f.respBody) > 0 && isProtobufContentType(f.respHeaders.Get("Content-Type")) {
-		rawRespBody = fmt.Sprintf("[protobuf/gRPC body not captured: %d bytes]", len(f.respBody))
-		note += " Protobuf/gRPC response body not captured (binary)."
-	}
-
-	// MessagePack and CBOR bodies are binary too, but unlike protobuf they can be
-	// read without a schema: they become JSON here and are scrubbed below with
-	// everything else. Binary values inside them are never copied.
-	if len(f.reqBody) > 0 {
-		if text, nt, ok := binaryBodyText(f.reqHeaders, rawReqBody, lim.decoded); ok {
-			rawReqBody, note = text, note+" Request"+nt
+		if text, ok := decodeProtoBody(f.reqHeaders, f.reqBody, lim.decoded); ok {
+			rawReqBody = text
+			note += " Protobuf/gRPC request body decoded without a schema (values scrubbed; field-name rules cannot apply)."
+		} else {
+			rawReqBody = fmt.Sprintf("[protobuf/gRPC body not captured: %d bytes]", len(f.reqBody))
+			note += " Protobuf/gRPC request body not captured (binary)."
 		}
 	}
-	if len(f.respBody) > 0 {
-		if text, nt, ok := binaryBodyText(f.respHeaders, rawRespBody, lim.decoded); ok {
-			rawRespBody, note = text, note+" Response"+nt
+	if len(f.respBody) > 0 && isProtobufContentType(f.respHeaders.Get("Content-Type")) {
+		if text, ok := decodeProtoBody(f.respHeaders, f.respBody, lim.decoded); ok {
+			rawRespBody = text
+			note += " Protobuf/gRPC response body decoded without a schema (values scrubbed; field-name rules cannot apply)."
+		} else {
+			rawRespBody = fmt.Sprintf("[protobuf/gRPC body not captured: %d bytes]", len(f.respBody))
+			note += " Protobuf/gRPC response body not captured (binary)."
 		}
 	}
 
@@ -2257,8 +2254,8 @@ func buildCurl(e FlowEntry) string {
 	sortStrings(names)
 	body := e.RequestBody
 	body = strings.TrimSuffix(body, truncMarker)
-	if strings.HasPrefix(body, "[encoded body omitted") || strings.HasPrefix(body, "[protobuf/gRPC body not captured") {
-		body = "" // a placeholder is not a body that can be replayed
+	if strings.HasPrefix(body, "[encoded body omitted") || strings.HasPrefix(body, "[protobuf/gRPC body") {
+		body = "" // a placeholder or a decoded protobuf is not a body that can be replayed
 	}
 	source := e.URL + "\n" + body
 	for _, k := range names {
