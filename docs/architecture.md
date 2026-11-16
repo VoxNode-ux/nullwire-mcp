@@ -65,6 +65,7 @@ go test -race ./...
 | `main.go` | Tiny entry point (keeps `go install github.com/VoxNode-ux/nullwire-mcp@latest` working) |
 | `internal/app/app.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
 | `internal/app/ws.go` | WebSocket frame reader and capture (read-only taps) |
+| `internal/app/protowire.go` | Schema-less protobuf and gRPC decoder: frame header, varints, text or nested message or bytes |
 | `internal/app/inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
 | `internal/app/scrub_extra.go` | JSON array, XML, base64, hex, Base32 and Base58 redaction |
 | `internal/app/scrub_xml.go` | Nested XML, CDATA and escaped-XML redaction (`encoding/xml`) |
