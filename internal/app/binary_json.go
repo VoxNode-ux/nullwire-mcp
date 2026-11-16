@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"strconv"
@@ -46,20 +47,26 @@ type binJSON struct {
 
 // take returns the next n bytes, or what is left of them with errBinTrunc.
 func (w *binJSON) take(n uint64) ([]byte, error) {
-	avail := uint64(len(w.in) - w.pos)
-	if n > avail {
+	if w.pos < 0 || w.pos > len(w.in) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	if n > uint64(len(w.in)-w.pos) { // #nosec G115 -- pos is within [0, len(in)], so the difference is non-negative
 		b := w.in[w.pos:]
 		w.pos = len(w.in)
 		return b, errBinTrunc
 	}
-	b := w.in[w.pos : w.pos+int(n)]
-	w.pos += int(n)
+	nn := int(n) // #nosec G115 -- n <= len(in)-pos, checked above, so it fits an int
+	b := w.in[w.pos : w.pos+nn]
+	w.pos += nn
 	return b, nil
 }
 
 // be reads an n-byte big-endian unsigned integer (n is 1, 2, 4 or 8).
 func (w *binJSON) be(n int) (uint64, error) {
-	b, err := w.take(uint64(n))
+	if n < 0 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	b, err := w.take(uint64(n)) // #nosec G115 -- n is non-negative, checked above
 	if err != nil {
 		return 0, err
 	}

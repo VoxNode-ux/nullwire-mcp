@@ -35,13 +35,13 @@ func (w *binJSON) msgpackValue() error {
 	if err != nil {
 		return err
 	}
-	c := byte(b)
+	c := byte(b) // #nosec G115 -- b is a single wire byte (0-255)
 	switch {
 	case c <= 0x7f: // positive fixint
 		w.out = appendUint(w.out, uint64(c))
 		return nil
 	case c >= 0xe0: // negative fixint
-		w.out = strconv.AppendInt(w.out, int64(int8(c)), 10)
+		w.out = strconv.AppendInt(w.out, int64(int8(c)), 10) // #nosec G115 -- c >= 0xe0: reinterpreting the byte as a two's-complement fixint is the format
 		return nil
 	case c <= 0x8f: // fixmap
 		return w.mpMap(uint64(c & 0x0f))
@@ -77,7 +77,7 @@ func (w *binJSON) msgpackValue() error {
 		if err != nil {
 			return err
 		}
-		w.float(float64(math.Float32frombits(uint32(v))))
+		w.float(float64(math.Float32frombits(uint32(v)))) // #nosec G115 -- v was read as 4 bytes, so it fits uint32
 	case 0xcb: // float 64
 		v, err := w.be(8)
 		if err != nil {
@@ -97,7 +97,7 @@ func (w *binJSON) msgpackValue() error {
 			return err
 		}
 		shift := 64 - 8*size
-		w.out = strconv.AppendInt(w.out, int64(v<<shift)>>shift, 10)
+		w.out = strconv.AppendInt(w.out, int64(v<<shift)>>shift, 10) // #nosec G115 -- shift left then arithmetic shift right sign-extends a size-byte two's-complement value
 	case 0xd9, 0xda, 0xdb: // str 8, 16, 32
 		n, err := w.be(1 << (c - 0xd9))
 		if err != nil {
@@ -129,7 +129,7 @@ func (w *binJSON) mpExt(n uint64) error {
 	if err != nil {
 		return err
 	}
-	return w.placeholder("ext("+strconv.Itoa(int(int8(t)))+")", n)
+	return w.placeholder("ext("+strconv.Itoa(int(int8(t)))+")", n) // #nosec G115 -- the ext type is a signed byte on the wire
 }
 
 func (w *binJSON) mpArray(n uint64) error {

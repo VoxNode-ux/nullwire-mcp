@@ -242,9 +242,14 @@ func gqlOperations(src string) []gqlOp {
 					if k := gqlSkip(src, i); k < n && src[k] == ':' {
 						continue // an alias: the field name follows
 					}
-					if !strings.HasSuffix(strings.TrimRight(src[:start], " \t\r\n,"), "...") {
-						ops[awaiting].field = word
+					if strings.HasSuffix(strings.TrimRight(src[:start], " \t\r\n,"), "...") {
+						if word != "on" {
+							continue // a fragment spread: the root field may still follow
+						}
+						awaiting = -1 // "... on Type": an inline fragment, not a root field
+						continue
 					}
+					ops[awaiting].field = word
 					awaiting = -1
 				}
 				continue

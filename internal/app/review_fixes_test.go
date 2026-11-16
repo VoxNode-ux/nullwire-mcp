@@ -70,7 +70,7 @@ func TestProtoTextThatLooksLikeAMessageStaysText(t *testing.T) {
 		t.Errorf("text was cut up as a message: %q (ok=%v)", out, ok)
 	}
 	// A real nested message made of printable bytes is still one.
-	inner := append([]byte{0x0a, 0x28}, strings.Repeat("y", 40)...)
+	inner := pbCat(pbString(1, strings.Repeat("y", 38)), pbInt(2, 1))
 	body = append([]byte{0x1a, byte(len(inner))}, inner...)
 	if out, ok := decodeProtoBody(pbHeader("application/protobuf"), body, 1<<20); !ok || !strings.Contains(out, "3: {") {
 		t.Errorf("nested message lost: %q (ok=%v)", out, ok)

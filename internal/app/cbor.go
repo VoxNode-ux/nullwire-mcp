@@ -36,7 +36,7 @@ func (w *binJSON) cborHead() (major, info byte, arg uint64, err error) {
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	major, info = byte(b>>5), byte(b&0x1f)
+	major, info = byte(b>>5), byte(b&0x1f) // #nosec G115 -- b is one wire byte: b>>5 is 0-7 and b&0x1f is 0-31
 	switch {
 	case info < 24:
 		arg = uint64(info)
@@ -100,9 +100,9 @@ func (w *binJSON) cborValue() error {
 		case 22, 23: // null, undefined
 			w.out = append(w.out, "null"...)
 		case 25:
-			w.float(halfToFloat(uint16(arg)))
+			w.float(halfToFloat(uint16(arg))) // #nosec G115 -- arg was read as 2 bytes, so it fits uint16
 		case 26:
-			w.float(float64(math.Float32frombits(uint32(arg))))
+			w.float(float64(math.Float32frombits(uint32(arg)))) // #nosec G115 -- arg was read as 4 bytes, so it fits uint32
 		case 27:
 			w.float(math.Float64frombits(arg))
 		case 31: // a break with nothing to end

@@ -24,7 +24,7 @@ import (
 const sseLiveEvery = 500 * time.Millisecond
 
 func isEventStream(h http.Header) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(h.Get("Content-Type"))), "text/event-stream")
+	return mediaType(h.Get("Content-Type")) == "text/event-stream"
 }
 
 // sseCollector keeps the first max bytes written to it. Write never fails and
@@ -198,7 +198,7 @@ func (a *App) streamSSE(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	var tap io.WriteCloser // nil: the body is not captured
 	hdr := resp.Header.Clone()
 	skipped := ""
-	if enc := strings.TrimSpace(resp.Header.Get("Content-Encoding")); enc == "" || strings.EqualFold(enc, "identity") {
+	if enc := strings.TrimSpace(strings.Join(resp.Header.Values("Content-Encoding"), ", ")); enc == "" || strings.EqualFold(enc, "identity") {
 		tap = col
 	} else if dec := newSSEDecoder(enc, col); dec != nil {
 		tap = dec
