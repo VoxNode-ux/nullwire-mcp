@@ -761,7 +761,7 @@ func (s *Scrubber) scrubStrictFieldsMax(in string, maxVal int) (string, int) {
 		}
 		end := start
 		for end < len(in) && in[end] != ' ' && in[end] != '"' && in[end] != '\'' && in[end] != ',' && in[end] != '\n' && in[end] != '}' && in[end] != '&' && in[end] != ';' &&
-			!(in[end] == '\\' && end+1 < len(in) && in[end+1] == '"') {
+			(in[end] != '\\' || end+1 >= len(in) || in[end+1] != '"') {
 			end++
 		}
 		if start < len(in) && ((in[start] == '%' && isPlaceholderValue(in[start:end])) || strings.HasPrefix(in[start:], "${") || strings.HasPrefix(in[start:], "{{")) {
