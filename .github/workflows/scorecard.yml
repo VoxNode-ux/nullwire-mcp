@@ -31,10 +31,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # Pin this by commit SHA like the other actions in this repo. Resolve it with:
-      #   gh api repos/ossf/scorecard-action/git/ref/tags/v2.4.4 --jq .object.sha
-      # If that prints a "tag" object type, dereference it with:
-      #   gh api repos/ossf/scorecard-action/git/tags/<sha> --jq .object.sha
       - name: Run Scorecard
         uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
         with:
@@ -48,4 +44,4 @@ jobs:
         with:
           name: scorecard-report
           path: results.sarif
-          retention-days: 7
+          retention-days: 5
