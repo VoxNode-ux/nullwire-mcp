@@ -140,6 +140,30 @@ func protoHasLenField(b []byte) bool {
 	return false
 }
 
+// protoTextIsMessage decides whether bytes that are both printable text and a
+// valid message are the message. They are when they hold a length-delimited
+// field and either start with field 1 (the byte is a newline, which text
+// rarely starts with) or hold two fields or more. A string like "Bearer ..."
+// can parse as one field by chance (B is field 8, e is a length) and must stay
+// text, or the nested rendering would cut it up.
+func protoTextIsMessage(b []byte) bool {
+	if len(b) == 0 || !protoHasLenField(b) {
+		return false
+	}
+	if b[0] == '\n' {
+		return true
+	}
+	fields := 0
+	for rest := b; len(rest) > 0 && fields < 2; fields++ {
+		_, next, st := nextProtoField(rest)
+		if st != protoOK {
+			return false
+		}
+		rest = next
+	}
+	return fields >= 2
+}
+
 // protoTopLevel checks a whole message. ok means at least one field was read
 // and nothing was invalid; cut means the bytes stop in the middle of a field,
 // which is what a body cut off by the capture limit looks like.
@@ -220,10 +244,10 @@ func renderProtoFields(w *protoWriter, b []byte, depth int) {
 			switch {
 			case len(f.data) == 0:
 				w.line(depth, `%d: ""`, f.num)
-			case tok && (!txt || protoHasLenField(f.data)):
+			case tok && (!txt || protoTextIsMessage(f.data)):
 				// A nested message. Clean text that happens to parse as one (the
 				// two letters "hi" are a valid varint field) stays text unless it
-				// also holds a length-delimited field, which text almost never does.
+				// is clearly a message, see protoTextIsMessage.
 				w.line(depth, "%d: {", f.num)
 				renderProtoFields(w, f.data, depth+1)
 				w.line(depth, "}")
@@ -266,7 +290,8 @@ func isGRPCContentType(ct string) bool {
 func renderGRPCFrames(w *protoWriter, h http.Header, b []byte, limit int) bool {
 	enc := strings.ToLower(strings.TrimSpace(h.Get("Grpc-Encoding")))
 	shown := 0
-	for len(b) >= 5 && shown < protoMaxFrames {
+	budget := limit // text all compressed frames together may be decoded to
+	for len(b) >= 5 && shown < protoMaxFrames && !w.full {
 		flag := b[0]
 		l := binary.BigEndian.Uint32(b[1:5])
 		b = b[5:]
@@ -296,7 +321,11 @@ func renderGRPCFrames(w *protoWriter, h http.Header, b []byte, limit int) bool {
 				w.line(0, "message %d: [compressed, grpc-encoding %q not decoded, %d bytes]", shown, enc, len(msg))
 				continue
 			}
-			text, ok := decodeBodyMax(enc, msg, limit)
+			if budget <= 0 {
+				w.line(0, "message %d: [decoded size limit reached]", shown)
+				break
+			}
+			text, ok := decodeBodyMax(enc, msg, budget)
 			if !ok {
 				w.line(0, "message %d: [compressed, could not be decompressed, %d bytes]", shown, len(msg))
 				continue
@@ -304,6 +333,7 @@ func renderGRPCFrames(w *protoWriter, h http.Header, b []byte, limit int) bool {
 			if strings.HasSuffix(text, truncMarker) {
 				text, cut = strings.TrimSuffix(text, truncMarker), true
 			}
+			budget -= len(text)
 			msg = []byte(text)
 		}
 
@@ -341,7 +371,17 @@ func decodeProtoBody(h http.Header, b []byte, limit int) (string, bool) {
 		if strings.Contains(strings.ToLower(ct), "-text") { // gRPC-Web text mode is base64
 			return "", false
 		}
-		if !renderGRPCFrames(w, h, b, limit) {
+		frames := b
+		// Some gRPC-Web servers compress the whole HTTP body instead of, or
+		// as well as, the single frames.
+		if ce := strings.TrimSpace(h.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
+			text, ok := decodeBodyMax(ce, b, limit)
+			if !ok {
+				return "", false
+			}
+			frames = []byte(strings.TrimSuffix(text, truncMarker))
+		}
+		if !renderGRPCFrames(w, h, frames, limit) {
 			return "", false
 		}
 		return w.sb.String(), true

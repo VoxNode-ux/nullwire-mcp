@@ -42,9 +42,35 @@ func gqlFromObject(m map[string]any) (gqlRequest, bool) {
 	r.query, _ = m["query"].(string)
 	r.opName, _ = m["operationName"].(string)
 	if ext, ok := m["extensions"].(map[string]any); ok {
-		_, r.persisted = ext["persistedQuery"]
+		r.persisted = gqlIsPersisted(ext["persistedQuery"])
 	}
 	return r, r.query != "" || r.opName != "" || r.persisted
+}
+
+// gqlIsPersisted reports an Apollo-style persistedQuery extension: an object
+// with a version or a hash. Any other value under that name is not one.
+func gqlIsPersisted(v any) bool {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, hash := m["sha256Hash"]
+	_, version := m["version"]
+	return hash || version
+}
+
+// gqlBlockEnd returns the index of the closing """ of a block string whose
+// content starts at s[0], or -1. \""" is an escaped triple quote, not the end.
+func gqlBlockEnd(s string) int {
+	for j := 0; j < len(s); j++ {
+		switch {
+		case s[j] == '\\' && strings.HasPrefix(s[j+1:], `"""`):
+			j += 3
+		case strings.HasPrefix(s[j:], `"""`):
+			return j
+		}
+	}
+	return -1
 }
 
 func gqlFromURL(raw string) (gqlRequest, bool) {
@@ -57,7 +83,7 @@ func gqlFromURL(raw string) (gqlRequest, bool) {
 	if ext := q.Get("extensions"); ext != "" {
 		var m map[string]any
 		if json.Unmarshal([]byte(ext), &m) == nil {
-			_, r.persisted = m["persistedQuery"]
+			r.persisted = gqlIsPersisted(m["persistedQuery"])
 		}
 	}
 	return r, r.query != "" || r.opName != "" || r.persisted
@@ -118,7 +144,7 @@ func gqlOperations(src string) []gqlOp {
 			i = gqlSkip(src, i)
 		case c == '"':
 			if strings.HasPrefix(src[i:], `"""`) {
-				end := strings.Index(src[i+3:], `"""`)
+				end := gqlBlockEnd(src[i+3:])
 				if end < 0 {
 					return ops
 				}

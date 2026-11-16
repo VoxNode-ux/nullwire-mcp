@@ -103,11 +103,12 @@ func harHeader(m map[string]string, name string) string {
 // harQuery lists the query string parameters in the order they appear.
 func harQuery(raw string) []harNV {
 	out := []harNV{}
-	u, err := url.Parse(raw)
-	if err != nil || u.RawQuery == "" {
+	_, query, found := strings.Cut(raw, "?")
+	if !found {
 		return out
 	}
-	for _, part := range strings.Split(u.RawQuery, "&") {
+	query = harCutFragment(query)
+	for _, part := range strings.Split(query, "&") {
 		if part == "" {
 			continue
 		}
@@ -121,6 +122,23 @@ func harQuery(raw string) []harNV {
 		out = append(out, harNV{Name: name, Value: value})
 	}
 	return out
+}
+
+// harCutFragment drops a #fragment from s. The # that ends a redaction tag
+// ([REDACTED_<KIND>#xxxxxx]) is part of the value, not the start of a
+// fragment, and url.Parse would cut the query there.
+func harCutFragment(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '#' {
+			continue
+		}
+		open := strings.LastIndex(s[:i], "[REDACTED_")
+		if open >= 0 && !strings.ContainsAny(s[open:i], "]&#") {
+			continue // inside a tag
+		}
+		return s[:i]
+	}
+	return s
 }
 
 // buildHAREntry converts one stored flow. Every string in it was scrubbed when

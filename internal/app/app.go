@@ -1477,6 +1477,10 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.handleUpgrade(w, resp, flow, isWS)
 		return
 	}
+	if isEventStream(resp.Header) {
+		a.streamSSE(w, resp, flow, reqCap, start)
+		return
+	}
 	respCap := &capBuffer{max: a.limits().respCap}
 	dst := w.Header()
 	for k, vs := range copyHeaders(resp.Header) {
@@ -2023,6 +2027,17 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 			rawRespBody = fmt.Sprintf("[protobuf/gRPC body not captured: %d bytes]", len(f.respBody))
 			note += " Protobuf/gRPC response body not captured (binary)."
 		}
+	}
+
+	// MessagePack and CBOR are binary too. They are shown as JSON, which the
+	// JSON rules then scrub; binaryBodyText leaves every other body alone.
+	if text, bn, ok := binaryBodyText(f.reqHeaders, rawReqBody, lim.decoded); ok {
+		rawReqBody = text
+		note += bn
+	}
+	if text, bn, ok := binaryBodyText(f.respHeaders, rawRespBody, lim.decoded); ok {
+		rawRespBody = text
+		note += bn
 	}
 
 	// GraphQL: say which operation the request was. The note holds only a name
