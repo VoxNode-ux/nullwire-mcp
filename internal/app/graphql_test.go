@@ -18,7 +18,7 @@ func TestGraphQLNote(t *testing.T) {
 			body: `{"operationName":"GetUser","query":"query GetUser($id: ID!) { user(id: $id) { name } }"}`,
 			want: " GraphQL query GetUser."},
 		{name: "shorthand is anonymous", method: "POST",
-			body: `{"query":"{ me { id } }"}`, want: " GraphQL query (anonymous)."},
+			body: `{"query":"{ me { id } }"}`, want: " GraphQL query (anonymous: me)."},
 		{name: "name from the query text", method: "POST",
 			body: `{"query":"mutation Login($p: String!) { login(password: $p) { token } }"}`,
 			want: " GraphQL mutation Login."},

@@ -1478,7 +1478,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isEventStream(resp.Header) {
-		a.streamSSE(w, resp, flow, reqCap, start)
+		a.streamSSE(w, r, resp, flow, reqCap, start)
 		return
 	}
 	respCap := &capBuffer{max: a.limits().respCap}
@@ -2002,8 +2002,10 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 	total += n
 
 	rawReqBody := bodyTextMax(f.reqHeaders, f.reqBody, lim.decoded)
+	gqlSrc := "" // the "operations" field of a GraphQL multipart upload
 	if ct := f.reqHeaders.Get("Content-Type"); strings.HasPrefix(strings.ToLower(strings.TrimSpace(ct)), "multipart/") &&
 		!strings.HasPrefix(rawReqBody, "[encoded body omitted") {
+		gqlSrc = gqlMultipartBody(ct, rawReqBody)
 		rawReqBody = a.scrubMultipart(ct, []byte(rawReqBody))
 	}
 	rawRespBody := bodyTextMax(f.respHeaders, f.respBody, lim.decoded)
@@ -2042,9 +2044,21 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 
 	// GraphQL: say which operation the request was. The note holds only a name
 	// that is a plain identifier and passes the scrubber.
-	if gn, cnt := a.graphqlNote(f.method, f.url, f.reqHeaders.Get("Content-Type"), rawReqBody); gn != "" {
+	gqlBody := rawReqBody
+	if gqlSrc != "" {
+		gqlBody = gqlSrc
+	}
+	if gn, cnt := a.graphqlNote(f.method, f.url, f.reqHeaders.Get("Content-Type"), gqlBody); gn != "" {
 		note += gn
 		total += cnt
+		// Say that the call failed even on a 200: only the count, never the text.
+		if ne, more := gqlResponseErrors(rawRespBody); ne > 0 {
+			plus := ""
+			if more {
+				plus = "+"
+			}
+			note += fmt.Sprintf(" GraphQL errors: %d%s.", ne, plus)
+		}
 	}
 
 	if st, msg := grpcStatus(f); st != "" {
