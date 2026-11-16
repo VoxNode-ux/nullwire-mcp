@@ -65,6 +65,9 @@ go test -race ./...
 | `main.go` | Tiny entry point (keeps `go install github.com/VoxNode-ux/nullwire-mcp@latest` working) |
 | `internal/app/app.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
 | `internal/app/ws.go` | WebSocket frame reader and capture (read-only taps) |
+| `internal/app/gateway.go` | `-target-map`: the `/_gw/<name>/` route allowlist for the reverse gateway |
+| `internal/app/graphql.go` | GraphQL operation labels for the flow note: JSON, batches, GET, persisted queries |
+| `internal/app/har.go` | The `export_har` tool: scrubbed flows as a size-capped HAR 1.2 document, in memory |
 | `internal/app/protowire.go` | Schema-less protobuf and gRPC decoder: frame header, varints, text or nested message or bytes |
 | `internal/app/inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
 | `internal/app/scrub_extra.go` | JSON array, XML, base64, hex, Base32 and Base58 redaction |
