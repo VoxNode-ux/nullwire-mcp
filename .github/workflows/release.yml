@@ -177,7 +177,7 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
+          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.5 # 3e82f50a2839855693aacf7b3d0e7e2f30774cb4
           digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/meta.json")
           case "$digest" in sha256:*) ;; *) echo "::error::no image digest in the build metadata"; exit 1 ;; esac
           "$(go env GOPATH)/bin/cosign" sign --yes "${IMAGE}@${digest}"
@@ -241,7 +241,7 @@ jobs:
 
       - name: SBOM (list of everything in the build)
         run: |
-          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0 # 07257d5b9cbd2a3d4338a880c0ca50081e1ac445
           "$(go env GOPATH)/bin/cyclonedx-gomod" mod -json -output dist/nullwire-sbom.cdx.json .
           echo "SBOM written:"; ls -l dist/nullwire-sbom.cdx.json
 
@@ -251,7 +251,7 @@ jobs:
           TAG: ${{ steps.rel.outputs.tag }}
         run: |
           set -euo pipefail
-          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.0
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.49.0 # 44ea002d6394aed93d4695d05add27915d6ba65d
           NFPM="$(go env GOPATH)/bin/nfpm"
           export VERSION="${TAG#v}"
           for pair in amd64:linux-amd64 arm64:linux-arm64 arm7:linux-armv7; do
@@ -290,7 +290,7 @@ jobs:
         #     --certificate-oidc-issuer https://token.actions.githubusercontent.com FILE
         run: |
           set -euo pipefail
-          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
+          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.5 # 3e82f50a2839855693aacf7b3d0e7e2f30774cb4
           COSIGN="$(go env GOPATH)/bin/cosign"
           cd dist
           for f in nullwire-* SHA256SUMS.txt; do
