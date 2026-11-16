@@ -183,7 +183,7 @@ func main() {
 			default:
 				return nil
 			}
-			data, err := os.ReadFile(path) // #nosec G304 -- path comes from walking the -benign folders the user passed
+			data, err := os.ReadFile(path) // #nosec G304 G122 -- offline developer tool: it reads the folders the user passed with -benign
 			if err != nil {
 				return err
 			}
