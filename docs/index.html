@@ -85,6 +85,7 @@
   .out { white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
   .out .ph { color: var(--muted); }
   mark { background: var(--mark-bg); color: var(--mark-ink); border-radius: 6px; padding: .05rem .3rem; font-weight: 600; }
+  .engine-note { text-align: center; color: var(--muted); font-size: clamp(.85rem, .8rem + .2vw, .95rem); margin: 1.1rem 0 .9rem; }
   .foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5rem 1.5rem; margin-top: 1rem; color: var(--muted); font-size: clamp(.78rem, .75rem + .15vw, .86rem); }
   .foot b { color: var(--ink); font-weight: 600; }
 
@@ -144,6 +145,8 @@ document.documentElement.classList.add("js");
     </div>
   </header>
 
+  <p class="engine-note"><mark>This is the real Go engine, compiled to WebAssembly.</mark> Nothing you type leaves this page.</p>
+
   <div class="demo">
     <div class="bar">
       <div class="chips" id="chips">
@@ -169,7 +172,7 @@ document.documentElement.classList.add("js");
     </div>
     <div class="foot">
       <span id="count"><b>0</b> secrets hidden</span>
-      <span>This is the real Go engine, compiled to WebAssembly. Nothing you type leaves this page.</span>
+      <span>Runs locally in your browser</span>
     </div>
   </div>
 
@@ -272,7 +275,7 @@ scoop install nullwire-mcp</pre>
 (() => {
   const $ = (id) => document.getElementById(id);
   const input = $("in"), out = $("out"), count = $("count"), status = $("status"), dot = $("dot");
-  const TAG = /\[REDACTED_[A-Z]+#[0-9a-f]{6}\]/g;
+  const TAG = /\[REDACTED_[A-Z0-9_]+#[0-9a-f]{6}\]/g;
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
   // Fake values only. The AWS pair is the example from Amazon's own docs.
