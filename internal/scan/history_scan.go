@@ -37,7 +37,7 @@ func historyPaths() []string {
 			continue
 		}
 		seen[p] = true
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() { // #nosec G703 -- p is one of the fixed shell-history locations built above
 			out = append(out, p)
 		}
 	}
