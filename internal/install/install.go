@@ -330,8 +330,8 @@ func writeFileAtomic(path string, data []byte) (backup string, err error) {
 		mode = st.Mode().Perm()
 		bak := path + ".nullwire-bak"
 		if _, err := os.Stat(bak); os.IsNotExist(err) {
-			if old, err := os.ReadFile(path); err == nil {
-				if err := os.WriteFile(bak, old, mode); err == nil {
+			if old, err := os.ReadFile(path); err == nil { // #nosec G304 -- path is a known MCP client config file
+				if err := os.WriteFile(bak, old, mode); err == nil { // #nosec G703 -- bak is that same config file plus ".nullwire-bak"
 					backup = bak
 				}
 			}
