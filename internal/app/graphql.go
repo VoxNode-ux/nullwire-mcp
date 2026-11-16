@@ -115,15 +115,15 @@ func gqlValidName(s string) bool {
 // gqlSkip moves past whitespace, commas and comments.
 func gqlSkip(src string, i int) int {
 	for i < len(src) {
-		c := src[i]
-		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ',' {
+		switch src[i] {
+		case ' ', '\t', '\n', '\r', ',':
 			i++
-		} else if c == '#' {
+		case '#':
 			for i < len(src) && src[i] != '\n' && src[i] != '\r' {
 				i++
 			}
-		} else {
-			break
+		default:
+			return i
 		}
 	}
 	return i
