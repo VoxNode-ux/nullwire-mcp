@@ -20,6 +20,8 @@ func Run(args []string) int {
 	history := pf.Bool("history", false, "also scan shell history during the pre-scan (opt-in; history text is never shown)")
 	noScan := pf.Bool("no-scan", false, "skip the pre-scan (start directly)")
 	allowUninspectable := pf.Bool("allow-uninspectable", false, "forward request bodies that cannot be inspected (br, zstd)")
+	maxBody := pf.String("max-body", "", "stored body size per request/response, e.g. 1m (default 32 KiB / 256 KiB, at most 2m)")
+	wsDeflate := pf.Bool("ws-deflate", false, "keep WebSocket permessage-deflate and decode it for capture")
 	pf.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: nullwire-mcp protect [--port N] [--target URL] [--deep DIR] [--history] [--no-scan]\n")
 		pf.PrintDefaults()
@@ -61,6 +63,12 @@ func Run(args []string) int {
 	}
 	if *allowUninspectable {
 		serveArgs = append(serveArgs, "-allow-uninspectable")
+	}
+	if *maxBody != "" {
+		serveArgs = append(serveArgs, "-max-body", *maxBody)
+	}
+	if *wsDeflate {
+		serveArgs = append(serveArgs, "-ws-deflate")
 	}
 	return reexecServe(serveArgs)
 }
