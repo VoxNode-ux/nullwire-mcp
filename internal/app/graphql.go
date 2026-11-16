@@ -1,4 +1,4 @@
-package app
+Package app
 
 import (
 	"encoding/json"
@@ -79,11 +79,7 @@ func gqlIsPersisted(v any) bool {
 	if !ok {
 		return false
 	}
-	if h, ok := m["sha256Hash"].(string); ok && h != "" {
-		return true
-	}
-	v, ok := m["version"].(float64)
-	return ok && v > 0
+	return gqlIDSet(m["sha256Hash"]) || gqlIDSet(m["version"])
 }
 
 // gqlBlockEnd returns the index of the closing """ of a block string whose
