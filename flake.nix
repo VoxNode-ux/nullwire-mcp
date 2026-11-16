@@ -1,7 +1,8 @@
 {
   description = "NullWire-MCP: RAM-only traffic inspector for AI assistants that scrubs secrets first";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # nixos-unstable, pinned to this commit
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/d5cc6833999746cffdfe0598f7bc801a57b887a9";
 
   outputs = { self, nixpkgs }:
     let
