@@ -1,3 +1,3 @@
 module github.com/VoxNode-ux/nullwire-mcp
 
-go 1.26
+go 1.27
