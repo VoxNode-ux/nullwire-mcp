@@ -1212,8 +1212,13 @@ func isLoopbackHost(hostport string) bool {
 }
 
 func (a *App) isSelf(hostport string) bool {
-	host, port, err := net.SplitHostPort(strings.ToLower(strings.TrimSpace(hostport)))
-	if err != nil || port != strconv.Itoa(a.port) {
+	hp := strings.ToLower(strings.TrimSpace(hostport))
+	host, port, err := net.SplitHostPort(hp)
+	if err != nil {
+		// No explicit port (http://localhost): the default HTTP port, 80.
+		host, port = strings.Trim(hp, "[]"), "80"
+	}
+	if port != strconv.Itoa(a.port) {
 		return false
 	}
 	if host == "localhost" {
