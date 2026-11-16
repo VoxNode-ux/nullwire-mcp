@@ -12,15 +12,15 @@ NullWire is a *diagnostic* tool. Be clear-eyed about what it does and does not p
 - Nothing is written to disk by the server, and a stop signal clears the buffer (references are dropped; memory is not zeroed). The `install` command edits MCP client configs only when you run it, and backs each file up first.
 - The proxy is reachable only from your own machine.
 - The model never sees the live traffic, only the scrubbed copy.
-- Request and response bodies are never rewritten. Headers are adjusted only where inspection needs it: `Accept-Encoding` is reduced to `gzip`/`deflate`, and the WebSocket `permessage-deflate` offer is dropped.
+- Request and response bodies are never rewritten. Headers are adjusted only where inspection needs it: `Accept-Encoding` is reduced to `gzip`/`deflate`, and the WebSocket `permessage-deflate` offer is dropped (unless you start with `-ws-deflate`).
 
 **What it does not do**
 - **Release binaries carry signed build provenance, not OS-vendor code-signing certificates.** Verify authenticity with `SHA256SUMS.txt` and `gh attestation verify`. Because they are not signed with an Apple Developer ID or Microsoft Authenticode certificate, on macOS you may need `xattr -d com.apple.quarantine ./nullwire-darwin-arm64`.
 - **It is not a TLS interceptor.** `CONNECT` tunnels show only the destination and byte counts. Use the reverse gateway when you need HTTPS content.
 - **Redaction is pattern and heuristic based.** A secret in a shape nobody anticipated, and low in randomness, can slip through. The randomness detector can also redact a harmless long identifier. Add your own patterns in the config for secrets you know about.
 - **Brotli and Zstd bodies are never decoded** (the standard library can't, and pulling in a package would break the zero-dependency rule). They are refused (requests) or flagged (responses).
-- **WebSocket flows appear when the connection closes.** Messages compressed with `permessage-deflate` can't be read, so NullWire drops the client's extension offer to keep frames readable.
-- **An XML secret element that contains nested markup** is not covered by the XML layer.
+- **A WebSocket flow is refreshed live, not instantly.** It appears when the socket opens and is updated about every 500 ms (slower on very busy streams, to bound CPU). Messages compressed with `permessage-deflate` can't be read by default, so NullWire drops the client's extension offer to keep frames readable. With `-ws-deflate` they are decoded, within per-message and per-connection size caps, but binary compressed messages are not decoded and, when the connection uses context takeover, end decoding for the messages after them.
+- **XML attributes are not read by the XML layer.** Secrets in element text (including nested and CDATA text) are covered; `<add key="Password" value="…"/>` relies on the other layers.
 - **A secret made only of decimal digits is not caught by the randomness detector**, because that is the shape of timestamps and ids. It is still redacted when it sits under a secret-looking name (`token`, `password`, …) or in a secret header.
 - **A password with a decoded `?` or `#`** in a URL is only partly matched by the URL-credentials rule, because those characters end the password field.
 - **HTTP/2 text bodies are captured; binary bodies are not.** HTTP/2 and h2c text and JSON bodies are scrubbed like HTTP/1.1. Binary protobuf and gRPC message bodies are skipped, and `Grpc-Status` and `Grpc-Message` trailers are scrubbed.
@@ -47,11 +47,11 @@ If you find a secret NullWire missed, please open an issue with a *fake* sample 
 | What | Limit |
 |---|---|
 | Flows kept in RAM | 50 |
-| Stored request body | 32 KiB |
-| Stored response body | 256 KiB |
-| In-flight capture buffer | 64 KiB request, 512 KiB response |
+| Stored request body | 32 KiB (`-max-body` raises it, up to 2 MiB) |
+| Stored response body | 256 KiB (`-max-body` raises it, up to 2 MiB) |
+| In-flight capture buffer | 64 KiB request, 512 KiB response (twice `-max-body` when that is larger) |
 | Scrub window past the stored size | 8 KiB |
-| Decoded gzip/deflate | 1 MiB |
+| Decoded gzip/deflate | 1 MiB (twice `-max-body` when that is larger) |
 | Randomness detector | 16 to 128 characters in bodies, 16 to 2,048 in headers and URLs |
 
 ## Tested on
