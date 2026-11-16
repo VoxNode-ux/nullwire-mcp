@@ -118,7 +118,7 @@ Where each one lives in the code is in [docs/architecture.md](docs/architecture.
 - Redaction is pattern and heuristic based. A secret in an unanticipated shape that is also low in randomness can slip through, and the detector can redact a harmless long identifier. Add your own patterns in the config.
 - A secret made only of decimal digits is not caught by the randomness detector. It is still redacted under a secret-looking field name or in a secret header.
 - Brotli and Zstd bodies are never decoded: requests are refused with `415` (unless you pass `-allow-uninspectable`) and responses are flagged.
-- Binary protobuf and gRPC bodies are not captured. WebSocket flows appear when the connection closes.
+- Binary protobuf and gRPC bodies are not captured. A WebSocket flow appears when the socket opens and is refreshed while it stays open.
 - Release binaries carry signed build provenance, not OS-vendor code-signing certificates. Verify them with `SHA256SUMS.txt` and `gh attestation verify`.
 
 The full list and the safety shields are in [docs/security.md](docs/security.md).
