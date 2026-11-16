@@ -371,6 +371,20 @@ func newWSInflater(takeover bool, maxOut int) *wsInflater {
 	return &wsInflater{takeover: takeover, maxOut: maxOut, budget: wsInflateBudget}
 }
 
+// Close releases the flate reader and the dictionary when the connection is
+// over, instead of leaving them to the garbage collector. It is safe on a nil
+// inflater and safe to call twice; the decoder is off afterwards.
+func (z *wsInflater) Close() {
+	if z == nil {
+		return
+	}
+	if z.fr != nil {
+		_ = z.fr.Close()
+		z.fr = nil
+	}
+	z.dead, z.window = true, nil
+}
+
 // skip is called for a compressed message that is not decoded (binary). With
 // context takeover the next message may depend on it, so the decoder stops.
 func (z *wsInflater) skip() {
