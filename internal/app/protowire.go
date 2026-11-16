@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"net/http"
@@ -150,8 +152,15 @@ func protoTextIsMessage(b []byte) bool {
 	if len(b) == 0 || !protoHasLenField(b) {
 		return false
 	}
-	if b[0] == '\n' {
-		return true
+	// A message that starts with field 1 (a newline) is the message unless
+	// its length byte is itself printable text or whitespace: "\n" followed
+	// by a space, a tab or a letter is a line of text far more often than a
+	// message of 32, 9 or 65 bytes, and cutting it up would split a secret.
+	// Those need two fields, like any other text.
+	if b[0] == '\n' && len(b) > 1 {
+		if l := b[1]; l >= 0x7f || (l < 0x20 && l != '\t' && l != '\n' && l != '\r') {
+			return true
+		}
 	}
 	fields := 0
 	for rest := b; len(rest) > 0 && fields < 2; fields++ {
@@ -329,13 +338,13 @@ func renderGRPCFrames(w *protoWriter, h http.Header, b []byte, limit int) bool {
 				w.line(0, "message %d: [decoded size limit reached]", shown)
 				break
 			}
-			text, ok := decodeBodyMax(enc, msg, budget)
+			text, tcut, ok := decodeBodyMaxCut(enc, msg, budget)
 			if !ok {
 				w.line(0, "message %d: [compressed, could not be decompressed, %d bytes]", shown, len(msg))
 				continue
 			}
-			if strings.HasSuffix(text, truncMarker) {
-				text, cut = strings.TrimSuffix(text, truncMarker), true
+			if tcut {
+				cut = true
 			}
 			budget -= len(text)
 			msg = []byte(text)
@@ -376,35 +385,90 @@ func decodeProtoBody(h http.Header, b []byte, limit int) (string, bool) {
 
 	ct := h.Get("Content-Type")
 	if isGRPCContentType(ct) {
-		if strings.Contains(strings.ToLower(ct), "-text") { // gRPC-Web text mode is base64
-			return "", false
-		}
+		decCut := false
 		frames := b
-		// Some gRPC-Web servers compress the whole HTTP body instead of, or
-		// as well as, the single frames.
-		if ce := strings.TrimSpace(h.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
-			text, ok := decodeBodyMax(ce, b, limit)
+		if strings.Contains(strings.ToLower(ct), "-text") { // gRPC-Web text mode is base64
+			dec, ok := grpcWebTextDecode(b)
 			if !ok {
 				return "", false
 			}
-			frames = []byte(strings.TrimSuffix(text, truncMarker))
+			frames = dec
+		}
+		// Some gRPC-Web servers compress the whole HTTP body instead of, or
+		// as well as, the single frames.
+		if ce := strings.TrimSpace(h.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
+			text, cut, ok := decodeBodyMaxCut(ce, frames, limit)
+			if !ok {
+				return "", false
+			}
+			frames = []byte(text)
+			decCut = cut
 		}
 		if !renderGRPCFrames(w, h, frames, limit) {
 			return "", false
+		}
+		if decCut {
+			w.line(0, "…[decoded body cut at the size limit]")
 		}
 		return w.sb.String(), true
 	}
 
 	payload := b
+	decCut := false
 	if ce := strings.TrimSpace(h.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
-		text, ok := decodeBodyMax(ce, b, limit)
+		text, cut, ok := decodeBodyMaxCut(ce, b, limit)
 		if !ok {
 			return "", false
 		}
-		payload = []byte(strings.TrimSuffix(text, truncMarker))
+		payload = []byte(text)
+		decCut = cut
 	}
 	if !renderProtoMessage(w, payload, 0) {
 		return "", false
 	}
+	if decCut {
+		w.line(0, "…[decoded body cut at the size limit]")
+	}
 	return w.sb.String(), true
+}
+
+// grpcWebTextDecode decodes an application/grpc-web-text body. It is base64,
+// but every frame (or run of frames) the server flushed carries its own
+// padding, so it is decoded in pieces that end at the padding. An incomplete
+// last group of four, from a body cut off by the capture limit, is dropped.
+func grpcWebTextDecode(b []byte) ([]byte, bool) {
+	clean := make([]byte, 0, len(b))
+	for _, c := range b {
+		if c != '\n' && c != '\r' && c != ' ' && c != '\t' {
+			clean = append(clean, c)
+		}
+	}
+	var out []byte
+	for len(clean) > 0 {
+		end, padded := len(clean), false
+		if i := bytes.IndexByte(clean, '='); i >= 0 {
+			end, padded = i, true
+			for end < len(clean) && clean[end] == '=' {
+				end++
+			}
+		}
+		chunk := clean[:end]
+		clean = clean[end:]
+		if !padded {
+			chunk = chunk[:len(chunk)/4*4]
+		}
+		if len(chunk) == 0 {
+			continue
+		}
+		if len(chunk)%4 != 0 {
+			return nil, false
+		}
+		dst := make([]byte, base64.StdEncoding.DecodedLen(len(chunk)))
+		n, err := base64.StdEncoding.Decode(dst, chunk)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, dst[:n]...)
+	}
+	return out, len(out) > 0
 }

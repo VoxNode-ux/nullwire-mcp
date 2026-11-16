@@ -1212,8 +1212,17 @@ func isLoopbackHost(hostport string) bool {
 }
 
 func (a *App) isSelf(hostport string) bool {
-	h := strings.ToLower(hostport)
-	return h == fmt.Sprintf("127.0.0.1:%d", a.port) || h == fmt.Sprintf("localhost:%d", a.port) || h == fmt.Sprintf("[::1]:%d", a.port)
+	host, port, err := net.SplitHostPort(strings.ToLower(strings.TrimSpace(hostport)))
+	if err != nil || port != strconv.Itoa(a.port) {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	// Any loopback address (127.0.0.0/8, ::1) and the unspecified addresses
+	// (0.0.0.0, ::) reach this proxy when it listens on loopback.
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
 var reUpstreamName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`)
@@ -1360,6 +1369,7 @@ type rawFlow struct {
 	status      int
 	respHeaders http.Header
 	respBody    []byte
+	respCut     bool // the body was cut by a collector smaller than respCap (SSE)
 	latencyMs   int64
 	note        string
 
@@ -1923,14 +1933,27 @@ func decodableEncoding(ce string) bool {
 }
 
 // decodeBodyMax decodes a gzip or deflate body, expanding it to at most limit
-// bytes of text (the guard against compression bombs).
+// bytes of text (the guard against compression bombs). When the text was cut
+// there, truncMarker is appended to it.
 func decodeBodyMax(ce string, b []byte, limit int) (string, bool) {
+	text, cut, ok := decodeBodyMaxCut(ce, b, limit)
+	if ok && cut {
+		text += truncMarker
+	}
+	return text, ok
+}
+
+// decodeBodyMaxCut is decodeBodyMax for callers that need the bytes
+// themselves: it returns the text without a marker and reports the cut
+// separately, so a body that really ends in the marker text is not mistaken
+// for a cut one.
+func decodeBodyMaxCut(ce string, b []byte, limit int) (text string, cut, ok bool) {
 	var rd io.Reader
 	switch strings.ToLower(strings.TrimSpace(ce)) {
 	case "gzip", "x-gzip":
 		zr, err := gzip.NewReader(bytes.NewReader(b))
 		if err != nil {
-			return "", false
+			return "", false, false
 		}
 		rd = zr
 	case "deflate":
@@ -1940,17 +1963,13 @@ func decodeBodyMax(ce string, b []byte, limit int) (string, bool) {
 			rd = flate.NewReader(bytes.NewReader(b))
 		}
 	default:
-		return "", false
+		return "", false, false
 	}
 	out, err := io.ReadAll(io.LimitReader(rd, int64(limit)))
 	if len(out) == 0 && err != nil {
-		return "", false
+		return "", false, false
 	}
-	text := string(out)
-	if err != nil || len(out) >= limit {
-		text += truncMarker
-	}
-	return text, true
+	return string(out), err != nil || len(out) >= limit, true
 }
 
 func bodyText(h http.Header, b []byte) string { return bodyTextMax(h, b, decodedLimit) }
@@ -2078,7 +2097,7 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 		note += " ⚠️ WARNING: Response body encoded (Brotli/Zstd), not inspected."
 	}
 
-	if len(f.reqBody) >= lim.reqCap || len(f.respBody) >= lim.respCap {
+	if len(f.reqBody) >= lim.reqCap || len(f.respBody) >= lim.respCap || f.respCut {
 		note += " ⚠️ WARNING: Payload exceeded memory limits; truncated before full inspection."
 	}
 

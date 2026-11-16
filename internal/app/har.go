@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -124,17 +125,29 @@ func harQuery(raw string) []harNV {
 	return out
 }
 
+// harTagRe matches one complete redaction tag, such as [REDACTED_TOKEN#0a1b2c].
+var harTagRe = regexp.MustCompile(`\[REDACTED_[A-Z0-9_]+#[0-9a-f]{6}\]`)
+
 // harCutFragment drops a #fragment from s. The # that ends a redaction tag
 // ([REDACTED_<KIND>#xxxxxx]) is part of the value, not the start of a
 // fragment, and url.Parse would cut the query there.
 func harCutFragment(s string) string {
+	// Only a complete tag counts: an unclosed "[REDACTED_" in a value must not
+	// swallow a real #fragment after it.
+	tags := harTagRe.FindAllStringIndex(s, -1)
 	for i := 0; i < len(s); i++ {
 		if s[i] != '#' {
 			continue
 		}
-		open := strings.LastIndex(s[:i], "[REDACTED_")
-		if open >= 0 && !strings.ContainsAny(s[open:i], "]&#") {
-			continue // inside a tag
+		inside := false
+		for _, t := range tags {
+			if i > t[0] && i < t[1] {
+				inside = true
+				break
+			}
+		}
+		if inside {
+			continue // the # of a redaction tag
 		}
 		return s[:i]
 	}
@@ -217,11 +230,13 @@ func (a *App) toolExportHAR(args json.RawMessage) map[string]any {
 	budget := harMaxBytes - 1024 // room for the document around the entries
 	picked := make([]json.RawMessage, 0, len(flows))
 	omitted, cutBodies := 0, 0
-	for i, e := range flows {
+	for _, e := range flows {
 		raw, cut, ok := harFit(e, in.IncludeBodies, budget)
 		if !ok {
-			omitted = len(flows) - i
-			break
+			// This entry alone is too big for what is left of the budget;
+			// an older, smaller one may still fit.
+			omitted++
+			continue
 		}
 		budget -= len(raw) + 1
 		if cut {

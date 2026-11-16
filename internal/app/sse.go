@@ -34,6 +34,7 @@ type sseCollector struct {
 	buf     []byte
 	max     int
 	version uint64
+	cut     bool // bytes were dropped because the collector was full
 }
 
 func newSSECollector(limit int) *sseCollector { return &sseCollector{max: limit} }
@@ -41,11 +42,22 @@ func newSSECollector(limit int) *sseCollector { return &sseCollector{max: limit}
 func (c *sseCollector) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if room := c.max - len(c.buf); room > 0 {
+	room := c.max - len(c.buf)
+	if room > 0 {
 		c.buf = append(c.buf, p[:min(room, len(p))]...)
 		c.version++
 	}
+	if len(p) > max(room, 0) {
+		c.cut = true
+	}
 	return len(p), nil
+}
+
+// Truncated reports that the stream was longer than the collector holds.
+func (c *sseCollector) Truncated() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cut
 }
 
 func (c *sseCollector) Close() error { return nil }
@@ -93,6 +105,7 @@ func (a *App) sseLiveLoop(id uint64, base rawFlow, col *sseCollector, stop <-cha
 		began := time.Now()
 		f := base
 		f.respBody = col.Bytes()
+		f.respCut = col.Truncated()
 		f.latencyMs = time.Since(f.started).Milliseconds()
 		f.note = sseLiveNote()
 		e, ok := a.buildEntry(f)
@@ -163,7 +176,7 @@ func newSSEDecoder(enc string, col *sseCollector) io.WriteCloser {
 			defer zr.Close()
 			rd = zr
 		}
-		_, _ = io.Copy(col, io.LimitReader(rd, int64(col.max))) // a truncated stream is fine
+		_, _ = io.Copy(col, io.LimitReader(rd, int64(col.max)+1)) // a truncated stream is fine
 	}()
 	return d
 }
@@ -254,6 +267,7 @@ func (a *App) streamSSE(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	final.respTrailers = resp.Trailer.Clone()
 	if tap != nil {
 		final.respBody = col.Bytes()
+		final.respCut = col.Truncated()
 	}
 	final.latencyMs = time.Since(start).Milliseconds()
 	final.note = "Server-Sent Events stream closed; text is captured and scrubbed" + skipped

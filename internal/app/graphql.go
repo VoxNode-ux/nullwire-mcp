@@ -50,13 +50,19 @@ func gqlFromObject(m map[string]any) (gqlRequest, bool) {
 	if ext, ok := m["extensions"].(map[string]any); ok {
 		r.persisted = gqlIsPersisted(ext["persistedQuery"])
 	}
-	// Relay and Facebook style persisted documents: doc_id or queryId.
+	// Relay and Facebook style persisted documents: doc_id or queryId. Like a
+	// bare "id", they only count as GraphQL next to "variables" or
+	// "operationName", or on a /graphql path (weakID defers to the path check).
+	_, vars := m["variables"].(map[string]any)
 	if gqlIDSet(m["doc_id"]) || gqlIDSet(m["queryId"]) {
-		r.persisted = true
+		if vars || r.opName != "" {
+			r.persisted = true
+		} else {
+			r.weakID = true
+		}
 	}
-	if id, ok := m["id"].(string); ok && id != "" {
-		_, vars := m["variables"].(map[string]any)
-		r.weakID = vars
+	if id, ok := m["id"].(string); ok && id != "" && vars {
+		r.weakID = true
 	}
 	return r, r.query != "" || r.persisted
 }
@@ -67,6 +73,10 @@ func gqlIDSet(v any) bool {
 	case string:
 		return t != ""
 	case float64:
+		return t > 0
+	case int:
+		return t > 0
+	case int64:
 		return t > 0
 	}
 	return false
@@ -108,7 +118,11 @@ func gqlFromURL(raw string) (gqlRequest, bool) {
 	}
 	q := u.Query()
 	r := gqlRequest{query: q.Get("query"), opName: q.Get("operationName")}
-	r.persisted = q.Get("doc_id") != "" || q.Get("queryId") != ""
+	// doc_id and queryId in a URL only count on a /graphql path, or next to
+	// variables or operationName.
+	if q.Get("doc_id") != "" || q.Get("queryId") != "" {
+		r.persisted = gqlPathLooksGraphQL(raw) || q.Get("variables") != "" || r.opName != ""
+	}
 	if ext := q.Get("extensions"); ext != "" {
 		var m map[string]any
 		if json.Unmarshal([]byte(ext), &m) == nil {
@@ -379,6 +393,12 @@ func (a *App) graphqlNote(method, rawURL, ct, body string) (string, int) {
 	if len(reqs) == 0 {
 		if r, ok := gqlFromURL(rawURL); ok { // GET, or a POST that keeps these in the URL
 			reqs = append(reqs, r)
+		}
+	} else if len(reqs) == 1 && !batch && reqs[0].opName == "" {
+		// A shorthand application/graphql body carries no name: take
+		// ?operationName= from the URL.
+		if u, err := url.Parse(rawURL); err == nil {
+			reqs[0].opName = u.Query().Get("operationName")
 		}
 	}
 
