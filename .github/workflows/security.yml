@@ -20,7 +20,7 @@ jobs:
           check-latest: true
           cache: false
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0 # e672cbe8fbc8c76e28fcb6db0efd9ce354e0dac5
       - name: Scan the code and the Go standard library it uses
         run: |
           set -o pipefail
@@ -96,7 +96,7 @@ jobs:
           check-latest: true
           cache: false
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.22.0
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0 # 5eb1d104ef85ff2c905c877eb600e8c1dee33a22
       - name: Scan (medium severity and above)
         run: |
           set -o pipefail
