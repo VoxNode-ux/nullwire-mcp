@@ -1718,6 +1718,7 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 	var clientRWC io.ReadWriteCloser = client
 	var upstreamRWC = rwc
 	var wsUp, wsDown *wsCollector
+	var wsUpInfl, wsDownInfl *wsInflater
 	liveID := uint64(0)
 	var liveStop chan struct{}
 	var liveDone chan struct{}
@@ -1735,8 +1736,9 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 		downParser.maxMsg = lim.respBody + scrubWindow
 		if a.wsDeflate {
 			if found, serverFresh, clientFresh := parseDeflateNegotiation(resp.Header.Values("Sec-WebSocket-Extensions")); found {
-				upParser.inflate = newWSInflater(!clientFresh, lim.respBody+scrubWindow)
-				downParser.inflate = newWSInflater(!serverFresh, lim.respBody+scrubWindow)
+				wsUpInfl = newWSInflater(!clientFresh, lim.respBody+scrubWindow)
+				wsDownInfl = newWSInflater(!serverFresh, lim.respBody+scrubWindow)
+				upParser.inflate, downParser.inflate = wsUpInfl, wsDownInfl
 			}
 		}
 		clientRWC = &tapRWC{rwc: client, onRead: upParser.Feed}
@@ -1757,6 +1759,9 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 	}
 
 	sent, recv := splice(clientRWC, upstreamRWC, a.idle(), pre)
+	// The connection is over: release the flate readers now, not at the next GC.
+	wsUpInfl.Close()
+	wsDownInfl.Close()
 
 	if liveStop != nil {
 		// Wait for the refresher to stop, so a late refresh cannot overwrite
@@ -2002,13 +2007,13 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 	// MessagePack and CBOR bodies are binary too, but unlike protobuf they can be
 	// read without a schema: they become JSON here and are scrubbed below with
 	// everything else. Binary values inside them are never copied.
-	if len(f.reqBody) > 0 && !strings.HasPrefix(rawReqBody, "[encoded body omitted") {
-		if text, nt, ok := binaryBodyJSON(f.reqHeaders.Get("Content-Type"), []byte(rawReqBody)); ok {
+	if len(f.reqBody) > 0 {
+		if text, nt, ok := binaryBodyText(f.reqHeaders, rawReqBody, lim.decoded); ok {
 			rawReqBody, note = text, note+" Request"+nt
 		}
 	}
-	if len(f.respBody) > 0 && !strings.HasPrefix(rawRespBody, "[encoded body omitted") {
-		if text, nt, ok := binaryBodyJSON(f.respHeaders.Get("Content-Type"), []byte(rawRespBody)); ok {
+	if len(f.respBody) > 0 {
+		if text, nt, ok := binaryBodyText(f.respHeaders, rawRespBody, lim.decoded); ok {
 			rawRespBody, note = text, note+" Response"+nt
 		}
 	}
