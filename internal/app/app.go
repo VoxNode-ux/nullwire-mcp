@@ -1110,6 +1110,7 @@ type App struct {
 	port                int
 	target              *url.URL
 	upstreams           map[string]*url.URL
+	gwMap               map[string]*url.URL // -target-map: reached as /_gw/<name>/
 	transport           *http.Transport
 	h2cOnce             sync.Once
 	h2c                 *http.Transport
@@ -1310,6 +1311,12 @@ func (a *App) resolveUpstream(r *http.Request) (*url.URL, bool, int, error) {
 			return nil, true, http.StatusBadRequest, err
 		}
 		base = parsed
+	} else if len(a.gwMap) > 0 && hasGatewayPrefix(r.URL.Path) {
+		nb, nrest, nraw, status, err := a.matchGateway(r.URL.Path, r.URL.RawPath)
+		if err != nil {
+			return nil, true, status, err
+		}
+		base, rest, restRaw = nb, nrest, nraw
 	} else {
 		nb, nrest, nraw, found, err := a.matchUpstream(r.URL.Path, r.URL.RawPath)
 		if err != nil {
@@ -1320,6 +1327,9 @@ func (a *App) resolveUpstream(r *http.Request) (*url.URL, bool, int, error) {
 		}
 	}
 	if base == nil {
+		if len(a.upstreams) == 0 && len(a.gwMap) > 0 {
+			return nil, true, http.StatusNotFound, fmt.Errorf("unknown route: start the path with %s/<name>/ with one of: %s", gwBase, strings.Join(a.gatewayNames(), ", "))
+		}
 		if names := a.upstreamNames(); len(names) > 0 {
 			return nil, true, http.StatusNotFound, fmt.Errorf("unknown upstream: start the path with one of /%s/", strings.Join(names, "/, /"))
 		}
@@ -2485,6 +2495,7 @@ func Main() {
 
 	port := flag.Int("port", 8080, "TCP port for the diagnostic proxy (always bound to 127.0.0.1)")
 	target := flag.String("target", "", "upstream base URL(s)")
+	targetMap := flag.String("target-map", "", "fixed routes name=URL,... reached as /_gw/<name>/ (an explicit allowlist, for clients that cannot send X-Target-URL)")
 	cacert := flag.String("cacert", "", "extra CA certificates")
 	dnsSpec := flag.String("dns", "auto", "upstream DNS")
 	secretsConfig := flag.String("secrets-config", "", "path to -secrets-config JSON")
@@ -2553,6 +2564,18 @@ func Main() {
 		app.target = def
 		app.upstreams = named
 	}
+	if *targetMap != "" {
+		gw, err := parseTargetMap(*targetMap)
+		if err != nil {
+			fatalf("nullwire-mcp: -target-map: %v", err)
+		}
+		for n := range gw {
+			if _, dup := app.upstreams[n]; dup {
+				fatalf("nullwire-mcp: -target-map: name %q is also used in -target", n)
+			}
+		}
+		app.gwMap = gw
+	}
 
 	ln, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", *port))
 	if err != nil {
@@ -2590,6 +2613,11 @@ func Main() {
 		app.Logf("TLS roots: %s", caSource)
 	}
 	app.Logf("MCP stdio server ready; proxy listening on 127.0.0.1:%d", app.port)
+	for _, n := range app.gatewayNames() {
+		if u := app.gwMap[n]; u != nil {
+			app.Logf("gateway route %s/%s/ -> %s", gwBase, n, u.Host)
+		}
+	}
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
