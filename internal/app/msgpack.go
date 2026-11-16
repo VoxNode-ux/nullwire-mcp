@@ -23,10 +23,11 @@ func isMsgPackContentType(ct string) bool {
 }
 
 // msgpackToJSON reads every MessagePack value in in, one after another, and
-// returns them as JSON, one per line. complete is false when the input ended
-// early, went past a limit or was not valid MessagePack.
-func msgpackToJSON(in []byte) (out string, complete bool) {
-	return walkBinary(in, (*binJSON).msgpackValue)
+// returns them as JSON, one per line, at most limit bytes of it (0: the
+// default). complete is false when the input ended early, went past a limit or
+// was not valid MessagePack.
+func msgpackToJSON(in []byte, limit int) (out string, complete bool) {
+	return walkBinary(in, limit, (*binJSON).msgpackValue)
 }
 
 func (w *binJSON) msgpackValue() error {
