@@ -1999,6 +1999,20 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 		note += " Protobuf/gRPC response body not captured (binary)."
 	}
 
+	// MessagePack and CBOR bodies are binary too, but unlike protobuf they can be
+	// read without a schema: they become JSON here and are scrubbed below with
+	// everything else. Binary values inside them are never copied.
+	if len(f.reqBody) > 0 && !strings.HasPrefix(rawReqBody, "[encoded body omitted") {
+		if text, nt, ok := binaryBodyJSON(f.reqHeaders.Get("Content-Type"), []byte(rawReqBody)); ok {
+			rawReqBody, note = text, note+" Request"+nt
+		}
+	}
+	if len(f.respBody) > 0 && !strings.HasPrefix(rawRespBody, "[encoded body omitted") {
+		if text, nt, ok := binaryBodyJSON(f.respHeaders.Get("Content-Type"), []byte(rawRespBody)); ok {
+			rawRespBody, note = text, note+" Response"+nt
+		}
+	}
+
 	if st, msg := grpcStatus(f); st != "" {
 		note += " gRPC status " + st
 		if msg != "" {
