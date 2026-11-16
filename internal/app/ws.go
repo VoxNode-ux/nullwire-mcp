@@ -1,9 +1,12 @@
 package app
 
 import (
+	"bytes"
+	"compress/flate"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 )
 
@@ -38,6 +41,12 @@ type wsMessage struct {
 // a valid frame sequence switch the parser off; forwarding is unaffected.
 type wsParser struct {
 	onMsg func(wsMessage)
+
+	// maxMsg is how much of one message is kept; zero means wsMaxMessage.
+	maxMsg int
+	// inflate decodes permessage-deflate messages (-ws-deflate). Without it a
+	// message with RSV1 set is counted as compressed and left unread.
+	inflate *wsInflater
 
 	hdr     [14]byte
 	hdrHave int
@@ -172,17 +181,25 @@ func (p *wsParser) startFrame() bool {
 	return true
 }
 
+func (p *wsParser) msgLimit() int {
+	if p.maxMsg > 0 {
+		return p.maxMsg
+	}
+	return wsMaxMessage
+}
+
 func (p *wsParser) consume(b []byte) {
-	if p.opcode&0x8 != 0 || p.msgOpcode != wsOpText || p.msgPacked || p.msgOver {
+	if p.opcode&0x8 != 0 || p.msgOpcode != wsOpText || (p.msgPacked && p.inflate == nil) || p.msgOver {
 		p.pos += uint64(len(b))
 		return
 	}
+	limit := p.msgLimit()
 	for i := range b {
 		c := b[i]
 		if p.masked {
 			c ^= p.maskKey[(p.pos+uint64(i))&3] // #nosec G115 -- i is a non-negative index into b
 		}
-		if len(p.msg) >= wsMaxMessage {
+		if len(p.msg) >= limit {
 			p.msgOver = true
 			break
 		}
@@ -197,11 +214,19 @@ func (p *wsParser) endFrame() {
 	if p.opcode&0x8 != 0 || !p.fin {
 		return // a control frame, or the message continues
 	}
-	if p.onMsg != nil {
-		m := wsMessage{opcode: p.msgOpcode, compressed: p.msgPacked, truncated: p.msgOver, frames: p.msgFrames}
-		if p.msgOpcode == wsOpText && !p.msgPacked {
-			m.data = append([]byte(nil), p.msg...)
+	m := wsMessage{opcode: p.msgOpcode, compressed: p.msgPacked, truncated: p.msgOver, frames: p.msgFrames}
+	switch {
+	case p.msgPacked && p.inflate != nil && p.msgOpcode == wsOpText:
+		// p.msg holds the compressed bytes of the whole message.
+		if data, cut, ok := p.inflate.decode(p.msg, p.msgOver); ok {
+			m.data, m.compressed, m.truncated = data, false, cut
 		}
+	case p.msgPacked && p.inflate != nil:
+		p.inflate.skip() // a compressed message that is not decoded
+	case p.msgOpcode == wsOpText && !p.msgPacked:
+		m.data = append([]byte(nil), p.msg...)
+	}
+	if p.onMsg != nil {
 		p.onMsg(m)
 	}
 	p.msgOpcode, p.msgPacked, p.msgOver, p.msgFrames = 0, false, false, 0
@@ -219,6 +244,7 @@ type wsCollector struct {
 	packed    int
 	truncated int // messages cut short, by the per-message or the total limit
 	dropped   int // messages left out because the total limit was reached
+	version   uint64
 }
 
 func newWSCollector(maxBytes int) *wsCollector { return &wsCollector{max: maxBytes} }
@@ -226,6 +252,7 @@ func newWSCollector(maxBytes int) *wsCollector { return &wsCollector{max: maxByt
 func (c *wsCollector) add(m wsMessage) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.version++
 	switch {
 	case m.compressed:
 		c.packed++
@@ -249,6 +276,14 @@ func (c *wsCollector) add(m wsMessage) {
 		}
 		c.buf = append(c.buf, line...)
 	}
+}
+
+// Version counts the messages seen so far, so a reader can tell whether
+// anything changed since it last looked.
+func (c *wsCollector) Version() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.version
 }
 
 // Bytes returns the collected text, unscrubbed; capture() scrubs it.
@@ -298,4 +333,115 @@ func (t *tapRWC) CloseWrite() error {
 		return cw.CloseWrite()
 	}
 	return t.rwc.Close()
+}
+
+// ---------------------------------------------------------------------------
+// permessage-deflate (RFC 7692), used only with -ws-deflate.
+
+const (
+	// wsWindowSize is the largest back-reference window deflate can use.
+	wsWindowSize = 32 * 1024
+	// wsInflateBudget is the most text one direction of one connection is
+	// decompressed to in total. Together with the per-message limit it bounds
+	// what a compression bomb can cost.
+	wsInflateBudget = 16 * 1024 * 1024
+)
+
+// wsDeflateTail is the empty block that every permessage-deflate message has
+// cut off its end and that the decoder needs to see again.
+var wsDeflateTail = []byte{0x00, 0x00, 0xff, 0xff}
+
+// wsInflater decodes the compressed messages of one direction of a connection.
+// It has one flate reader for the whole connection, as the extension requires
+// when context takeover is on: every message may refer to the text of the
+// messages before it, so the last 32 KiB of output are kept as the dictionary
+// of the next message. A decoder that can no longer be trusted to be in step
+// (a message was cut, was not decoded, or was bigger than the limit) switches
+// itself off and the messages after that are counted as unreadable.
+type wsInflater struct {
+	takeover bool // false: each message is compressed on its own
+	maxOut   int  // most text kept from one message
+	budget   int  // text that may still be decompressed on this connection
+	window   []byte
+	fr       io.ReadCloser
+	dead     bool
+}
+
+func newWSInflater(takeover bool, maxOut int) *wsInflater {
+	return &wsInflater{takeover: takeover, maxOut: maxOut, budget: wsInflateBudget}
+}
+
+// skip is called for a compressed message that is not decoded (binary). With
+// context takeover the next message may depend on it, so the decoder stops.
+func (z *wsInflater) skip() {
+	if z.takeover {
+		z.dead = true
+	}
+}
+
+// decode inflates one message. cut says the compressed bytes were already cut
+// short. The result is at most maxOut bytes: the reader stops there instead
+// of expanding a compression bomb. truncated says the text is not complete.
+func (z *wsInflater) decode(payload []byte, cut bool) (out []byte, truncated, ok bool) {
+	if z.dead || z.budget <= 0 {
+		z.dead = true
+		return nil, false, false
+	}
+	src := io.MultiReader(bytes.NewReader(payload), bytes.NewReader(wsDeflateTail))
+	var dict []byte
+	if z.takeover {
+		dict = z.window
+	}
+	if z.fr == nil {
+		z.fr = flate.NewReaderDict(src, dict)
+	} else if err := z.fr.(flate.Resetter).Reset(src, dict); err != nil {
+		z.dead = true
+		return nil, false, false
+	}
+	out, err := io.ReadAll(io.LimitReader(z.fr, int64(z.maxOut)+1))
+	if len(out) > z.maxOut {
+		out, truncated = out[:z.maxOut], true
+	}
+	z.budget -= len(out)
+	clean := err == nil || err == io.ErrUnexpectedEOF // the message ends where the input does
+	if !clean && len(out) == 0 {
+		z.dead = true
+		return nil, false, false
+	}
+	if z.takeover && (!clean || truncated || cut) {
+		z.dead = true // the dictionary for the next message would be wrong
+	}
+	if z.takeover && !z.dead {
+		w := append(z.window, out...)
+		if len(w) > wsWindowSize {
+			w = w[len(w)-wsWindowSize:]
+		}
+		z.window = append(make([]byte, 0, len(w)), w...)
+	}
+	return out, truncated || cut || !clean, true
+}
+
+// parseDeflateNegotiation reads the server's Sec-WebSocket-Extensions answer.
+// found says permessage-deflate was agreed. serverFresh and clientFresh say
+// that side starts every message with an empty dictionary (no context
+// takeover).
+func parseDeflateNegotiation(values []string) (found, serverFresh, clientFresh bool) {
+	for _, v := range values {
+		for _, ext := range strings.Split(v, ",") {
+			parts := strings.Split(ext, ";")
+			if strings.ToLower(strings.TrimSpace(parts[0])) != "permessage-deflate" {
+				continue
+			}
+			found = true
+			for _, prm := range parts[1:] {
+				switch strings.ToLower(strings.TrimSpace(strings.SplitN(prm, "=", 2)[0])) {
+				case "server_no_context_takeover":
+					serverFresh = true
+				case "client_no_context_takeover":
+					clientFresh = true
+				}
+			}
+		}
+	}
+	return found, serverFresh, clientFresh
 }

@@ -382,6 +382,13 @@ func TestWebSocketCaptureEndToEnd(t *testing.T) {
 	_ = c.Close()
 
 	fxWaitRing(t, app, 1)
+	// The flow is already in the ring while the socket is open; wait for the
+	// final capture, which replaces it in place when the connection closes.
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if es := app.ring.ListRecent(1, "GET", "/ws"); len(es) == 1 && !strings.Contains(es[0].Note, "still open") {
+			break
+		}
+	}
 	if app.ring.Len() != 1 {
 		t.Errorf("a WebSocket connection must produce one flow, got %d", app.ring.Len())
 	}

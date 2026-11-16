@@ -98,7 +98,8 @@ type RingBuffer struct {
 
 func NewRingBuffer() *RingBuffer { return &RingBuffer{nextID: 1} }
 
-func (r *RingBuffer) Push(entry FlowEntry) {
+// Push stores entry and returns the ID it was given.
+func (r *RingBuffer) Push(entry FlowEntry) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	entry.ID = r.nextID
@@ -108,6 +109,24 @@ func (r *RingBuffer) Push(entry FlowEntry) {
 	if r.size < ringCapacity {
 		r.size++
 	}
+	return entry.ID
+}
+
+// Update changes the entry with the given ID in place and reports whether it
+// was found. It does nothing, and returns false, when the entry has already
+// been pushed out of the buffer (or the buffer was cleared).
+func (r *RingBuffer) Update(id uint64, fn func(*FlowEntry)) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := 0; i < r.size; i++ {
+		idx := (r.next - 1 - i + 2*ringCapacity) % ringCapacity
+		if r.slots[idx].ID == id {
+			fn(&r.slots[idx])
+			r.slots[idx].ID = id // fn cannot move an entry to another ID
+			return true
+		}
+	}
+	return false
 }
 
 func (r *RingBuffer) Len() int {
@@ -510,6 +529,7 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	}
 	if strings.Contains(in, "<") && gm&gateXML != 0 {
 		out = s.scrubXMLSecrets(out, &count)
+		out = s.scrubXMLTree(out, &count)
 	}
 	if preUserInfo {
 		out = s.reUserInfo.ReplaceAllStringFunc(out, func(m string) string {
@@ -595,6 +615,9 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 
 	if o.allowB64 && hasBase64Run(out) {
 		out = s.scrubBase64(out, &count)
+	}
+	if o.allowB64 && hasEncodedRun(out) {
+		out = s.scrubEncodedText(out, &count)
 	}
 
 	// Stage 3: identity matching against earlier redactions, then the
@@ -1096,6 +1119,8 @@ type App struct {
 	tunnels             atomic.Int64
 	tunnelIdle          time.Duration
 	allowUninspectable  bool // forward request bodies whose Content-Encoding cannot be decoded
+	maxBody             int  // -max-body: stored body size in bytes; 0 means the defaults
+	wsDeflate           bool // -ws-deflate: keep permessage-deflate and decode it for capture
 	barMu               sync.Mutex
 	stdoutMu            sync.Mutex
 }
@@ -1371,7 +1396,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nullwire-mcp: "+err.Error(), status)
 		return
 	}
-	reqCap := &capBuffer{max: maxReqCapture}
+	reqCap := &capBuffer{max: a.limits().reqCap}
 	var outBody io.Reader = http.NoBody
 	hasBody := r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0
 	if hasBody {
@@ -1405,8 +1430,11 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
 			// Extensions such as permessage-deflate compress the frames, which
 			// would make them unreadable. Dropping the offer is always legal:
-			// the server then simply sends uncompressed frames.
-			outReq.Header.Del("Sec-WebSocket-Extensions")
+			// the server then simply sends uncompressed frames. With
+			// -ws-deflate the offer is kept and the frames are decoded instead.
+			if !a.wsDeflate {
+				outReq.Header.Del("Sec-WebSocket-Extensions")
+			}
 		}
 	}
 	if _, ok := outReq.Header["User-Agent"]; !ok {
@@ -1439,7 +1467,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.handleUpgrade(w, resp, flow, isWS)
 		return
 	}
-	respCap := &capBuffer{max: maxRespCapture}
+	respCap := &capBuffer{max: a.limits().respCap}
 	dst := w.Header()
 	for k, vs := range copyHeaders(resp.Header) {
 		dst[k] = vs
@@ -1690,35 +1718,63 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 	var clientRWC io.ReadWriteCloser = client
 	var upstreamRWC = rwc
 	var wsUp, wsDown *wsCollector
+	liveID := uint64(0)
+	var liveStop chan struct{}
+	var liveDone chan struct{}
+	flow.status = http.StatusSwitchingProtocols
+	flow.respHeaders = resp.Header.Clone()
 	if isWS {
 		// Read-only taps: every byte is forwarded untouched and a copy is
 		// parsed for capture. client->server frames are what the client sends.
-		wsUp = newWSCollector(maxReqBody + scrubWindow)
-		wsDown = newWSCollector(maxRespBody + scrubWindow)
+		lim := a.limits()
+		wsUp = newWSCollector(lim.reqBody + scrubWindow)
+		wsDown = newWSCollector(lim.respBody + scrubWindow)
 		upParser := newWSParser(wsUp.add)
 		downParser := newWSParser(wsDown.add)
+		upParser.maxMsg = lim.respBody + scrubWindow
+		downParser.maxMsg = lim.respBody + scrubWindow
+		if a.wsDeflate {
+			if found, serverFresh, clientFresh := parseDeflateNegotiation(resp.Header.Values("Sec-WebSocket-Extensions")); found {
+				upParser.inflate = newWSInflater(!clientFresh, lim.respBody+scrubWindow)
+				downParser.inflate = newWSInflater(!serverFresh, lim.respBody+scrubWindow)
+			}
+		}
 		clientRWC = &tapRWC{rwc: client, onRead: upParser.Feed}
 		upstreamRWC = &tapRWC{rwc: rwc, onRead: downParser.Feed}
 		if len(pre) > 0 {
 			upParser.Feed(pre)
 		}
+		// The flow is visible as soon as the socket opens and is refreshed
+		// while it stays open; the final capture replaces it on close.
+		open := flow
+		open.latencyMs = 0
+		open.note = wsLiveNote(resp.Header.Get("Upgrade"), wsUp, wsDown)
+		if id, ok := a.pushLive(open); ok {
+			liveID = id
+			liveStop, liveDone = make(chan struct{}), make(chan struct{})
+			go a.wsLiveLoop(liveID, open, resp.Header.Get("Upgrade"), wsUp, wsDown, liveStop, liveDone)
+		}
 	}
 
 	sent, recv := splice(clientRWC, upstreamRWC, a.idle(), pre)
 
-	flow.status = http.StatusSwitchingProtocols
-	flow.respHeaders = resp.Header.Clone()
+	if liveStop != nil {
+		// Wait for the refresher to stop, so a late refresh cannot overwrite
+		// the final capture.
+		close(liveStop)
+		<-liveDone
+	}
 	flow.latencyMs = time.Since(flow.started).Milliseconds()
 	note := fmt.Sprintf("upgraded connection (%s): %d B client->upstream, %d B upstream->client", resp.Header.Get("Upgrade"), sent, recv)
 	if isWS {
 		flow.reqBody = wsUp.Bytes()
 		flow.respBody = wsDown.Bytes()
-		note += fmt.Sprintf("; WebSocket text messages are captured and scrubbed when the connection closes (client->server: %s; server->client: %s); live frames are forwarded unmodified", wsUp.Summary(), wsDown.Summary())
+		note += fmt.Sprintf("; WebSocket text messages are captured and scrubbed (refreshed live while open, final on close) (client->server: %s; server->client: %s); live frames are forwarded unmodified", wsUp.Summary(), wsDown.Summary())
 	} else {
 		note += "; frames not inspected or stored"
 	}
 	flow.note = note
-	go a.capture(flow)
+	go a.finishLive(liveID, flow)
 }
 
 func parseDNSServers(spec string) ([]string, error) {
@@ -1847,7 +1903,11 @@ func decodableEncoding(ce string) bool {
 	return false
 }
 
-func decodeBody(ce string, b []byte) (string, bool) {
+func decodeBody(ce string, b []byte) (string, bool) { return decodeBodyMax(ce, b, decodedLimit) }
+
+// decodeBodyMax is decodeBody with its own limit on how much text a gzip or
+// deflate body is expanded to (the guard against compression bombs).
+func decodeBodyMax(ce string, b []byte, limit int) (string, bool) {
 	var rd io.Reader
 	switch strings.ToLower(strings.TrimSpace(ce)) {
 	case "gzip", "x-gzip":
@@ -1865,23 +1925,25 @@ func decodeBody(ce string, b []byte) (string, bool) {
 	default:
 		return "", false
 	}
-	out, err := io.ReadAll(io.LimitReader(rd, decodedLimit))
+	out, err := io.ReadAll(io.LimitReader(rd, int64(limit)))
 	if len(out) == 0 && err != nil {
 		return "", false
 	}
 	text := string(out)
-	if err != nil || len(out) >= decodedLimit {
+	if err != nil || len(out) >= limit {
 		text += truncMarker
 	}
 	return text, true
 }
 
-func bodyText(h http.Header, b []byte) string {
+func bodyText(h http.Header, b []byte) string { return bodyTextMax(h, b, decodedLimit) }
+
+func bodyTextMax(h http.Header, b []byte, decoded int) string {
 	if len(b) == 0 {
 		return ""
 	}
 	if ce := strings.TrimSpace(h.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
-		if text, ok := decodeBody(ce, b); ok {
+		if text, ok := decodeBodyMax(ce, b, decoded); ok {
 			return text
 		}
 		return fmt.Sprintf("[encoded body omitted: Content-Encoding %s, %d bytes captured]", ce, len(b))
@@ -1898,11 +1960,21 @@ func truncate(s string, maxLen int) string {
 
 func (a *App) capture(f rawFlow) {
 	defer func() { _ = recover() }()
+	if e, ok := a.buildEntry(f); ok {
+		a.ring.Push(e)
+		a.Bar()
+	}
+}
+
+// buildEntry scrubs a flow and returns the entry to store. ok is false for a
+// flow that is ignored (-secrets-config ignore_url_substrings).
+func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 	for _, sub := range a.ignoreURLSubstrings {
 		if sub != "" && strings.Contains(f.url, sub) {
-			return
+			return FlowEntry{}, false
 		}
 	}
+	lim := a.limits()
 
 	total := 0
 	note := f.note
@@ -1912,12 +1984,12 @@ func (a *App) capture(f rawFlow) {
 	rh, n := a.scrub.ScrubHeaders(f.reqHeaders)
 	total += n
 
-	rawReqBody := bodyText(f.reqHeaders, f.reqBody)
+	rawReqBody := bodyTextMax(f.reqHeaders, f.reqBody, lim.decoded)
 	if ct := f.reqHeaders.Get("Content-Type"); strings.HasPrefix(strings.ToLower(strings.TrimSpace(ct)), "multipart/") &&
 		!strings.HasPrefix(rawReqBody, "[encoded body omitted") {
 		rawReqBody = a.scrubMultipart(ct, []byte(rawReqBody))
 	}
-	rawRespBody := bodyText(f.respHeaders, f.respBody)
+	rawRespBody := bodyTextMax(f.respHeaders, f.respBody, lim.decoded)
 	// Protobuf and gRPC bodies are binary: storing their bytes helps nobody and
 	// cannot be scrubbed, so only their size is recorded.
 	if len(f.reqBody) > 0 && isProtobufContentType(f.reqHeaders.Get("Content-Type")) {
@@ -1946,12 +2018,14 @@ func (a *App) capture(f rawFlow) {
 		note += " ⚠️ WARNING: Response body encoded (Brotli/Zstd), not inspected."
 	}
 
-	if len(f.reqBody) >= maxReqCapture || len(f.respBody) >= maxRespCapture {
+	if len(f.reqBody) >= lim.reqCap || len(f.respBody) >= lim.respCap {
 		note += " ⚠️ WARNING: Payload exceeded memory limits; truncated before full inspection."
 	}
 
-	rawReqBody = truncate(rawReqBody, maxReqBody+scrubWindow)
-	rawRespBody = truncate(rawRespBody, maxRespBody+scrubWindow)
+	// Scrub first, cut second: the extra scrubWindow lets a secret that
+	// straddles the stored limit be seen whole before the text is cut.
+	rawReqBody = truncate(rawReqBody, lim.reqBody+scrubWindow)
+	rawRespBody = truncate(rawRespBody, lim.respBody+scrubWindow)
 
 	rb, n := a.scrub.ScrubText(rawReqBody)
 	total += n
@@ -1960,13 +2034,12 @@ func (a *App) capture(f rawFlow) {
 	pb, n := a.scrub.ScrubText(rawRespBody)
 	total += n
 
-	a.ring.Push(FlowEntry{
+	return FlowEntry{
 		Timestamp: f.started.UTC().Format(time.RFC3339), Method: f.method, URL: u,
-		RequestHeaders: rh, RequestBody: truncate(rb, maxReqBody),
-		StatusCode: f.status, ResponseHeaders: ph, ResponseBody: truncate(pb, maxRespBody),
+		RequestHeaders: rh, RequestBody: truncate(rb, lim.reqBody),
+		StatusCode: f.status, ResponseHeaders: ph, ResponseBody: truncate(pb, lim.respBody),
 		LatencyMs: f.latencyMs, RedactionCount: total, Note: strings.TrimSpace(note),
-	})
-	a.Bar()
+	}, true
 }
 
 type rpcRequest struct {
@@ -2381,10 +2454,16 @@ func Main() {
 	secretsConfig := flag.String("secrets-config", "", "path to -secrets-config JSON")
 	scrubHeaders := flag.String("scrub-headers", "", "extra sensitive headers")
 	allowUninspectable := flag.Bool("allow-uninspectable", false, "forward request bodies whose Content-Encoding (br, zstd, ...) cannot be inspected; by default they are refused with 415")
+	maxBodySpec := flag.String("max-body", "", "stored body size per request/response, e.g. 1m (default 32 KiB request / 256 KiB response; at most 2m). Secrets are scrubbed before the cut")
+	wsDeflate := flag.Bool("ws-deflate", false, "keep WebSocket permessage-deflate and decode it for capture (default: drop the offer so frames stay readable)")
 	flag.Parse()
 
 	if *port < 0 || *port > 65535 {
 		fatalf("nullwire-mcp: -port must be between 0 and 65535")
+	}
+	maxBody, err := parseMaxBody(*maxBodySpec)
+	if err != nil {
+		fatalf("nullwire-mcp: %v", err)
 	}
 	cfg, err := loadSecretsConfig(*secretsConfig)
 	if err != nil {
@@ -2427,7 +2506,7 @@ func Main() {
 	}
 
 	app := &App{
-		ring: NewRingBuffer(), scrub: scrub, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable,
+		ring: NewRingBuffer(), scrub: scrub, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable, maxBody: maxBody, wsDeflate: *wsDeflate,
 		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 32, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true},
 	}
 	if *target != "" {
