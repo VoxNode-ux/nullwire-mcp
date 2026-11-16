@@ -48,10 +48,15 @@ jobs:
             if command -v sha256sum >/dev/null 2>&1; then sha256sum "$f"; else shasum -a 256 "$f"; fi
           done | tr -d '\r' | sed 's/^\([0-9a-f]*\) [ *]/\1  /' > sums.txt
           cat sums.txt
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      - name: Save the checksums and the Go version
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: sums-${{ matrix.os }}
-          path: out/sums.txt
+          path: |
+            out/sums.txt
+            out/go-version.txt
+          if-no-files-found: ignore
           retention-days: 7
 
   compare:
@@ -69,11 +74,22 @@ jobs:
           cd sums
           first=$(ls | head -n 1)
           status=0
+          : > ../compare-diff.txt
+          echo "Go toolchain per runner:"
+          for d in *; do echo "  $d: $(cat "$d/go-version.txt" 2>/dev/null || echo unknown)"; done
           for d in *; do
-            if ! diff -u "$first/sums.txt" "$d/sums.txt"; then
+            if ! diff -u "$first/sums.txt" "$d/sums.txt" | tee -a ../compare-diff.txt; then
               echo "::error::$d built different binaries than $first"
               status=1
             fi
           done
           [ "$status" = 0 ] && echo "All runners produced identical binaries." | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$status"
+      - name: Save the differences
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: reproducible-diff
+          path: compare-diff.txt
+          if-no-files-found: ignore
+          retention-days: 7
