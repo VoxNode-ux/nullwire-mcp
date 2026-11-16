@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Reports from real hardware are the most useful, especially ARMv7, RISC-V, Windows ARM64, FreeBSD and Android.
+        Reports from real hardware are the most useful, especially ARMv7, RISC-V, Windows ARM64, FreeBSD, OpenBSD, NetBSD and Android.
         Use fake secrets only.
   - type: input
     id: version
