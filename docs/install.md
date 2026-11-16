@@ -16,7 +16,7 @@ Nothing to download by hand: the launcher fetches and verifies the binary on fir
 </details>
 
 <details>
-<summary><b>macOS, Linux and Termux: install script</b></summary>
+<summary><b>macOS, Linux, BSD and Termux: install script</b></summary>
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/main/scripts/install.sh | sh -s -- --setup
