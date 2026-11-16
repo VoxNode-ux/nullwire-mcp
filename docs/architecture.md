@@ -68,6 +68,9 @@ go test -race ./...
 | `internal/app/inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
 | `internal/app/scrub_extra.go` | JSON array, XML, base64, hex, Base32 and Base58 redaction |
 | `internal/app/scrub_xml.go` | Nested XML, CDATA and escaped-XML redaction (`encoding/xml`) |
+| `internal/app/binary_json.go` | Shared core of the MessagePack and CBOR walkers: the JSON writer, depth and size limits, and the Content-Type entry point |
+| `internal/app/msgpack.go` | Read-only MessagePack walker: map keys and UTF-8 strings into JSON, `bin` and `ext` payloads left out |
+| `internal/app/cbor.go` | Read-only CBOR walker (RFC 8949): the same for CBOR, including indefinite lengths and tag 24 |
 | `internal/app/ws_live.go` | Live refresh of an open WebSocket's flow |
 | `internal/app/limits.go` | `-max-body` and the limits derived from it |
 | `internal/app/scrub_context.go` | Header, query and body contexts; the decode pass for URL-encoded and escaped secrets (`%XX`, `\"`, `\/`, `\uXXXX`) |
