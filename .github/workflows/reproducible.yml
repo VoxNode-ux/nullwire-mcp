@@ -27,18 +27,22 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
           cache: false
       - name: Build the same targets as release.yml
         shell: bash
         env:
           CGO_ENABLED: "0"
+          GOARM: "7"
         run: |
           set -euo pipefail
           mkdir -p out
           go version | tee out/go-version.txt
-          for t in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+          for t in linux/amd64 linux/arm64 linux/arm linux/riscv64 linux/386 \
+                   darwin/amd64 darwin/arm64 windows/amd64 windows/arm64 \
+                   freebsd/amd64 freebsd/arm64 openbsd/amd64 openbsd/arm64 \
+                   netbsd/amd64 netbsd/arm64; do
             os="${t%/*}"; arch="${t#*/}"
             ext=""; [ "$os" = windows ] && ext=".exe"
             GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o "out/nullwire-$os-$arch$ext" .

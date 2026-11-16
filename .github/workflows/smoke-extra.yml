@@ -16,7 +16,7 @@ jobs:
     name: ${{ matrix.label }}
     runs-on: ubuntu-24.04
     continue-on-error: true
-    timeout-minutes: 20
+    timeout-minutes: 45   # the arm64 BSD VMs run under QEMU and are slow
     strategy:
       fail-fast: false
       matrix:
@@ -24,6 +24,27 @@ jobs:
           - label: freebsd-amd64
             goos: freebsd
             goarch: amd64
+          - label: freebsd-arm64
+            goos: freebsd
+            goarch: arm64
+            vmarch: aarch64
+          - label: openbsd-amd64
+            goos: openbsd
+            goarch: amd64
+          - label: openbsd-arm64
+            goos: openbsd
+            goarch: arm64
+            vmarch: aarch64
+          - label: netbsd-amd64
+            goos: netbsd
+            goarch: amd64
+          - label: netbsd-arm64
+            goos: netbsd
+            goarch: arm64
+            vmarch: aarch64
+          - label: linux-386
+            goos: linux
+            goarch: "386"
           - label: linux-armv7
             goos: linux
             goarch: arm
@@ -37,7 +58,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
           cache: false
 
@@ -51,19 +72,58 @@ jobs:
         run: go build -trimpath -o nullwire-smoke.bin .
 
       - name: Run tests in a FreeBSD VM
-        if: matrix.label == 'freebsd-amd64'
+        if: startsWith(matrix.label, 'freebsd-')
         id: run-freebsd
         continue-on-error: true
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1
         with:
+          arch: ${{ matrix.vmarch }}
           usesh: true
           prepare: |
             pkg install -y curl python3
           run: |
             sh .github/scripts/smoke-test.sh ./nullwire-smoke.bin
 
+      # The two actions below are not pinned to a commit yet: run the "Pin helper"
+      # workflow, then replace each @v1 with the SHA it prints.
+      - name: Run tests in an OpenBSD VM
+        if: startsWith(matrix.label, 'openbsd-')
+        id: run-openbsd
+        continue-on-error: true
+        uses: vmactions/openbsd-vm@v1
+        with:
+          arch: ${{ matrix.vmarch }}
+          usesh: true
+          prepare: |
+            pkg_add -I python%3
+            for p in /usr/local/bin/python3.[0-9]*; do ln -sf "$p" /usr/local/bin/python3; break; done
+          run: |
+            sh .github/scripts/smoke-test.sh ./nullwire-smoke.bin
+
+      - name: Run tests in a NetBSD VM
+        if: startsWith(matrix.label, 'netbsd-')
+        id: run-netbsd
+        continue-on-error: true
+        uses: vmactions/netbsd-vm@v1
+        with:
+          arch: ${{ matrix.vmarch }}
+          usesh: true
+          prepare: |
+            pkgin -y install curl python312
+            ln -sf /usr/pkg/bin/python3.12 /usr/pkg/bin/python3
+          run: |
+            sh .github/scripts/smoke-test.sh ./nullwire-smoke.bin
+
+      - name: Run tests natively (Linux 386)
+        # A static 32-bit x86 binary runs on the 64-bit runner as it is.
+        if: matrix.label == 'linux-386'
+        id: run-386
+        continue-on-error: true
+        shell: bash
+        run: sh .github/scripts/smoke-test.sh ./nullwire-smoke.bin
+
       - name: Run tests under QEMU (Linux)
-        if: startsWith(matrix.label, 'linux-')
+        if: startsWith(matrix.label, 'linux-') && matrix.label != 'linux-386'
         id: run-linux
         continue-on-error: true
         uses: uraimo/run-on-arch-action@1e2c619f81e6d8609845ea1d2f443a778df1ac68 # v3
@@ -82,7 +142,7 @@ jobs:
         shell: bash
         run: |
           pick() { for v in "$@"; do if [ -n "$v" ] && [ "$v" != "skipped" ]; then echo "$v"; return; fi; done; echo "skipped"; }
-          RESULT=$(pick "${{ steps.run-freebsd.outcome }}" "${{ steps.run-linux.outcome }}")
+          RESULT=$(pick "${{ steps.run-freebsd.outcome }}" "${{ steps.run-openbsd.outcome }}" "${{ steps.run-netbsd.outcome }}" "${{ steps.run-386.outcome }}" "${{ steps.run-linux.outcome }}")
           {
             echo "label=${{ matrix.label }}"
             echo "goos=${{ matrix.goos }}"
@@ -123,7 +183,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
           cache: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
