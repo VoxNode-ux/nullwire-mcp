@@ -1,0 +1,7 @@
+# Check out every text file with LF on every OS. Without this, a Windows
+# checkout can differ from Linux and macOS and break the reproducible build.
+* text=auto eol=lf
+*.wasm binary
+*.zip binary
+*.png binary
+*.ico binary
