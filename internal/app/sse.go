@@ -170,7 +170,7 @@ func newSSEDecoder(enc string, col *sseCollector) io.WriteCloser {
 
 // streamSSE forwards an event stream to the client and captures it. The
 // caller has not written anything to w yet.
-func (a *App) streamSSE(w http.ResponseWriter, resp *http.Response, flow rawFlow, reqCap *capBuffer, start time.Time) {
+func (a *App) streamSSE(w http.ResponseWriter, r *http.Request, resp *http.Response, flow rawFlow, reqCap *capBuffer, start time.Time) {
 	dst := w.Header()
 	for k, vs := range copyHeaders(resp.Header) {
 		dst[k] = vs
@@ -227,6 +227,9 @@ func (a *App) streamSSE(w http.ResponseWriter, resp *http.Response, flow rawFlow
 			break
 		}
 	}
+	// An idle client that disconnects cancels the context and ends the Read
+	// before any Write fails.
+	clientGone = clientGone || r.Context().Err() != nil
 	if tap != nil {
 		_ = tap.Close() // waits for the decoder to drain
 	}
