@@ -326,13 +326,15 @@ func ScanFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, 
 	ipBefore := s.IPCount()
 	walkJSON(doc, "", func(jsonPath, value string) string {
 		scrubbed, n := s.ScrubText(value)
-		switch {
-		case n > 0 && scrubbed != value:
+		if n > 0 && scrubbed != value {
 			fmt.Fprintf(report, "   %-50s  →  %s\n", trimPath(jsonPath), scrubbed)
 			hits++
-		case value != "" && envSecretNames.MatchString(lastSegment(jsonPath)):
-			fmt.Fprintf(report, "   %-50s  →  (name looks secret; value hidden)\n", trimPath(jsonPath))
-			hits++
+		} else if value != "" {
+			// Scrub again with the key in front so the field-name rules (and the name check) apply.
+			if shown, _, found := scanKV(s, lastSegment(jsonPath), ": ", value); found {
+				fmt.Fprintf(report, "   %-50s  →  %s\n", trimPath(jsonPath), shown)
+				hits++
+			}
 		}
 		return value
 	})
