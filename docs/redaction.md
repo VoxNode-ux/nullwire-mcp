@@ -24,7 +24,7 @@ Known shapes and names. These rules are exact, so they run before any guesswork.
 |---|---|---|---|
 | 1 | **Private keys** | PEM blocks: RSA, EC, OpenSSH, encrypted, PGP; JSON-escaped ones; blocks cut off by a size limit | `-----BEGIN PRIVATE KEY-----…` |
 | 2 | **Secret fields** | JSON string values and **arrays**, and query parameters, for names like `password`, `api_key`, `access_token`, `secret`, `session_id` | `"password": ["a","b"]`, `?api_key=…` |
-| 3 | **XML elements** | Element text for secret-looking names, with namespaces and CDATA; the tags themselves stay intact | `<wsse:Password>…</wsse:Password>` |
+| 3 | **XML elements** | Element text for secret-looking names, with namespaces and CDATA; the tags themselves stay intact. A second pass reads the document with `encoding/xml` and also covers markup nested inside a secret element, CDATA blocks (scrubbed as documents of their own) and XML escaped as text (`&lt;Password&gt;…`). Metadata inside a secret element (`Type`, `Expires`, …) is kept. | `<wsse:Password>…</wsse:Password>`, `<Credentials><Value>…</Value></Credentials>` |
 | 4 | **URL credentials** | `user:password@host` in any URL or connection string, including a password that is URL-encoded (`p%40ss`) | `postgres://app:pw@db/prod` |
 | 5 | **Auth schemes** | `Bearer`, `Basic` and `Token` credentials. In a body, a short all-lowercase word after `Basic` or `Token` is read as ordinary English (`invalid token provided`); in a header or a query string the value is always a credential, so `Authorization: Token mysecretkey` is redacted. | `Authorization: Bearer …` |
 | 6 | **JWTs** | Three-part `eyJ…` tokens | |
@@ -32,7 +32,7 @@ Known shapes and names. These rules are exact, so they run before any guesswork.
 | 8 | **Secret-named fields** | `key: value` or `key=value` pairs where the *name* says secret and the value is 12 to 256 characters. A `;` ends the value (connection strings), and the rule also reads inside escaped JSON. Placeholders such as `${VAR}`, `{{var}}`, `%VAR%` and `******` are kept; a value that merely starts with `%` (`password=%mysecret1234`) is still redacted. | `x-custom-auth: …`, `session=…`, `{\"custom_key\":\"…\"}` |
 | 9 | **Your patterns** | Regexes from the [config file](cli.md#configuration) | |
 | 10 | **IP addresses** | IPv4 (strictly validated) and IPv6, except loopback and unspecified. A version number after a product name (`Chrome/120.0.6099.109`) is kept; an address in a URL path is redacted. | `203.0.113.9`, `/nodes/10.1.2.3/status` |
-| 11 | **Base64** | Base64 or URL-safe base64 whose *decoded* text contains a secret. Images and other binary data are left alone. | `eyJhcGlfa2V5…` |
+| 11 | **Base64, hex, Base32, Base58** | Runs in these encodings whose *decoded* text contains a secret. The decoded bytes must be strictly printable text, so images, hashes and random ids are left alone. Hex needs an even run of at least 24 digits, Base32 is upper case, Base58 uses the Bitcoin alphabet. Base24 is not handled. | `eyJhcGlfa2V5…` |
 
 ### Stage 3: Match and guess (layer 12)
 
