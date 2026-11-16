@@ -142,5 +142,3 @@ Built by [VoxNode-ux](https://github.com/VoxNode-ux) · Version 1.2.0 · License
 
 
 **If NullWire saved you from pasting a secret into a chat, a ⭐ helps others find it.**
-
-</div>
