@@ -57,14 +57,33 @@ func (s *Scrubber) scrubXMLSecrets(in string, count *int) string {
 		if g == nil {
 			return m
 		}
-		trimmed := strings.TrimSpace(g[2])
+		if xmlBenignLeaf(strings.ToLower(xmlOpenLocalName(g[1]))) {
+			return m
+		}
+		inner := g[2]
+		if strings.HasPrefix(inner, "<![CDATA[") {
+			inner = strings.TrimSuffix(strings.TrimPrefix(inner, "<![CDATA["), "]]>")
+		}
+		trimmed := strings.TrimSpace(inner)
 		if trimmed == "" || strings.HasPrefix(trimmed, "[REDACTED_") || isAllowMarkOnly(trimmed) || isPlaceholderValue(trimmed) {
 			return m
 		}
 		*count++
 		s.Tokens.Add(1)
-		return g[1] + s.tag("TOKEN", g[2]) + g[3]
+		return g[1] + s.tag("TOKEN", inner) + g[3]
 	})
+}
+
+// xmlOpenLocalName returns the local element name of an opening tag such as <wsse:Password Type="x">.
+func xmlOpenLocalName(tag string) string {
+	t := strings.TrimPrefix(tag, "<")
+	if i := strings.IndexAny(t, " \t\r\n>"); i >= 0 {
+		t = t[:i]
+	}
+	if i := strings.LastIndexByte(t, ':'); i >= 0 {
+		t = t[i+1:]
+	}
+	return t
 }
 
 // isBase64Like reports whether a run looks like base64 rather than a word or

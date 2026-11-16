@@ -62,7 +62,7 @@ type xmlEdit struct {
 }
 
 func (s *Scrubber) scrubXMLTree(in string, count *int) string {
-	if len(in) > xmlTreeMaxInput || strings.IndexByte(in, '<') < 0 {
+	if len(in) > xmlTreeMaxInput || (strings.IndexByte(in, '<') < 0 && !strings.Contains(in, "&lt;")) {
 		return in
 	}
 	dec := xml.NewDecoder(strings.NewReader(in))
@@ -116,7 +116,7 @@ loop:
 			if trimmed == "" || strings.HasPrefix(trimmed, "[REDACTED_") || isAllowMarkOnly(trimmed) || isPlaceholderValue(trimmed) {
 				continue
 			}
-			if n := len(stack); n > 0 && stack[n-1].inSecret && (!stack[n-1].underSecret || !xmlBenignLeaf(stack[n-1].name)) {
+			if n := len(stack); n > 0 && stack[n-1].inSecret && !xmlBenignLeaf(stack[n-1].name) {
 				*count++
 				s.Tokens.Add(1)
 				edits = append(edits, xmlEdit{start, end, s.tag("TOKEN", inner)})

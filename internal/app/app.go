@@ -366,7 +366,7 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		// The text of an XML element whose name suggests a secret. Only the opening "</" is part of the match, so the rest of the closing tag is
 		// left in place; a body cut off before the closing tag is redacted to the end of the text. RE2 has no backreferences, so the closing
 		// tag name is not compared with the opening one.
-		reXML: regexp.MustCompile(`(?is)(<(?:[A-Za-z0-9_.-]+:)?[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|apikey|api_key|api-key|authorization|credential|privatekey|private_key|accesskey|access_key|sessionid|session_id)[A-Za-z0-9_.-]*(?:\s[^<>]*)?>)(<!\[CDATA\[.*?\]\]>|[^<]+)(</|\z)`),
+		reXML: regexp.MustCompile(`(?is)(<(?:[A-Za-z0-9_.-]+:)?[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|apikey|api_key|api-key|authorization|credential|privatekey|private_key|accesskey|access_key|sessionid|session_id)[A-Za-z0-9_.-]*(?:\s(?:[^<>]*[^/<>])?)?>)(<!\[CDATA\[.*?\]\]>|[^<]+)(</|\z)`),
 		// "password": ["a", "b"]
 		reJSONSecretArr: regexp.MustCompile(`(?i)("(?:access_token|refresh_token|id_token|api_key|apikey|secret|client_secret|password|passwd|session_id|auth_token|key)"\s*:\s*\[)((?:\s*"(?:[^"\\]|\\.)*"\s*,?)+)(\s*\])`),
 	}, nil
@@ -527,9 +527,11 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 			return g[1] + s.tag("TOKEN", g[2])
 		})
 	}
-	if strings.Contains(in, "<") && gm&gateXML != 0 {
-		out = s.scrubXMLSecrets(out, &count)
+	if gm&gateXML != 0 && (strings.Contains(in, "<") || strings.Contains(in, "&lt;")) {
+		// Tree pass first: it handles CDATA, nesting, benign leaves and entity-escaped markup.
+		// The regexp then only mops up what the tree could not follow (e.g. malformed documents).
 		out = s.scrubXMLTree(out, &count)
+		out = s.scrubXMLSecrets(out, &count)
 	}
 	if preUserInfo {
 		out = s.reUserInfo.ReplaceAllStringFunc(out, func(m string) string {
@@ -705,6 +707,11 @@ var nonSecretFields = map[string]bool{
 	"password_policy": true, "password-policy": true, "passwordpolicy": true,
 	"auth_method": true, "auth-method": true, "authmethod": true,
 	"authorizer": true,
+	"routing_key": true, "routing-key": true, "routingkey": true,
+	"object_key": true, "object-key": true, "objectkey": true,
+	"s3_key": true, "s3-key": true, "s3key": true,
+	"shard_key": true, "shard-key": true, "shardkey": true,
+	"project_key": true, "project-key": true, "projectkey": true,
 }
 
 func secretishKey(key string) bool {
@@ -940,6 +947,23 @@ func shannonEntropyBits(s string) float64 {
 	return h
 }
 
+// isHexUUID reports whether s is a canonical 8-4-4-4-12 UUID made only of hex digits.
+func isHexUUID(s string) bool {
+	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			continue
+		}
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 // looksLikeTokenMax is looksLikeToken with a limit on the run length.
 func looksLikeTokenMax(s string, maxLen int) bool {
 	n := len(s)
@@ -947,7 +971,7 @@ func looksLikeTokenMax(s string, maxLen int) bool {
 		return false
 	}
 
-	if n == 36 && s[8] == '-' && s[13] == '-' && s[18] == '-' && s[23] == '-' {
+	if isHexUUID(s) {
 		return false
 	}
 
@@ -1143,6 +1167,16 @@ func (s *Scrubber) ScrubHeaders(h http.Header) (map[string]string, int) {
 				out[name] = v
 				count += n
 			default:
+				// Custom Authorization schemes ("ApiKey secret"): keep the scheme, tag only the credential,
+				// so the taint ring stores the bare secret and not "scheme secret".
+				if lname == "authorization" || lname == "proxy-authorization" {
+					if i := strings.IndexByte(joined, ' '); i > 0 && strings.TrimSpace(joined[i+1:]) != "" {
+						out[name] = joined[:i+1] + s.tag("TOKEN", strings.TrimSpace(joined[i+1:]))
+						s.Tokens.Add(1)
+						count++
+						continue
+					}
+				}
 				out[name] = s.tag("TOKEN", joined)
 				s.Tokens.Add(1)
 				count++
