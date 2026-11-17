@@ -95,30 +95,6 @@ func (t *taintRing) add(raw string) {
 	t.mu.Unlock()
 }
 
-// contains reports whether run, or any taintWin-byte window of it, is in the set.
-func (t *taintRing) contains(run string) bool {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	if shannonEntropyBits(run) < taintMinEntropy {
-		return false
-	}
-	if _, ok := t.set[siphash24(t.k0, t.k1, run)]; ok {
-		return true
-	}
-	if len(run) < taintWin || len(run) > taintMaxScan {
-		return false
-	}
-	for off := 0; off+taintWin <= len(run); off++ {
-		if shannonEntropyBits(run[off:off+taintWin]) < taintMinEntropy {
-			continue
-		}
-		if _, ok := t.set[siphash24(t.k0, t.k1, run[off:off+taintWin])]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 // windowHit returns the offset of the first taintWin-byte window of run that is stored.
 func (t *taintRing) windowHit(run string) (int, bool) {
 	if len(run) < taintWin || len(run) > taintMaxScan {

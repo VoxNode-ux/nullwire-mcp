@@ -858,7 +858,7 @@ func strictFieldRanges(in string, maxVal int) [][2]int {
 		if strings.HasPrefix(val, "[REDACTED_") || hasAllowMark(val) || isPlaceholderValue(val) || strings.ContainsAny(val, "\\:") {
 			continue
 		}
-		if strings.ContainsAny(val, "/.") && !strictSlashDotOK(val) && !(isSignatureKey(kb) && signatureValueOK(val)) {
+		if strings.ContainsAny(val, "/.") && !strictSlashDotOK(val) && (!isSignatureKey(kb) || !signatureValueOK(val)) {
 			continue
 		}
 		out = append(out, [2]int{start, end})
@@ -1018,7 +1018,7 @@ func isHexUUID(s string) bool {
 			continue
 		}
 		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
 			return false
 		}
 	}
