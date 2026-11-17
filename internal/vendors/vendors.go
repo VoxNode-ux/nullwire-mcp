@@ -32,7 +32,6 @@ var DefaultVendorPrefixes = []string{
 	"cfut_", "cfat_", "SSWS ", "essu_",
 	"napi_",   // Neon API key
 	"FlyV1 ",  // Fly.io macaroon token
-	"v1.0-",   // Cloudflare Origin CA key
 	"AccountKey=", "SharedAccessKey=",
 
 	// Source hosting, CI and package registries
