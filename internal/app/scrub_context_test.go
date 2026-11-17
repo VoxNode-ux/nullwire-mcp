@@ -2,6 +2,7 @@ package app
 
 import (
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -251,5 +252,214 @@ func TestScrubURLTreatsPathAndQueryApart(t *testing.T) {
 	sk := "https://example.com/pay/sk_live_" + ctxTestBody
 	if out, n := s.ScrubURL(sk); n < 1 || strings.Contains(out, ctxTestBody[8:]) {
 		t.Errorf("a vendor key in the path should be redacted: %q (%d)", out, n)
+	}
+}
+
+// unwrapEscapes decodes one level of escaping and keeps a map back to the
+// original text. These cases pin down both, including the edges.
+func TestUnwrapEscapesEdges(t *testing.T) {
+	cases := []struct {
+		name, in, dec string
+		idx           []int32
+	}{
+		{"nothing to decode", "ab", "ab", []int32{0, 1, 2}},
+		{"escaped backslash before a closing quote", `a\\"b`, `a"b`, []int32{0, 3, 4, 5}},
+		{"escaped backslash before an escaped quote", `x\\\"y`, `x"y`, []int32{0, 3, 5, 6}},
+		{"escaped backslash before a percent-encoded quote", `x\\%22`, `x"`, []int32{0, 3, 6}},
+		{"escaped backslash elsewhere is one backslash", `a\\b`, `a\b`, []int32{0, 1, 3, 4}},
+		{"escaped slash", `a\/b`, `a/b`, []int32{0, 1, 3, 4}},
+		{"ASCII unicode escape", `x\u003dy`, `x=y`, []int32{0, 1, 7, 8}},
+		{"non-ASCII unicode escape is left alone", `a\u00e9b`, `a\u00e9b`, []int32{0, 1, 2, 3, 4, 5, 6, 7, 8}},
+		{"invalid unicode escape is left alone", `\uZZZZ`, `\uZZZZ`, []int32{0, 1, 2, 3, 4, 5, 6}},
+		{"short unicode escape is left alone", `\u00`, `\u00`, []int32{0, 1, 2, 3, 4}},
+		{"percent escape at the very end", "%41", "A", []int32{0, 3}},
+		{"two percent escapes", "%41%7a", "Az", []int32{0, 3, 6}},
+		{"truncated percent escape at the end", "a%2", "a%2", []int32{0, 1, 2, 3}},
+		{"percent without hex digits", "%zz", "%zz", []int32{0, 1, 2, 3}},
+		{"trailing backslash", `a\`, `a\`, []int32{0, 1, 2}},
+	}
+	for _, c := range cases {
+		dec, idx := unwrapEscapes(c.in)
+		if dec != c.dec {
+			t.Errorf("%s: dec = %q, want %q", c.name, dec, c.dec)
+		}
+		if !reflect.DeepEqual(idx, c.idx) {
+			t.Errorf("%s: idx = %v, want %v", c.name, idx, c.idx)
+		}
+		if len(idx) != len(dec)+1 {
+			t.Errorf("%s: idx must have len(dec)+1 entries, got %d for %d bytes", c.name, len(idx), len(dec))
+		}
+	}
+	for in, want := range map[string]bool{`a\u003d`: true, `a\u00e9`: false, `\uZZZZ`: false, `\u00`: false} {
+		if got := needsUnwrap(in); got != want {
+			t.Errorf("needsUnwrap(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// Secrets hidden by URL-encoding are found by the rules that run on the
+// decoded copy (cloud keys, card numbers, vendor keys, secret fields and
+// arrays, the user's own patterns), and the matching stretch of the ORIGINAL
+// text is replaced.
+func TestUnwrappedExtraSpansFindEncodedSecrets(t *testing.T) {
+	s := newCtxScrubber(t)
+	awsEnc := strings.ReplaceAll(awsExampleSecret, "/", "%2F")
+	azure := "abc8Q~" + strings.Repeat("Zq9", 11)
+	cases := []struct {
+		name, in string
+		gone     []string
+		prefix   string
+		suffix   string
+		tag      string
+	}{
+		{"AWS secret key on its own", "used " + awsEnc + " here", []string{"EXAMPLEKEY", "bPxRfi"}, "used ", " here", ""},
+		{"AWS secret key under its name", "aws_secret_access_key=" + awsEnc, []string{"EXAMPLEKEY", "bPxRfi"}, "aws_secret_access_key=", "", ""},
+		{"password in a connection string", "Server=db;Password=Sup3rS3cret%21;Port=1", []string{"Sup3rS3cret"}, "Server=db;Password=", ";Port=1", ""},
+		{"Azure AD client secret", "v%3D" + azure, []string{"Zq9Zq9Zq9"}, "v%3D", "", ""},
+		{"password array", "%7B%22password%22%3A%5B%22Sup3rS3cretValue%22%2C%22second-Secret-9%22%5D%7D",
+			[]string{"Sup3rS3cretValue", "second-Secret-9"}, "%7B%22password%22%3A%5B%22", "%22%5D%7D", ""},
+		{"card number", "card%3D4111%2D1111%2D1111%2D1111 ok", []string{"4111"}, "card%3D", " ok", "[REDACTED_PAN#"},
+		{"vendor key", "ref%3D%73k_live_" + ctxTestBody, []string{ctxTestBody[8:]}, "ref%3D", "", ""},
+		{"secret-named field", "custom_secret%3Dabcd1234efgh5678", []string{"abcd1234efgh5678"}, "custom_secret%3D", "", ""},
+	}
+	for _, c := range cases {
+		out, n := s.scrubUnwrapped(c.in, ContextBody)
+		if n < 1 {
+			t.Errorf("%s: nothing redacted: %q", c.name, out)
+			continue
+		}
+		for _, g := range c.gone {
+			if strings.Contains(out, g) {
+				t.Errorf("%s: %q is still in the output: %q", c.name, g, out)
+			}
+		}
+		if !strings.Contains(out, "[REDACTED_") || !strings.HasPrefix(out, c.prefix) || !strings.HasSuffix(out, c.suffix) {
+			t.Errorf("%s: the text around the secret must be kept as written: %q", c.name, out)
+		}
+		if c.tag != "" && !strings.Contains(out, c.tag) {
+			t.Errorf("%s: want a %s tag: %q", c.name, c.tag, out)
+		}
+	}
+
+	// The same secrets go through the full pipeline too.
+	for _, c := range cases {
+		out, n := s.ScrubText(c.in)
+		if n < 1 {
+			t.Errorf("%s (ScrubText): nothing redacted: %q", c.name, out)
+		}
+		for _, g := range c.gone {
+			if strings.Contains(out, g) {
+				t.Errorf("%s (ScrubText): %q is still in the output: %q", c.name, g, out)
+			}
+		}
+	}
+
+	// The user's own patterns run on the decoded text as well.
+	custom, err := NewScrubberWithConfig(&SecretsConfig{ExtraRegexPatterns: []ExtraPattern{{Name: "internal", Pattern: `INTERNAL-[0-9]{6}`}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, n := custom.scrubUnwrapped("ref%3A INTERNAL-123456 ok", ContextBody)
+	if n != 1 || strings.Contains(out, "123456") || !strings.HasPrefix(out, "ref%3A ") || !strings.HasSuffix(out, " ok") {
+		t.Errorf("custom pattern: %q (%d)", out, n)
+	}
+
+	// The raw and the encoded form of one card number get the same tag.
+	plain, _ := s.ScrubText("card=4111-1111-1111-1111 ok")
+	enc, _ := s.ScrubText("card%3D4111%2D1111%2D1111%2D1111 ok")
+	if tagOf := func(x string) string { return reTag.FindString(x) }; tagOf(plain) == "" || tagOf(plain) != tagOf(enc) {
+		t.Errorf("same card, different tags:\n plain   %q\n encoded %q", plain, enc)
+	}
+}
+
+// A placeholder such as %DB_PASSWORD% reads as a percent-escape ("%DB"), so it
+// reaches the unwrap pass, where decoding wrecks it. The placeholder is tested
+// as it was written, so it is still left alone, in every rule that has a guard.
+func TestUnwrapKeepsPercentPlaceholders(t *testing.T) {
+	s := newCtxScrubber(t)
+	for _, in := range []string{
+		"password=%DB_PASSWORD%",
+		"Server=db;Password=%DB_PASSWORD%;Port=1",
+		`{"password":"%DB_PASSWORD%"}`,
+		"https://user:%DB_PASSWORD%@host/x",
+		"client_secret=%DB_PASSWORD%",
+	} {
+		if out, n := s.scrubUnwrapped(in, ContextBody); out != in || n != 0 {
+			t.Errorf("scrubUnwrapped(%q) = %q (%d), want it unchanged", in, out, n)
+		}
+	}
+	const placeholder = "password=%DB_PASSWORD%"
+	if out, n := s.ScrubTextIn(placeholder, ContextBody); out != placeholder || n != 0 {
+		t.Errorf("ScrubTextIn(%q) = %q (%d), want it unchanged", placeholder, out, n)
+	}
+	// A real value in the same place is still redacted.
+	for _, in := range []string{"Server=db;Password=Sup3rS3cret%21;Port=1", "password=%DB_real_Sup3rS3cret"} {
+		if out, n := s.ScrubTextIn(in, ContextBody); n < 1 || strings.Contains(out, "Sup3rS3cret") {
+			t.Errorf("ScrubTextIn(%q) = %q (%d), want the secret redacted", in, out, n)
+		}
+	}
+}
+
+// "Bearer" is always a credential, even when English follows it. "Basic" and
+// "Token" followed by a lower-case word are prose in a body, but in a header,
+// a query or a path the value after the scheme is a credential.
+func TestProseAfterScheme(t *testing.T) {
+	for _, c := range []struct {
+		scheme, tok string
+		ctx         ScrubContext
+		want        bool
+	}{
+		{"Bearer", "authentication", ContextBody, false},
+		{"bearer", "authentication", ContextBody, false},
+		{"BEARER", "required", ContextHeader, false},
+		{"Basic", "authentication", ContextBody, true},
+		{"Token", "provided", ContextBody, true},
+		{"Token", "", ContextBody, true},
+		{"Basic", "authentication", ContextHeader, false},
+		{"Token", "provided", ContextQuery, false},
+		{"Token", "provided", ContextPath, false},
+		{"Basic", "Authentication", ContextBody, false},
+		{"Token", "provided1", ContextBody, false},
+		{"Token", "not-prose", ContextBody, false},
+	} {
+		if got := proseAfterScheme(c.scheme, c.tok, c.ctx); got != c.want {
+			t.Errorf("proseAfterScheme(%q, %q, %d) = %v, want %v", c.scheme, c.tok, c.ctx, got, c.want)
+		}
+	}
+}
+
+func TestBearerFollowedByProseInEachContext(t *testing.T) {
+	s := newCtxScrubber(t)
+
+	// Bearer is a credential in a body and in a header alike.
+	for _, ctx := range []ScrubContext{ContextBody, ContextHeader} {
+		out, n := s.ScrubTextIn("Bearer authentication required", ctx)
+		if n < 1 || strings.Contains(out, "authentication") {
+			t.Errorf("context %d: Bearer followed by prose must still be redacted: %q (%d)", ctx, out, n)
+		}
+	}
+
+	// Basic and Token are prose in a body but credentials in a header.
+	for _, in := range []string{"Basic authentication required", "Invalid token provided", "Token expired yesterday"} {
+		if out, n := s.ScrubTextIn(in, ContextBody); out != in || n != 0 {
+			t.Errorf("body %q must be left alone: %q (%d)", in, out, n)
+		}
+	}
+	if out, n := s.ScrubTextIn("Basic authentication required", ContextHeader); n < 1 || strings.Contains(out, "authentication") {
+		t.Errorf("header: the value after Basic is a credential: %q (%d)", out, n)
+	}
+
+	// The same holds for text that is only visible after URL-decoding.
+	if out, n := s.scrubUnwrapped("Basic%20authentication required", ContextBody); out != "Basic%20authentication required" || n != 0 {
+		t.Errorf("decoded body prose: %q (%d)", out, n)
+	}
+	if out, n := s.scrubUnwrapped("Basic%20authentication required", ContextHeader); n < 1 || strings.Contains(out, "authentication") ||
+		!strings.HasPrefix(out, "Basic%20") || !strings.HasSuffix(out, " required") {
+		t.Errorf("decoded header value: %q (%d)", out, n)
+	}
+	for _, ctx := range []ScrubContext{ContextBody, ContextHeader} {
+		if out, n := s.scrubUnwrapped("Bearer%20authentication required", ctx); n < 1 || strings.Contains(out, "authentication") {
+			t.Errorf("context %d: decoded Bearer prose must be redacted: %q (%d)", ctx, out, n)
+		}
 	}
 }
