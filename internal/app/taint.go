@@ -62,9 +62,12 @@ func (t *taintRing) insertLocked(h uint64) {
 // taintSubMin characters or more, so short tokens are never cut into pieces
 // that could match ordinary text.
 func (t *taintRing) add(raw string) {
-	if len(raw) < taintMinLen || shannonEntropyBits(raw) < taintMinEntropy {
+	if t == nil || len(raw) < taintMinLen || shannonEntropyBits(raw) < taintMinEntropy {
 		return
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	var hs [1 + taintMaxSub]uint64
 	nh := 0
 	hs[nh] = siphash24(t.k0, t.k1, raw)
@@ -88,11 +91,9 @@ func (t *taintRing) add(raw string) {
 		store(len(raw) - taintWin)
 		store(len(raw) - taintWin - taintStride)
 	}
-	t.mu.Lock()
 	for i := 0; i < nh; i++ {
 		t.insertLocked(hs[i])
 	}
-	t.mu.Unlock()
 }
 
 // windowHit returns the offset of the first taintWin-byte window of run that is stored.
