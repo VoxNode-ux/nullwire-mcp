@@ -19,9 +19,11 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"go/format"
+	"io"
 	"math"
 	"os"
 	"sort"
@@ -130,25 +132,35 @@ func render(es []entry) ([]byte, error) {
 	b.WriteString("// means the borderline trigram escalation is off.\n")
 	b.WriteString("var trigramTable = []uint32{\n")
 	for _, e := range es {
-		fmt.Fprintf(&b, "\t0x%08x,\n", pack(e.key, e.score))
+		_, _ = fmt.Fprintf(&b, "\t0x%08x,\n", pack(e.key, e.score))
 	}
 	b.WriteString("}\n")
 	return format.Source([]byte(b.String()))
 }
 
-func fail(msg string, err error) {
-	fmt.Fprintln(os.Stderr, "trigramgen:", msg, err)
-	os.Exit(1)
+func main() {
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		_, _ = fmt.Fprintln(os.Stderr, "trigramgen:", err)
+		os.Exit(1)
+	}
 }
 
-func main() {
-	benignArg := flag.String("benign", "", "comma-separated files or directories of real benign text (code, docs)")
-	secretsFile := flag.String("secrets", "", "optional file with one real secret per line")
-	synth := flag.Int("synthetic", 0, "number of synthetic secrets (hex, base62, base64url; no eyJ) to add")
-	synthBenign := flag.Int("synthetic-benign", 0, "number of synthetic benign identifiers to add")
-	holdoutMod := flag.Int("holdout-mod", 0, "if > 0, files whose path hash % N == 0 are kept out of training (they are the holdout)")
-	out := flag.String("out", "trigram_trained.go", "output file")
-	flag.Parse()
+// run is main without the process: it parses args, trains and writes the table.
+func run(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("trigramgen", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	benignArg := fs.String("benign", "", "comma-separated files or directories of real benign text (code, docs)")
+	secretsFile := fs.String("secrets", "", "optional file with one real secret per line")
+	synth := fs.Int("synthetic", 0, "number of synthetic secrets (hex, base62, base64url; no eyJ) to add")
+	synthBenign := fs.Int("synthetic-benign", 0, "number of synthetic benign identifiers to add")
+	holdoutMod := fs.Int("holdout-mod", 0, "if > 0, files whose path hash % N == 0 are kept out of training (they are the holdout)")
+	out := fs.String("out", "trigram_trained.go", "output file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	benign, secret := newCounts(), newCounts()
 	nb, ns := 0, 0
@@ -157,7 +169,7 @@ func main() {
 			continue
 		}
 		if err := corpus.Walk(root, *holdoutMod, false, func(text string) { nb += addText(benign, text) }); err != nil {
-			fail("walking -benign:", err)
+			return fmt.Errorf("walking -benign: %w", err)
 		}
 	}
 	for _, s := range corpus.Benign(*synthBenign, corpus.SeedTrain) {
@@ -165,9 +177,9 @@ func main() {
 		nb++
 	}
 	if *secretsFile != "" {
-		f, err := os.Open(*secretsFile)
+		f, err := os.Open(*secretsFile) // #nosec G304 -- offline developer tool: the path is the -secrets flag
 		if err != nil {
-			fail("opening -secrets:", err)
+			return fmt.Errorf("opening -secrets: %w", err)
 		}
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 1<<20), 1<<20)
@@ -177,10 +189,11 @@ func main() {
 				ns++
 			}
 		}
-		if err := sc.Err(); err != nil {
-			fail("reading -secrets:", err)
-		}
+		err = sc.Err()
 		_ = f.Close()
+		if err != nil {
+			return fmt.Errorf("reading -secrets: %w", err)
+		}
 	}
 	for _, s := range corpus.Secrets(*synth, corpus.SeedTrain) {
 		addToken(secret, s)
@@ -189,20 +202,19 @@ func main() {
 
 	es := train(benign, secret)
 	if len(es) == 0 {
-		fmt.Fprintf(os.Stderr, "trigramgen: no table (benign tokens %d, secret tokens %d); need both and enough evidence\n", nb, ns)
-		os.Exit(1)
+		return fmt.Errorf("no table (benign tokens %d, secret tokens %d); need both and enough evidence", nb, ns)
 	}
 	if size := len(es) * 4; len(es) > maxEntries || size > maxBytes {
-		fmt.Fprintf(os.Stderr, "trigramgen: table too large: %d entries, %d bytes\n", len(es), size)
-		os.Exit(1)
+		return fmt.Errorf("table too large: %d entries, %d bytes", len(es), size)
 	}
 	src, err := render(es)
 	if err != nil {
-		fail("rendering:", err)
+		return fmt.Errorf("rendering: %w", err)
 	}
 	if err := os.WriteFile(*out, src, 0o600); err != nil {
-		fail("writing:", err)
+		return fmt.Errorf("writing: %w", err)
 	}
-	fmt.Printf("trigramgen: %d entries, %d bytes (%.1f KiB, budget %d entries / %d KiB) from %d benign and %d secret tokens -> %s\n",
+	_, _ = fmt.Fprintf(stdout, "trigramgen: %d entries, %d bytes (%.1f KiB, budget %d entries / %d KiB) from %d benign and %d secret tokens -> %s\n",
 		len(es), len(es)*4, float64(len(es)*4)/1024, maxEntries, maxBytes>>10, nb, ns, *out)
+	return nil
 }
