@@ -53,7 +53,7 @@ func validHostName(h string) bool {
 	}
 	for i := 0; i < len(h); i++ {
 		c := h[i]
-		if !(c == '.' || c == '-' || c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')) {
+		if c != '.' && c != '-' && c != '_' && (c < '0' || c > '9') && (c < 'a' || c > 'z') {
 			return false
 		}
 	}

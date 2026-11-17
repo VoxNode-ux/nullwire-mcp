@@ -345,7 +345,7 @@ func ibanSpans(in string) []secretSpan {
 				}
 			}
 		}
-		if bestEnd >= 0 && (bestEnd == len(in) || !(isAlnumByte(in[bestEnd]) || in[bestEnd] == '-')) {
+		if bestEnd >= 0 && (bestEnd == len(in) || (!isAlnumByte(in[bestEnd]) && in[bestEnd] != '-')) {
 			spans = append(spans, secretSpan{start: i, end: bestEnd})
 			i = bestEnd
 			continue
