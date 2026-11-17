@@ -127,10 +127,14 @@ func TestCloudflareOriginCAKeyHexValidated(t *testing.T) {
 	if n < 1 || strings.Contains(out, key) {
 		t.Errorf("Origin CA key not redacted: %q (%d)", out, n)
 	}
+	badHex := "v1.0-" + strings.Repeat("a1b2c3d4", 3) + "-short"
+	if reCloudflareOriginCA.MatchString(badHex) {
+		t.Errorf("reCloudflareOriginCA must reject non-hex tail %q", badHex)
+	}
 	for _, in := range []string{
 		"download v1.0-linux-amd64-musl today",
 		"tag v1.0-release-candidate-2 is out",
-		"v1.0-" + strings.Repeat("a1b2c3d4", 3) + "-short",
+		"v1.0-deadbeefdeadbeef-release",
 	} {
 		if out, n := s.ScrubText(in); n != 0 || out != in {
 			t.Errorf("release tag %q was changed: %q (%d)", in, out, n)
