@@ -52,6 +52,10 @@ var (
 
 	// Azure AD (Entra ID) client secrets: 3 characters, "8Q~", then 30+ more.
 	reAzureADSecret = regexp.MustCompile(`[A-Za-z0-9_.~-]{3}8Q~[A-Za-z0-9_.~-]{30,}`)
+
+	// Cloudflare Origin CA key: "v1.0-", hex, "-", more hex. A bare "v1.0-"
+	// vendor prefix would also match release tags like v1.0-linux-amd64-musl.
+	reCloudflareOriginCA = regexp.MustCompile(`\bv1\.0-[0-9a-fA-F]{16,}-[0-9a-fA-F]{32,}\b`)
 )
 
 // scrubCloudSecrets runs the cloud rules. gm is the scrubGate result for the
@@ -85,6 +89,14 @@ func (s *Scrubber) scrubCloudSecrets(in string, gm uint32) (string, int) {
 
 	if strings.Contains(out, "8Q~") {
 		out = reAzureADSecret.ReplaceAllStringFunc(out, func(m string) string {
+			count++
+			s.Tokens.Add(1)
+			return s.tag("KEY", m)
+		})
+	}
+
+	if strings.Contains(out, "v1.0-") {
+		out = reCloudflareOriginCA.ReplaceAllStringFunc(out, func(m string) string {
 			count++
 			s.Tokens.Add(1)
 			return s.tag("KEY", m)

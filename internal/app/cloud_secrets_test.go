@@ -119,3 +119,38 @@ func TestAWSSecretAfterEqualsIsCaught(t *testing.T) {
 		t.Errorf("a run glued to an identifier with _ must still be rejected")
 	}
 }
+
+func TestCloudflareOriginCAKeyHexValidated(t *testing.T) {
+	s := newCloudScrubber(t)
+	key := "v1.0-" + strings.Repeat("a1b2c3d4", 3) + "-" + strings.Repeat("0f1e2d3c", 8)
+	out, n := s.ScrubText("origin ca key " + key + " here")
+	if n < 1 || strings.Contains(out, key) {
+		t.Errorf("Origin CA key not redacted: %q (%d)", out, n)
+	}
+	for _, in := range []string{
+		"download v1.0-linux-amd64-musl today",
+		"tag v1.0-release-candidate-2 is out",
+		"v1.0-" + strings.Repeat("a1b2c3d4", 3) + "-short",
+	} {
+		if out, n := s.ScrubText(in); n != 0 || out != in {
+			t.Errorf("release tag %q was changed: %q (%d)", in, out, n)
+		}
+	}
+}
+
+func TestStrictSlashDotMixedCasePaths(t *testing.T) {
+	for _, v := range []string{"Users/Alice/Desktop/file1.txt", "Config/Prod2/App.json", "src/Main/util.go"} {
+		if strictSlashDotOK(v) {
+			t.Errorf("path %q should not count as a secret candidate", v)
+		}
+	}
+	for _, v := range []string{
+		"Zq8Xv3LmP0aTr9Yk/B2nWd6HsJ4cFe7Gu",
+		"Zq8Xv3LmP0aTr9Yk/B2nWd6HsJ4cFe7Gu+x==",
+		"9fK2xQ7vLm3Zt8Yb1nPd/5RcJ0wHs4Ae6Qw",
+	} {
+		if !strictSlashDotOK(v) {
+			t.Errorf("key-like value %q should stay a secret candidate", v)
+		}
+	}
+}

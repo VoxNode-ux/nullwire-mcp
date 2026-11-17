@@ -875,7 +875,7 @@ func strictFieldRanges(in string, maxVal int) [][2]int {
 var (
 	reStrictDate    = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(?:[Tt][0-9:.+Zz-]*)?$`)
 	reStrictVersion = regexp.MustCompile(`^[vV]?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?$`)
-	reStrictPath    = regexp.MustCompile(`^[a-z0-9._-]+(?:/[a-z0-9._-]+)+/?$`)
+	reStrictPath    = regexp.MustCompile(`^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+/?$`)
 )
 
 // isSignatureKey reports whether k names a signature field: sig, signature, x-amz-signature.
@@ -914,6 +914,26 @@ func isHexByte(c byte) bool {
 	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
+// isPlainPath reports whether v is a slash-separated path such as
+// "Users/Alice/Desktop/file1.txt" or "Config/Prod2/App.json". Base64 keys with
+// "+" or "=" never match reStrictPath; a base64 key whose only symbol is "/"
+// does, so with upper case present every segment must also be word-like: at
+// most one capital, and only as the first letter. Random base64 pieces such as
+// "Zq8Xv3LmP0aTr9Yk" have several and stay candidates for redaction.
+func isPlainPath(v string) bool {
+	if strings.ContainsAny(v, "+=") || !reStrictPath.MatchString(v) {
+		return false
+	}
+	for _, seg := range strings.Split(v, "/") {
+		for i := 1; i < len(seg); i++ {
+			if seg[i] >= 'A' && seg[i] <= 'Z' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // strictSlashDotOK reports whether a value that holds "/" or "." may still be
 // a secret. Base64 signing and encryption keys use both characters; URLs,
 // paths, ISO dates, versions and plain dotted names do not count.
@@ -921,7 +941,7 @@ func strictSlashDotOK(v string) bool {
 	if strings.Contains(v, "://") || strings.HasPrefix(v, "//") || strings.HasPrefix(v, "/") || strings.HasPrefix(v, "~/") || strings.HasPrefix(v, "./") || strings.HasPrefix(v, "../") {
 		return false
 	}
-	if reStrictDate.MatchString(v) || reStrictVersion.MatchString(v) || reStrictPath.MatchString(v) {
+	if reStrictDate.MatchString(v) || reStrictVersion.MatchString(v) || isPlainPath(v) {
 		return false
 	}
 	var lower, upper, digit bool

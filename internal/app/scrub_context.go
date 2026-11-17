@@ -68,6 +68,7 @@ var entropyExemptHeaders = map[string]bool{
 	"x-b3-parentspanid": true,
 	"b3":                true,
 	"sentry-trace":      true,
+	"x-trace-id":        true,
 }
 
 // scrubHeaderValue scrubs one header value (lname is the lower-cased name).
@@ -514,6 +515,10 @@ func (s *Scrubber) scrubHexSecrets(in string) (string, int) {
 var hexIdentifierKeys = map[string]bool{
 	"sha": true, "sha1": true, "sha256": true, "commit": true, "rev": true, "revision": true,
 	"digest": true, "checksum": true, "etag": true, "hash": true, "md5": true,
+	// Distributed-tracing and request ids are 16/32/64 hex digits by design.
+	// "session_id" and "token" stay out: those values are credentials.
+	"trace_id": true, "traceid": true, "request_id": true, "requestid": true,
+	"correlation_id": true, "correlationid": true, "span_id": true, "spanid": true, "parent_id": true,
 }
 
 // hexValueKeyIsIdentifier reports whether the value starting at in[i] follows a

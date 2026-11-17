@@ -36,6 +36,8 @@ var benignXMLWords = map[string]bool{
 	"type": true, "types": true, "expiry": true, "expiration": true, "expire": true, "expires": true,
 	"lifetime": true, "algorithm": true, "encoding": true, "format": true, "version": true,
 	"username": true, "created": true, "timestamp": true,
+	"count": true, "length": true, "name": true, "method": true, "policy": true, "provider": true,
+	"scheme": true, "scope": true, "issuer": true, "audience": true, "status": true, "enabled": true,
 }
 
 func xmlSecretName(local string) bool {
