@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -176,9 +177,7 @@ func (r *RingBuffer) GetByID(id uint64) (FlowEntry, bool) {
 func (r *RingBuffer) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for i := range r.slots {
-		r.slots[i] = FlowEntry{}
-	}
+	clear(r.slots[:])
 	r.next = 0
 	r.size = 0
 }
@@ -1738,6 +1737,12 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go a.capture(flow)
 }
 
+// wipe zeroes the captured body copies once they are scrubbed and stored.
+func (f *rawFlow) wipe() {
+	clear(f.reqBody)
+	clear(f.respBody)
+}
+
 type closeWriter interface{ CloseWrite() error }
 
 func (a *App) idle() time.Duration {
@@ -2089,6 +2094,35 @@ func addPEMPath(pool *x509.CertPool, path string) (bool, error) {
 	return got, nil
 }
 
+// buildClientCert loads the upstream mTLS client certificate. Both files or
+// neither must be given; with neither it returns (nil, nil).
+func buildClientCert(certFile, keyFile string) (*tls.Certificate, error) {
+	if certFile == "" && keyFile == "" {
+		return nil, nil
+	}
+	if certFile == "" || keyFile == "" {
+		return nil, errors.New("-client-cert and -client-key must be given together")
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("client certificate: %w", err)
+	}
+	return &cert, nil
+}
+
+// buildTLSConfig returns the upstream TLS settings, or nil when neither extra
+// roots nor a client certificate is set.
+func buildTLSConfig(rootCAs *x509.CertPool, cert *tls.Certificate) *tls.Config {
+	if rootCAs == nil && cert == nil {
+		return nil
+	}
+	cfg := &tls.Config{RootCAs: rootCAs, MinVersion: tls.VersionTLS12}
+	if cert != nil {
+		cfg.Certificates = []tls.Certificate{*cert}
+	}
+	return cfg
+}
+
 func buildRootCAs(cacert string, termux bool) (*x509.CertPool, string, error) {
 	explicit := cacert != ""
 	if !explicit && (!termux || os.Getenv("SSL_CERT_FILE") != "" || os.Getenv("SSL_CERT_DIR") != "") {
@@ -2185,6 +2219,7 @@ func decodeBodyMaxCut(ce string, b []byte, limit int) (text string, cut, ok bool
 	}
 	defer rd.Close()
 	out, err := io.ReadAll(io.LimitReader(rd, int64(limit)))
+	defer clear(out) // string(out) below is a copy
 	if len(out) == 0 && err != nil {
 		return "", false, false
 	}
@@ -2263,6 +2298,7 @@ const truncTagLookback = 40
 
 func (a *App) capture(f rawFlow) {
 	defer func() { _ = recover() }()
+	defer f.wipe()
 	if e, ok := a.buildEntry(f); ok {
 		a.ring.Push(e)
 		a.Bar()
@@ -2819,6 +2855,8 @@ func Main() {
 	cacert := flag.String("cacert", "", "extra CA certificates")
 	dnsSpec := flag.String("dns", "auto", "upstream DNS")
 	secretsConfig := flag.String("secrets-config", "", "path to -secrets-config JSON")
+	clientCert := flag.String("client-cert", "", "PEM client certificate presented to upstream servers (mTLS); needs -client-key")
+	clientKey := flag.String("client-key", "", "PEM private key for -client-cert")
 	scrubHeaders := flag.String("scrub-headers", "", "extra sensitive headers")
 	allowUninspectable := flag.Bool("allow-uninspectable", false, "forward request bodies whose Content-Encoding (br, zstd, ...) cannot be inspected; by default they are refused with 415")
 	maxBodySpec := flag.String("max-body", "", "stored body size per request/response, e.g. 1m (default 32 KiB request / 256 KiB response; at most 2m). Secrets are scrubbed before the cut")
@@ -2867,10 +2905,11 @@ func Main() {
 	if err != nil {
 		fatalf("nullwire-mcp: %v", err)
 	}
-	var tlsCfg *tls.Config
-	if rootCAs != nil {
-		tlsCfg = &tls.Config{RootCAs: rootCAs, MinVersion: tls.VersionTLS12}
+	clientCrt, err := buildClientCert(*clientCert, *clientKey)
+	if err != nil {
+		fatalf("nullwire-mcp: %v", err)
 	}
+	tlsCfg := buildTLSConfig(rootCAs, clientCrt)
 
 	app := &App{
 		ring: NewRingBuffer(), scrub: scrub, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable, maxBody: maxBody, wsDeflate: *wsDeflate,
@@ -2921,6 +2960,7 @@ func Main() {
 		<-sigs
 		app.Logf("signal received; wiping RAM")
 		app.ring.Clear()
+		app.scrub.taint.clear()
 		_ = srv.Close()
 		os.Exit(0)
 	}()
@@ -2953,5 +2993,6 @@ func Main() {
 	}
 	app.Logf("stdin closed; wiping RAM")
 	app.ring.Clear()
+	app.scrub.taint.clear()
 	_ = srv.Close()
 }

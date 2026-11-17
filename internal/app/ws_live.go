@@ -38,6 +38,7 @@ func (a *App) pushLive(f rawFlow) (id uint64, ok bool) {
 // the final capture is pushed as a new entry, as it was before live capture.
 func (a *App) finishLive(id uint64, f rawFlow) {
 	defer func() { _ = recover() }()
+	defer f.wipe()
 	e, ok := a.buildEntry(f)
 	if !ok {
 		return

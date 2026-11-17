@@ -123,7 +123,8 @@ func (t *taintRing) clear() {
 	}
 	t.mu.Lock()
 	clear(t.set)
-	t.ring = [taintCap]uint64{}
+	clear(t.ring[:])
+	t.k0, t.k1 = 0, 0
 	t.pos = 0
 	t.filled = 0
 	t.size.Store(0)
