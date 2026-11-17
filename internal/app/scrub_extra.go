@@ -57,7 +57,7 @@ func (s *Scrubber) scrubXMLSecrets(in string, count *int) string {
 		if g == nil {
 			return m
 		}
-		if xmlBenignLeaf(strings.ToLower(xmlOpenLocalName(g[1]))) {
+		if xmlBenignLeaf(xmlOpenLocalName(g[1])) {
 			return m
 		}
 		inner := g[2]

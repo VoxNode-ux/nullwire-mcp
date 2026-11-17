@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"io"
 	"strings"
+	"unicode"
 )
 
 // The regular expression in scrubXMLSecrets handles the common case, a secret
@@ -27,9 +28,15 @@ const (
 	xmlEscapedMin   = 12              // shortest text read as escaped markup
 )
 
-// benignXMLLeaves are name fragments of elements that sit inside a secret
-// element but hold metadata, not the secret: <Token><Type>Bearer</Type>...
-var benignXMLLeaves = []string{"type", "expir", "lifetime", "algorithm", "encoding", "format", "version", "username", "created", "timestamp"}
+// benignXMLWords are whole words of an element name that mark it as metadata
+// next to a secret, not the secret itself: <TokenType>, <PasswordExpiry>, <Token><Format>.
+// The name is split into words first (see xmlNameWords), so <TokenPrototype> is not
+// mistaken for <TokenType>.
+var benignXMLWords = map[string]bool{
+	"type": true, "types": true, "expiry": true, "expiration": true, "expire": true, "expires": true,
+	"lifetime": true, "algorithm": true, "encoding": true, "format": true, "version": true,
+	"username": true, "created": true, "timestamp": true,
+}
 
 func xmlSecretName(local string) bool {
 	l := strings.ToLower(local)
@@ -41,9 +48,41 @@ func xmlSecretName(local string) bool {
 	return false
 }
 
-func xmlBenignLeaf(lowerLocal string) bool {
-	for _, b := range benignXMLLeaves {
-		if strings.Contains(lowerLocal, b) {
+// xmlNameWords splits an element name into lower-case words at _ - . : separators,
+// at lower-to-upper camelCase boundaries, and between an acronym and a following
+// word ("XMLToken" -> xml, token).
+func xmlNameWords(name string) []string {
+	var words []string
+	var cur []rune
+	flush := func() {
+		if len(cur) > 0 {
+			words = append(words, strings.ToLower(string(cur)))
+			cur = cur[:0]
+		}
+	}
+	rs := []rune(name)
+	for i, r := range rs {
+		switch {
+		case r == '_' || r == '-' || r == '.' || r == ':':
+			flush()
+			continue
+		case unicode.IsUpper(r) && len(cur) > 0:
+			prev := rs[i-1]
+			nextLower := i+1 < len(rs) && unicode.IsLower(rs[i+1])
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) || (unicode.IsUpper(prev) && nextLower) {
+				flush()
+			}
+		}
+		cur = append(cur, r)
+	}
+	flush()
+	return words
+}
+
+// xmlBenignLeaf reports whether the element name (any case) contains a whole benign word.
+func xmlBenignLeaf(local string) bool {
+	for _, w := range xmlNameWords(local) {
+		if benignXMLWords[w] {
 			return true
 		}
 	}
@@ -52,6 +91,7 @@ func xmlBenignLeaf(lowerLocal string) bool {
 
 type xmlFrame struct {
 	name        string // lower-case local name
+	benign      bool   // the name holds a whole benign word (type, expiry, ...)
 	inSecret    bool   // this element or an ancestor has a secret-looking name
 	underSecret bool   // a strict ancestor has one
 }
@@ -88,7 +128,7 @@ loop:
 			if len(stack) >= xmlTreeMaxDepth {
 				break loop
 			}
-			f := xmlFrame{name: strings.ToLower(t.Name.Local)}
+			f := xmlFrame{name: strings.ToLower(t.Name.Local), benign: xmlBenignLeaf(t.Name.Local)}
 			if len(stack) > 0 {
 				top := stack[len(stack)-1]
 				f.inSecret, f.underSecret = top.inSecret, top.inSecret
@@ -116,7 +156,7 @@ loop:
 			if trimmed == "" || strings.HasPrefix(trimmed, "[REDACTED_") || isAllowMarkOnly(trimmed) || isPlaceholderValue(trimmed) {
 				continue
 			}
-			if n := len(stack); n > 0 && stack[n-1].inSecret && !xmlBenignLeaf(stack[n-1].name) {
+			if n := len(stack); n > 0 && stack[n-1].inSecret && !stack[n-1].benign {
 				*count++
 				s.Tokens.Add(1)
 				edits = append(edits, xmlEdit{start, end, s.tag("TOKEN", inner)})

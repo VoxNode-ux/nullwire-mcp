@@ -779,7 +779,7 @@ func TestMultipartScrubbing(t *testing.T) {
 		"--boundary\r\n" +
 		"Content-Disposition: form-data; name=\"upload\"; filename=\"notes.txt\"\r\nContent-Type: text/plain\r\n\r\nfile contents here\r\n" +
 		"--boundary--\r\n"
-	out := app.scrubMultipart("multipart/form-data; boundary=boundary", []byte(body))
+	out, _ := app.scrubMultipart("multipart/form-data; boundary=boundary", []byte(body))
 	if !strings.Contains(out, "username=admin") {
 		t.Errorf("ordinary field missing: %q", out)
 	}
@@ -791,7 +791,7 @@ func TestMultipartScrubbing(t *testing.T) {
 	}
 
 	// A body that cannot be parsed is still scrubbed, never passed through.
-	broken := app.scrubMultipart("multipart/form-data; boundary=zzz", []byte("password=hunter2hunter2"))
+	broken, _ := app.scrubMultipart("multipart/form-data; boundary=zzz", []byte("password=hunter2hunter2"))
 	if strings.Contains(broken, "hunter2hunter2") {
 		t.Errorf("unparseable multipart leaked: %q", broken)
 	}

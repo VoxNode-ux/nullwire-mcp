@@ -12,6 +12,7 @@ const vendorTestBody = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
 func vendorLists() map[string][]string {
 	return map[string][]string{
 		"strong": vendors.DefaultVendorPrefixes,
+		"dollar": vendors.DefaultDollarVendorPrefixes,
 		"weak":   vendors.DefaultWeakVendorPrefixes,
 		"dsn":    vendors.DefaultDSNPrefixes,
 	}
@@ -57,6 +58,9 @@ func TestEveryVendorPrefixRedactsItsKey(t *testing.T) {
 	}
 	for _, p := range vendors.DefaultVendorPrefixes {
 		checkVendorRedacted(t, s, "strong", p, p+vendorTestBody, vendorTestBody[8:])
+	}
+	for _, p := range vendors.DefaultDollarVendorPrefixes {
+		checkVendorRedacted(t, s, "dollar", p, p+vendorTestBody+"$"+"0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcdef")
 	}
 	for _, p := range vendors.DefaultWeakVendorPrefixes {
 		checkVendorRedacted(t, s, "weak", p, p+vendorTestBody, vendorTestBody[8:])

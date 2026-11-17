@@ -62,6 +62,12 @@ var entropyExemptHeaders = map[string]bool{
 	"x-amz-cf-id":      true,
 	"x-amz-request-id": true,
 	"cf-ray":           true,
+	// Trace and span ids are 16 or 32 hex digits by design.
+	"x-b3-traceid":      true,
+	"x-b3-spanid":       true,
+	"x-b3-parentspanid": true,
+	"b3":                true,
+	"sentry-trace":      true,
 }
 
 // scrubHeaderValue scrubs one header value (lname is the lower-cased name).
@@ -486,7 +492,7 @@ func (s *Scrubber) scrubHexSecrets(in string) (string, int) {
 		if n := j - i; n == 32 || n == 40 || n == 64 {
 			beforeOK := i == 0 || !isWordByte(in[i-1])
 			afterOK := j == len(in) || !isWordByte(in[j])
-			if beforeOK && afterOK && shannonEntropyBits(in[i:j]) >= entropyHexWebhookMin {
+			if beforeOK && afterOK && !hexValueKeyIsIdentifier(in, i) && shannonEntropyBits(in[i:j]) >= entropyHexWebhookMin {
 				b.WriteString(in[last:i])
 				b.WriteString(s.tag("TOKEN", in[i:j]))
 				s.Tokens.Add(1)
@@ -501,4 +507,37 @@ func (s *Scrubber) scrubHexSecrets(in string) (string, int) {
 	}
 	b.WriteString(in[last:])
 	return b.String(), count
+}
+
+// hexIdentifierKeys are query or field names whose hex values are identifiers or
+// content hashes (a commit, a digest), not secrets.
+var hexIdentifierKeys = map[string]bool{
+	"sha": true, "sha1": true, "sha256": true, "commit": true, "rev": true, "revision": true,
+	"digest": true, "checksum": true, "etag": true, "hash": true, "md5": true,
+}
+
+// hexValueKeyIsIdentifier reports whether the value starting at in[i] follows a
+// "name=" or "name:" whose name is one of hexIdentifierKeys, or ends in _ or - plus
+// one of them (commit_sha, image-digest).
+func hexValueKeyIsIdentifier(in string, i int) bool {
+	p := i - 1
+	for p >= 0 && (in[p] == '"' || in[p] == '\'' || in[p] == ' ') {
+		p--
+	}
+	if p < 0 || (in[p] != '=' && in[p] != ':') {
+		return false
+	}
+	k := strings.ToLower(keyBefore(in, p))
+	if k == "" {
+		return false
+	}
+	if hexIdentifierKeys[k] {
+		return true
+	}
+	for name := range hexIdentifierKeys {
+		if strings.HasSuffix(k, "_"+name) || strings.HasSuffix(k, "-"+name) {
+			return true
+		}
+	}
+	return false
 }

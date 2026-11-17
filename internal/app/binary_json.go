@@ -320,7 +320,7 @@ func binaryBodyText(h http.Header, raw string, limit int) (text, note string, ok
 		return "", "", false
 	}
 	cut := false
-	if ce := strings.TrimSpace(h.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
+	if ce := effectiveContentEncoding(joinedContentEncoding(h)); ce != "" {
 		raw, cut = strings.CutSuffix(raw, truncMarker)
 	}
 	text, note, ok = binaryBodyJSON(h.Get("Content-Type"), []byte(raw), limit)

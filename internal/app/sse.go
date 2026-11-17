@@ -87,6 +87,7 @@ func (a *App) sseLiveLoop(id uint64, base rawFlow, col *sseCollector, stop <-cha
 	defer close(done)
 	defer func() { _ = recover() }()
 	pause := sseLiveEvery
+	sc := a.scrub.detached() // refreshes do not raise the global counters; the final capture does
 	var seen uint64
 	for {
 		timer := time.NewTimer(pause)
@@ -108,7 +109,7 @@ func (a *App) sseLiveLoop(id uint64, base rawFlow, col *sseCollector, stop <-cha
 		f.respCut = col.Truncated()
 		f.latencyMs = time.Since(f.started).Milliseconds()
 		f.note = sseLiveNote()
-		e, ok := a.buildEntry(f)
+		e, ok := a.buildEntryWith(sc, f)
 		if !ok {
 			return
 		}
@@ -198,7 +199,7 @@ func (a *App) streamSSE(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	var tap io.WriteCloser // nil: the body is not captured
 	hdr := resp.Header.Clone()
 	skipped := ""
-	if enc := strings.TrimSpace(strings.Join(resp.Header.Values("Content-Encoding"), ", ")); enc == "" || strings.EqualFold(enc, "identity") {
+	if enc := effectiveContentEncoding(joinedContentEncoding(resp.Header)); enc == "" {
 		tap = col
 	} else if dec := newSSEDecoder(enc, col); dec != nil {
 		tap = dec

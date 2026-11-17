@@ -24,13 +24,17 @@ var cloudSensitiveHeaders = []string{
 	"x-access-token", "x-api-token", "x-rapidapi-key", "x-shopify-access-token",
 	"x-figma-token", "dd-api-key", "dd-application-key", "x-ibm-client-secret",
 	"apikey", "x-csrf-token", "x-xsrf-token",
+	// AI, search, backend and webhook signing
+	"xi-api-key", "x-client-secret", "x-secret-key", "x-webhook-secret", "x-hasura-admin-secret",
+	"x-supabase-api-key", "x-algolia-api-key", "x-meilisearch-api-key", "x-typesense-api-key",
+	"x-hub-signature", "x-hub-signature-256", "x-slack-signature", "stripe-signature",
 }
 
 // cloudGate is the cheap lower-case check that decides whether the name-based
 // rules below are worth running on a piece of text.
 var cloudGate = []string{
 	"secret", "accountkey", "account_key", "account-key", "sharedaccess",
-	"shared_access", "shared-access", "sas_token", "sas-token", "session",
+	"shared_access", "shared-access", "sas_token", "sas-token", "sastoken", "session",
 	"security", "password", "pwd",
 }
 
@@ -173,9 +177,11 @@ func awsSecretKeySpans(in string) []secretSpan {
 }
 
 // awsKeyBoundaryOK rejects a 40-character run that is only a piece of a longer
-// token or identifier (neighbouring "=", "_", "-" or ".").
+// token or identifier (neighbouring "_", "-" or "."). A "=" in front is allowed,
+// so KEY=<secret> assignments are caught; one after the run still rejects it
+// (base64 padding means the run is part of something longer).
 func awsKeyBoundaryOK(in string, i, j int) bool {
-	if i > 0 && strings.IndexByte("=_-.", in[i-1]) >= 0 {
+	if i > 0 && strings.IndexByte("_-.", in[i-1]) >= 0 {
 		return false
 	}
 	if j < len(in) && strings.IndexByte("=_-.", in[j]) >= 0 {

@@ -259,9 +259,20 @@ type Scrubber struct {
 	reXML             *regexp.Regexp
 	reJSONSecretArr   *regexp.Regexp
 
-	Tokens  atomic.Uint64
-	Cookies atomic.Uint64
-	IPs     atomic.Uint64
+	// Counters are pointers so detached() can give a live refresh its own set.
+	Tokens  *atomic.Uint64
+	Cookies *atomic.Uint64
+	IPs     *atomic.Uint64
+}
+
+// detached returns a view of s that shares every rule and the taint ring but
+// counts into counters of its own. Live SSE/WebSocket refreshes rebuild the
+// same entry every ~500 ms; they use a detached view so the global totals are
+// raised once, by the final capture, and not on every refresh.
+func (s *Scrubber) detached() *Scrubber {
+	c := *s
+	c.Tokens, c.Cookies, c.IPs = new(atomic.Uint64), new(atomic.Uint64), new(atomic.Uint64)
+	return &c
 }
 
 func NewScrubber() (*Scrubber, error) { return NewScrubberWithConfig(&SecretsConfig{}) }
@@ -323,14 +334,14 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		class    string
 		min      int
 		weak     bool
-		dsn      bool
 	}{
-		{vendors.DefaultVendorPrefixes, vendorTokenClass, 16, false, false},
-		{vendors.DefaultWeakVendorPrefixes, vendorTokenClass, 20, true, false},
-		{vendors.DefaultDSNPrefixes, vendorDSNClass, 8, false, true},
-		{customPrefixes, vendorTokenClass, 8, false, false},
+		{vendors.DefaultVendorPrefixes, vendorTokenClass, 16, false},
+		{vendors.DefaultDollarVendorPrefixes, vendorDollarTokenClass, 16, false},
+		{vendors.DefaultWeakVendorPrefixes, vendorTokenClass, 20, true},
+		{vendors.DefaultDSNPrefixes, vendorDSNClass, 8, false},
+		{customPrefixes, vendorTokenClass, 8, false},
 	} {
-		if r, ok := buildVendorRule(spec.prefixes, spec.class, spec.min, spec.weak, spec.dsn); ok {
+		if r, ok := buildVendorRule(spec.prefixes, spec.class, spec.min, spec.weak); ok {
 			rules = append(rules, r)
 		}
 		for _, p := range spec.prefixes {
@@ -347,6 +358,9 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 	}
 
 	return &Scrubber{
+		Tokens:         new(atomic.Uint64),
+		Cookies:        new(atomic.Uint64),
+		IPs:            new(atomic.Uint64),
 		nonce:          nonce,
 		taint:          newTaintRing(nonce),
 		allow:          allow,
@@ -358,11 +372,11 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		reBearer:       regexp.MustCompile(`(?i)(Bearer|Basic|Token)\s+([A-Za-z0-9._~+/=-]{8,})`),
 		reSensitiveHeader: regexp.MustCompile(`(?i)^(authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|proxy-authorization)$`),
 		reJWT:             regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
-		reAPIKey:          regexp.MustCompile(`(?i)((?-i:sk-[A-Za-z0-9]{20,})|ghp_[a-zA-Z0-9]{30,}|github_pat_[a-zA-Z0-9_]{30,}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[0-9a-zA-Z-]+|AKIA[0-9A-Z]{16})`),
-		reJSONSecret:      regexp.MustCompile(`(?i)("(?:access_token|refresh_token|id_token|api_key|apikey|secret|client_secret|password|passwd|session_id|auth_token|key)"\s*:\s*")((?:[^"\]|\.)+)(")`),
+		reAPIKey:          regexp.MustCompile(`(?i)\b((?-i:sk-[A-Za-z0-9]{20,})|ghp_[a-zA-Z0-9]{30,}|github_pat_[a-zA-Z0-9_]{30,}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[0-9a-zA-Z-]+|AKIA[0-9A-Z]{16})\b`),
+		reJSONSecret:      regexp.MustCompile(`(?i)("(?:access_token|refresh_token|id_token|api_key|apikey|secret|client_secret|password|passwd|session_id|auth_token|key)"\s*:\s*")((?:[^"\\]|\\.)+)(")`),
 		reQuerySecret:     regexp.MustCompile(`(?i)((?:^|[?&])(?:api_key|apikey|token|access_token|refresh_token|id_token|secret|client_secret|password|passwd|key)=)([^&\s#]+)`),
 		reUserInfo:        regexp.MustCompile(`(://[^/\s:@]+:)([^@/\s]+)(@)`),
-		reIPv4:            regexp.MustCompile(`(?:\d{1,3}\.){3}\d{1,3}`),
+		reIPv4:            regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`),
 		// A private key block, from BEGIN to END; a block cut off by the capture limit is redacted to the end of the text.
 		rePEM: regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----(?:.*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|.*)`),
 		// The text of an XML element whose name suggests a secret. Only the opening "</" is part of the match, so the rest of the closing tag is
@@ -370,7 +384,7 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		// tag name is not compared with the opening one.
 		reXML: regexp.MustCompile(`(?is)(<(?:[A-Za-z0-9_.-]+:)?[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|apikey|api_key|api-key|authorization|credential|privatekey|private_key|accesskey|access_key|sessionid|session_id)[A-Za-z0-9_.-]*(?:\s(?:[^<>]*[^/<>])?)?>)(<!\[CDATA\[.*?\]\]>|[^<]+)(</|\z)`),
 		// "password": ["a", "b"]
-		reJSONSecretArr: regexp.MustCompile(`(?i)("(?:access_token|refresh_token|id_token|api_key|apikey|secret|client_secret|password|passwd|session_id|auth_token|key)"\s*:\s*\[)((?:\s*"(?:[^"\]|\.)*"\s*,?)+)(\s*\])`),
+		reJSONSecretArr: regexp.MustCompile(`(?i)("(?:access_token|refresh_token|id_token|api_key|apikey|secret|client_secret|password|passwd|session_id|auth_token|key)"\s*:\s*\[)((?:\s*"(?:[^"\\]|\\.)*"\s*,?)+)(\s*\])`),
 	}, nil
 }
 
@@ -406,6 +420,8 @@ func containsAny(s string, subs []string) bool {
 // strings may also contain URL punctuation.
 const (
 	vendorTokenClass = `[A-Za-z0-9._~+/=-]`
+	// Like vendorTokenClass, plus "$" for tokens such as access_token$production$<id>$<hex>.
+	vendorDollarTokenClass = `[A-Za-z0-9._~+/=$-]`
 	vendorDSNClass   = `[A-Za-z0-9._~:/?#\[\]@!$&*+=%-]`
 )
 
@@ -415,15 +431,14 @@ type vendorRule struct {
 	re       *regexp.Regexp
 	prefixes []string
 	weak     bool
-	dsn      bool
 }
 
-func buildVendorRule(prefixes []string, class string, minLen int, weak bool, dsn bool) (vendorRule, bool) {
+func buildVendorRule(prefixes []string, class string, minLen int, weak bool) (vendorRule, bool) {
 	if len(prefixes) == 0 {
 		return vendorRule{}, false
 	}
 	var b strings.Builder
-	b.WriteString(`(?:`)
+	b.WriteString(`\b(?:`)
 	for i, p := range prefixes {
 		if i > 0 {
 			b.WriteString(`|`)
@@ -433,7 +448,7 @@ func buildVendorRule(prefixes []string, class string, minLen int, weak bool, dsn
 	b.WriteString(`)`)
 	b.WriteString(class)
 	fmt.Fprintf(&b, "{%d,}", minLen)
-	return vendorRule{re: regexp.MustCompile(b.String()), prefixes: prefixes, weak: weak, dsn: dsn}, true
+	return vendorRule{re: regexp.MustCompile(b.String()), prefixes: prefixes, weak: weak}, true
 }
 
 // weakVendorMatchOK checks the text after the matched prefix.
@@ -571,10 +586,13 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	if preVendor {
 		for _, vr := range s.vendorRules {
 			out = vr.re.ReplaceAllStringFunc(out, func(m string) string {
-				if vr.weak && !weakVendorMatchOK(m, vr.prefixes) {
+				// A match that already holds a redaction (a DSN whose password reUserInfo
+				// tagged) was handled by an earlier rule; redacting it again would
+				// overwrite that tag and count it twice.
+				if strings.Contains(m, "[REDACTED_") {
 					return m
 				}
-				if vr.dsn && strings.Contains(m, "[REDACTED_") {
+				if vr.weak && !weakVendorMatchOK(m, vr.prefixes) {
 					return m
 				}
 				count++
@@ -658,7 +676,7 @@ func isKeyByte(c byte) bool {
 // skipping quotes and spaces: `"api_key": ` gives api_key.
 func keyBefore(in string, i int) string {
 	j := i
-	for j > 0 && (in[j-1] == ' ' || in[j-1] == '"' || in[j-1] == ''' || in[j-1] == '\') {
+	for j > 0 && (in[j-1] == ' ' || in[j-1] == '"' || in[j-1] == '\'' || in[j-1] == '\\') {
 		j--
 	}
 	k := j
@@ -725,7 +743,7 @@ func secretishKey(key string) bool {
 	if k == "" || nonSecretFields[k] {
 		return false
 	}
-	if strings.HasSuffix(k, "key") || k == "sig" || strings.HasSuffix(k, "_sig") || strings.HasSuffix(k, "-sig") || strings.Contains(k, "signature") {
+	if strings.HasSuffix(k, "key") || k == "sig" || strings.HasSuffix(k, "_sig") || strings.HasSuffix(k, "-sig") {
 		return true
 	}
 	for _, h := range strictKeyHints {
@@ -751,7 +769,7 @@ func isPlaceholderValue(s string) bool {
 	}
 	if (strings.HasPrefix(t, "${") && strings.HasSuffix(t, "}")) ||
 		(strings.HasPrefix(t, "{{") && strings.HasSuffix(t, "}}")) ||
-		(len(t) > 2 && t[0] == '%' && t[len(t)-1] == '%' && !strings.ContainsAny(t[1:len(t)-1], " 	%")) {
+		(len(t) > 2 && t[0] == '%' && t[len(t)-1] == '%' && !strings.ContainsAny(t[1:len(t)-1], " \t%")) {
 		return true
 	}
 	first := t[0]
@@ -795,8 +813,7 @@ func (s *Scrubber) scrubStrictFieldsMax(in string, maxVal int) (string, int) {
 // strictValueStop reports whether c ends an unquoted field value.
 func strictValueStop(c byte) bool {
 	switch c {
-	case ' ', '"', ''', ',', '
-', '', '	', '}', ']', ')', '&', ';':
+	case ' ', '"', '\'', ',', '\n', '\r', '\t', '}', ']', ')', '&', ';':
 		return true
 	}
 	return false
@@ -815,16 +832,16 @@ func strictFieldRanges(in string, maxVal int) [][2]int {
 		}
 		start := i + 1
 		for start < len(in) {
-			if c := in[start]; c == ' ' || c == '"' || c == ''' {
+			if c := in[start]; c == ' ' || c == '"' || c == '\'' {
 				start++
-			} else if c == '\' && start+1 < len(in) && in[start+1] == '"' {
-				start += 2 // escaped quote, as in {"custom_key":"..."}
+			} else if c == '\\' && start+1 < len(in) && in[start+1] == '"' {
+				start += 2 // escaped quote, as in {\"custom_key\":\"...\"}
 			} else {
 				break
 			}
 		}
 		end := start
-		for end < len(in) && !strictValueStop(in[end]) && (in[end] != '\' || end+1 >= len(in) || in[end+1] != '"') {
+		for end < len(in) && !strictValueStop(in[end]) && (in[end] != '\\' || end+1 >= len(in) || in[end+1] != '"') {
 			end++
 		}
 		if start < len(in) && ((in[start] == '%' && isPlaceholderValue(in[start:end])) || strings.HasPrefix(in[start:], "${") || strings.HasPrefix(in[start:], "{{")) {
@@ -833,21 +850,15 @@ func strictFieldRanges(in string, maxVal int) [][2]int {
 		if end-start < 12 || end-start > maxVal {
 			continue
 		}
-		key := keyBefore(in, i)
-		if !secretishKey(key) {
+		kb := keyBefore(in, i)
+		if !secretishKey(kb) {
 			continue
 		}
 		val := in[start:end]
-		lk := strings.ToLower(key)
-		isSig := lk == "sig" || strings.HasSuffix(lk, "_sig") || strings.HasSuffix(lk, "-sig") || strings.Contains(lk, "signature")
-		blocked := "/.\:"
-		if isSig {
-			blocked = ".\:"
-		}
-		if strings.HasPrefix(val, "[REDACTED_") || hasAllowMark(val) || isPlaceholderValue(val) || strings.ContainsAny(val, blocked) {
+		if strings.HasPrefix(val, "[REDACTED_") || hasAllowMark(val) || isPlaceholderValue(val) || strings.ContainsAny(val, "\\:") {
 			continue
 		}
-		if strings.ContainsAny(val, "/.") && !strictSlashDotOK(val) {
+		if strings.ContainsAny(val, "/.") && !strictSlashDotOK(val) && !(isSignatureKey(kb) && signatureValueOK(val)) {
 			continue
 		}
 		out = append(out, [2]int{start, end})
@@ -861,6 +872,42 @@ var (
 	reStrictVersion = regexp.MustCompile(`^[vV]?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?$`)
 	reStrictPath    = regexp.MustCompile(`^[a-z0-9._-]+(?:/[a-z0-9._-]+)+/?$`)
 )
+
+// isSignatureKey reports whether k names a signature field: sig, signature, x-amz-signature.
+func isSignatureKey(k string) bool {
+	k = strings.ToLower(k)
+	return k == "sig" || k == "signature" || strings.HasSuffix(k, "_sig") || strings.HasSuffix(k, "-sig") ||
+		strings.HasSuffix(k, "_signature") || strings.HasSuffix(k, "-signature")
+}
+
+// signatureValueOK reports whether v looks like a percent-encoded or base64 signature,
+// as in an Azure SAS URL (?sv=...&sig=Ab%2Fc...%3D), whatever the mix of letters:
+// only URL-safe and base64 characters, and either a %XX escape or a base64 "/", "+" or "=".
+func signatureValueOK(v string) bool {
+	if len(v) < 12 || strings.Contains(v, "://") || strings.HasPrefix(v, "/") {
+		return false
+	}
+	special := false
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		case c == '%':
+			if i+2 >= len(v) || !isHexByte(v[i+1]) || !isHexByte(v[i+2]) {
+				return false
+			}
+			special = true
+		case c == '/' || c == '+' || c == '=':
+			special = true
+		default:
+			return false
+		}
+	}
+	return special
+}
+
+func isHexByte(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
 
 // strictSlashDotOK reports whether a value that holds "/" or "." may still be
 // a secret. Base64 signing and encryption keys use both characters; URLs,
@@ -1035,6 +1082,11 @@ func (s *Scrubber) scrubHighEntropyMax(in string, maxLen int) (string, int) {
 		}
 		cand := in[i:j]
 
+		// A hex value under sha=, digest=, commit= ... is an identifier, not a secret.
+		if isHexLike(cand) && hexValueKeyIsIdentifier(in, i) {
+			i = j
+			continue
+		}
 		if !strings.Contains(cand, "REDACTED_") && looksLikeTokenMax(cand, maxLen) {
 			b.WriteString(in[last:i])
 			b.WriteString(s.tag("TOKEN", cand))
@@ -1227,12 +1279,11 @@ type App struct {
 }
 
 func (a *App) drawBar() {
-	fmt.Fprintf(os.Stderr, "[K⚡ [NullWire-MCP] Proxy 127.0.0.1:%d | RAM Ring: %d/%d | Scrubbed: %d Tokens, %d Cookies, %d IPs | Disk: 0B",
+	fmt.Fprintf(os.Stderr, "\r\033[K⚡ [NullWire-MCP] Proxy 127.0.0.1:%d | RAM Ring: %d/%d | Scrubbed: %d Tokens, %d Cookies, %d IPs | Disk: 0B",
 		a.port, a.ring.Len(), ringCapacity, a.scrub.Tokens.Load(), a.scrub.Cookies.Load(), a.scrub.IPs.Load())
 }
 func (a *App) Bar() { a.barMu.Lock(); defer a.barMu.Unlock(); a.drawBar() }
-func (a *App) Logf(format string, args ...any) { a.barMu.Lock(); defer a.barMu.Unlock(); fmt.Fprintf(os.Stderr, "[K"+format+"
-", args...); a.drawBar() }
+func (a *App) Logf(format string, args ...any) { a.barMu.Lock(); defer a.barMu.Unlock(); fmt.Fprintf(os.Stderr, "\r\033[K"+format+"\n", args...); a.drawBar() }
 
 type capBuffer struct {
 	mu  sync.Mutex
@@ -1778,9 +1829,7 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.T
 		return
 	}
 	_ = client.SetDeadline(time.Time{})
-	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established
-
-")); err != nil {
+	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		_ = client.Close()
 		_ = up.Close()
 		return
@@ -1822,8 +1871,7 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 	}
 	_ = client.SetDeadline(time.Time{})
 	var head strings.Builder
-	head.WriteString("HTTP/1.1 101 Switching Protocols
-")
+	head.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
 	for k, vs := range resp.Header {
 		switch strings.ToLower(k) {
 		case "content-length", "transfer-encoding", "trailer":
@@ -1833,12 +1881,10 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 			head.WriteString(k)
 			head.WriteString(": ")
 			head.WriteString(v)
-			head.WriteString("
-")
+			head.WriteString("\r\n")
 		}
 	}
-	head.WriteString("
-")
+	head.WriteString("\r\n")
 	if _, err := client.Write([]byte(head.String())); err != nil {
 		_ = client.Close()
 		return
@@ -1873,7 +1919,7 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 			if found, serverFresh, clientFresh := parseDeflateNegotiation(resp.Header.Values("Sec-WebSocket-Extensions")); found {
 				wsUpInfl = newWSInflater(!clientFresh, lim.respBody+scrubWindow)
 				wsDownInfl = newWSInflater(!serverFresh, lim.respBody+scrubWindow)
-				upParser.inflate, downParser.inflate = wsDownInfl
+				upParser.inflate, downParser.inflate = wsUpInfl, wsDownInfl
 			}
 		}
 		clientRWC = &tapRWC{rwc: client, onRead: upParser.Feed}
@@ -2059,8 +2105,8 @@ func decodeBodyMax(ce string, b []byte, limit int) (string, bool) {
 // separately, so a body that really ends in the marker text is not mistaken
 // for a cut one.
 func decodeBodyMaxCut(ce string, b []byte, limit int) (text string, cut, ok bool) {
-	var rd io.Reader
-	switch strings.ToLower(strings.TrimSpace(ce)) {
+	var rd io.ReadCloser
+	switch strings.ToLower(effectiveContentEncoding(ce)) {
 	case "gzip", "x-gzip":
 		zr, err := gzip.NewReader(bytes.NewReader(b))
 		if err != nil {
@@ -2076,6 +2122,7 @@ func decodeBodyMaxCut(ce string, b []byte, limit int) (text string, cut, ok bool
 	default:
 		return "", false, false
 	}
+	defer rd.Close()
 	out, err := io.ReadAll(io.LimitReader(rd, int64(limit)))
 	if len(out) == 0 && err != nil {
 		return "", false, false
@@ -2085,11 +2132,29 @@ func decodeBodyMaxCut(ce string, b []byte, limit int) (text string, cut, ok bool
 
 func bodyText(h http.Header, b []byte) string { return bodyTextMax(h, b, decodedLimit) }
 
+// joinedContentEncoding returns every Content-Encoding header line joined with ", ",
+// so a stacked "Content-Encoding: identity" + "Content-Encoding: gzip" is seen whole.
+func joinedContentEncoding(h http.Header) string {
+	return strings.Join(h.Values("Content-Encoding"), ", ")
+}
+
+// effectiveContentEncoding drops "identity" entries and blanks from a Content-Encoding
+// value: "identity, gzip" becomes "gzip", and "identity" becomes "".
+func effectiveContentEncoding(ce string) string {
+	var keep []string
+	for _, p := range strings.Split(ce, ",") {
+		if p = strings.TrimSpace(p); p != "" && !strings.EqualFold(p, "identity") {
+			keep = append(keep, p)
+		}
+	}
+	return strings.Join(keep, ", ")
+}
+
 func bodyTextMax(h http.Header, b []byte, decoded int) string {
 	if len(b) == 0 {
 		return ""
 	}
-	if ce := strings.TrimSpace(h.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
+	if ce := effectiveContentEncoding(joinedContentEncoding(h)); ce != "" {
 		if text, ok := decodeBodyMax(ce, b, decoded); ok {
 			return text
 		}
@@ -2102,19 +2167,38 @@ func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
+	if maxLen < 0 {
+		maxLen = 0
+	}
 	cut := maxLen
+	// Never split a multi-byte rune: s[cut] must start one.
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	winStart := max(0, cut-40)
-	if rel := strings.LastIndex(s[winStart:cut], "[REDACTED_"); rel >= 0 {
-		tagStart := winStart + rel
-		if strings.IndexByte(s[tagStart:cut], ']') < 0 {
-			cut = tagStart
+	// Never leave half a redaction tag: when the cut falls inside "[REDACTED_...]",
+	// step back to its opening bracket.
+	lo := cut - truncTagLookback
+	if lo < 0 {
+		lo = 0
+	}
+	if i := strings.LastIndex(s[lo:cut], "[REDACTED_"); i >= 0 && !strings.Contains(s[lo+i:cut], "]") {
+		cut = lo + i
+	} else {
+		// ...or inside the opening "[REDACTED_" itself.
+		const open = "[REDACTED_"
+		for k := len(open) - 1; k >= 1; k-- {
+			if strings.HasSuffix(s[:cut], open[:k]) {
+				cut -= k
+				break
+			}
 		}
 	}
 	return s[:cut] + truncMarker
 }
+
+// truncTagLookback is how far back truncate looks for an unfinished redaction tag
+// ("[REDACTED_TOKEN#ab12cd]" is 24 bytes; the margin covers longer kinds).
+const truncTagLookback = 40
 
 func (a *App) capture(f rawFlow) {
 	defer func() { _ = recover() }()
@@ -2126,7 +2210,10 @@ func (a *App) capture(f rawFlow) {
 
 // buildEntry scrubs a flow and returns the entry to store. ok is false for a
 // flow that is ignored (-secrets-config ignore_url_substrings).
-func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
+func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) { return a.buildEntryWith(a.scrub, f) }
+
+// buildEntryWith is buildEntry using sc, whose counters receive the redaction counts.
+func (a *App) buildEntryWith(sc *Scrubber, f rawFlow) (FlowEntry, bool) {
 	for _, sub := range a.ignoreURLSubstrings {
 		if sub != "" && strings.Contains(f.url, sub) {
 			return FlowEntry{}, false
@@ -2137,9 +2224,9 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 	total := 0
 	note := f.note
 
-	u, n := a.scrub.ScrubURL(f.url)
+	u, n := sc.ScrubURL(f.url)
 	total += n
-	rh, n := a.scrub.ScrubHeaders(f.reqHeaders)
+	rh, n := sc.ScrubHeaders(f.reqHeaders)
 	total += n
 
 	rawReqBody := bodyTextMax(f.reqHeaders, f.reqBody, lim.decoded)
@@ -2147,7 +2234,9 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 	if ct := f.reqHeaders.Get("Content-Type"); strings.HasPrefix(strings.ToLower(strings.TrimSpace(ct)), "multipart/") &&
 		!strings.HasPrefix(rawReqBody, "[encoded body omitted") {
 		gqlSrc = gqlMultipartBody(ct, rawReqBody)
-		rawReqBody = a.scrubMultipart(ct, []byte(rawReqBody))
+		var mn int
+		rawReqBody, mn = a.scrubMultipartWith(sc, ct, []byte(rawReqBody), int64(lim.reqBody+scrubWindow))
+		total += mn
 	}
 	rawRespBody := bodyTextMax(f.respHeaders, f.respBody, lim.decoded)
 	// Protobuf and gRPC bodies are binary. They are read without a schema into
@@ -2189,7 +2278,7 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 	if gqlSrc != "" {
 		gqlBody = gqlSrc
 	}
-	if gn, cnt := a.graphqlNote(f.method, f.url, f.reqHeaders.Get("Content-Type"), gqlBody); gn != "" {
+	if gn, cnt := a.graphqlNoteWith(sc, f.method, f.url, f.reqHeaders.Get("Content-Type"), gqlBody); gn != "" {
 		note += gn
 		total += cnt
 		// Say that the call failed even on a 200: only the count, never the text.
@@ -2205,7 +2294,7 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 	if st, msg := grpcStatus(f); st != "" {
 		note += " gRPC status " + st
 		if msg != "" {
-			scrubbed, cnt := a.scrub.ScrubTextIn(msg, ContextHeader)
+			scrubbed, cnt := sc.ScrubTextIn(msg, ContextHeader)
 			total += cnt
 			note += ": " + truncate(scrubbed, 200)
 		}
@@ -2228,11 +2317,11 @@ func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) {
 	rawReqBody = truncate(rawReqBody, lim.reqBody+scrubWindow)
 	rawRespBody = truncate(rawRespBody, lim.respBody+scrubWindow)
 
-	rb, n := a.scrub.ScrubText(rawReqBody)
+	rb, n := sc.ScrubText(rawReqBody)
 	total += n
-	ph, n := a.scrub.ScrubHeaders(f.respHeaders)
+	ph, n := sc.ScrubHeaders(f.respHeaders)
 	total += n
-	pb, n := a.scrub.ScrubText(rawRespBody)
+	pb, n := sc.ScrubText(rawRespBody)
 	total += n
 
 	return FlowEntry{
@@ -2272,8 +2361,7 @@ func marshalJSON(v any, indent bool) (string, error) {
 	if err := enc.Encode(v); err != nil {
 		return "", err
 	}
-	return strings.TrimSuffix(sb.String(), "
-"), nil
+	return strings.TrimSuffix(sb.String(), "\n"), nil
 }
 
 func (a *App) writeFrame(resp rpcResponse) {
@@ -2284,8 +2372,7 @@ func (a *App) writeFrame(resp rpcResponse) {
 	}
 	a.stdoutMu.Lock()
 	defer a.stdoutMu.Unlock()
-	_, _ = os.Stdout.Write([]byte(line + "
-"))
+	_, _ = os.Stdout.Write([]byte(line + "\n"))
 }
 
 func (a *App) writeBatch(resps []rpcResponse) {
@@ -2298,8 +2385,7 @@ func (a *App) writeBatch(resps []rpcResponse) {
 	}
 	a.stdoutMu.Lock()
 	defer a.stdoutMu.Unlock()
-	_, _ = os.Stdout.Write([]byte(line + "
-"))
+	_, _ = os.Stdout.Write([]byte(line + "\n"))
 }
 
 func (a *App) writeError(id json.RawMessage, code int, msg string) {
@@ -2414,7 +2500,7 @@ func shellQuote(s string) string {
 		if lit == "" {
 			return
 		}
-		b.WriteString("'" + strings.ReplaceAll(lit, "'", `'''`) + "'")
+		b.WriteString("'" + strings.ReplaceAll(lit, "'", `'\''`) + "'")
 	}
 	last := 0
 	for _, m := range reTag.FindAllStringSubmatchIndex(s, -1) {
@@ -2441,8 +2527,7 @@ var curlSkipHeaders = map[string]bool{"host": true, "content-length": true, "con
 
 func buildCurl(e FlowEntry) string {
 	if strings.EqualFold(e.Method, http.MethodConnect) {
-		return fmt.Sprintf("# Flow %d was a blind CONNECT tunnel.
-", e.ID)
+		return fmt.Sprintf("# Flow %d was a blind CONNECT tunnel.\n", e.ID)
 	}
 	names := make([]string, 0, len(e.RequestHeaders))
 	for k := range e.RequestHeaders {
@@ -2461,11 +2546,9 @@ func buildCurl(e FlowEntry) string {
 	if strings.HasPrefix(body, "[encoded body omitted") || strings.HasPrefix(body, "[protobuf/gRPC body") {
 		body = "" // a placeholder or a decoded protobuf is not a body that can be replayed
 	}
-	source := e.URL + "
-" + body
+	source := e.URL + "\n" + body
 	for _, k := range names {
-		source += "
-" + e.RequestHeaders[k]
+		source += "\n" + e.RequestHeaders[k]
 	}
 	seen := map[string]bool{}
 	var legend []string
@@ -2477,14 +2560,11 @@ func buildCurl(e FlowEntry) string {
 		legend = append(legend, fmt.Sprintf("# export %s=...   # was %s", envFor(m[1]), m[0]))
 	}
 	var b strings.Builder
-	b.WriteString("# Replay of flow " + fmt.Sprint(e.ID) + "
-")
+	b.WriteString("# Replay of flow " + fmt.Sprint(e.ID) + "\n")
 	if len(legend) > 0 {
-		b.WriteString("# Set environment variables first:
-")
+		b.WriteString("# Set environment variables first:\n")
 		for _, l := range legend {
-			b.WriteString(l + "
-")
+			b.WriteString(l + "\n")
 		}
 	}
 	if strings.EqualFold(e.Method, "HEAD") {
@@ -2494,15 +2574,12 @@ func buildCurl(e FlowEntry) string {
 	}
 	b.WriteString(" " + shellQuote(e.URL))
 	for _, k := range names {
-		b.WriteString(" \
-  -H " + shellQuote(k+": "+e.RequestHeaders[k]))
+		b.WriteString(" \\\n  -H " + shellQuote(k+": "+e.RequestHeaders[k]))
 	}
 	if body != "" {
-		b.WriteString(" \
-  --data-raw " + shellQuote(body))
+		b.WriteString(" \\\n  --data-raw " + shellQuote(body))
 	}
-	b.WriteString("
-")
+	b.WriteString("\n")
 	return b.String()
 }
 
@@ -2659,8 +2736,7 @@ func (a *App) handleBatch(line []byte) {
 }
 
 func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "[K"+format+"
-", args...)
+	fmt.Fprintf(os.Stderr, "\r\033[K"+format+"\n", args...)
 	os.Exit(1)
 }
 

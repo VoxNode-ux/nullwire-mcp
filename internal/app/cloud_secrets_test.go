@@ -110,3 +110,12 @@ func TestCloudHeadersAreRedacted(t *testing.T) {
 		t.Errorf("Content-Type should be untouched, got %q", m["Content-Type"])
 	}
 }
+
+func TestAWSSecretAfterEqualsIsCaught(t *testing.T) {
+	if len(awsSecretKeySpans("MYVAR="+awsExampleSecret)) != 1 {
+		t.Errorf("KEY=<aws secret> assignment not matched")
+	}
+	if len(awsSecretKeySpans("MYVAR_"+awsExampleSecret)) != 0 {
+		t.Errorf("a run glued to an identifier with _ must still be rejected")
+	}
+}

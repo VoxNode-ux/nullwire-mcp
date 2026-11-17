@@ -23,7 +23,8 @@ func (a *App) pushLive(f rawFlow) (id uint64, ok bool) {
 			id, ok = 0, false
 		}
 	}()
-	e, built := a.buildEntry(f)
+	// Detached counters: finishLive counts this flow once, when it ends.
+	e, built := a.buildEntryWith(a.scrub.detached(), f)
 	if !built {
 		return 0, false
 	}
@@ -59,6 +60,7 @@ func (a *App) wsLiveLoop(id uint64, base rawFlow, upgrade string, up, down *wsCo
 	defer close(done)
 	defer func() { _ = recover() }()
 	pause := wsLiveEvery
+	sc := a.scrub.detached() // refreshes do not raise the global counters; finishLive does
 	var seen uint64
 	for {
 		timer := time.NewTimer(pause)
@@ -79,7 +81,7 @@ func (a *App) wsLiveLoop(id uint64, base rawFlow, upgrade string, up, down *wsCo
 		f.reqBody, f.respBody = up.Bytes(), down.Bytes()
 		f.latencyMs = time.Since(f.started).Milliseconds()
 		f.note = wsLiveNote(upgrade, up, down)
-		e, ok := a.buildEntry(f)
+		e, ok := a.buildEntryWith(sc, f)
 		if !ok {
 			return
 		}

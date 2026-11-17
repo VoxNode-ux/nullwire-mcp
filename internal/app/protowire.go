@@ -390,7 +390,7 @@ func decodeProtoBody(h http.Header, b []byte, limit int) (string, bool) {
 		// Some gRPC-Web servers compress the whole HTTP body instead of, or
 		// as well as, the single frames. The HTTP encoding is outermost, so it
 		// is removed before the base64 of text mode.
-		if ce := strings.TrimSpace(h.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
+		if ce := effectiveContentEncoding(joinedContentEncoding(h)); ce != "" {
 			text, cut, ok := decodeBodyMaxCut(ce, frames, limit)
 			if !ok {
 				return "", false
@@ -416,7 +416,7 @@ func decodeProtoBody(h http.Header, b []byte, limit int) (string, bool) {
 
 	payload := b
 	decCut := false
-	if ce := strings.TrimSpace(h.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
+	if ce := effectiveContentEncoding(joinedContentEncoding(h)); ce != "" {
 		text, cut, ok := decodeBodyMaxCut(ce, b, limit)
 		if !ok {
 			return "", false

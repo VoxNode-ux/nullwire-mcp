@@ -282,14 +282,14 @@ func gqlOperations(src string) []gqlOp {
 
 // gqlSafeName returns name when it is safe to put in a note. The int is how
 // many redactions that took.
-func (a *App) gqlSafeName(name string) (string, int) {
+func (a *App) gqlSafeName(sc *Scrubber, name string) (string, int) {
 	if name == "" {
 		return "", 0
 	}
 	if !gqlValidName(name) {
 		return "<invalid name>", 0
 	}
-	if out, n := a.scrub.ScrubText(name); n > 0 || out != name {
+	if out, n := sc.ScrubText(name); n > 0 || out != name {
 		return "<redacted>", 1
 	}
 	return name, 0
@@ -297,7 +297,7 @@ func (a *App) gqlSafeName(name string) (string, int) {
 
 // gqlLabel describes one request, such as "query GetUser" or "persisted
 // operation Feed". It is "" when the request is not GraphQL.
-func (a *App) gqlLabel(r gqlRequest) (string, int) {
+func (a *App) gqlLabel(sc *Scrubber, r gqlRequest) (string, int) {
 	ops := gqlOperations(r.query)
 	if len(ops) == 0 && !r.persisted {
 		return "", 0
@@ -321,10 +321,10 @@ func (a *App) gqlLabel(r gqlRequest) (string, int) {
 			op.kind = "operation"
 		}
 	}
-	shown, cnt := a.gqlSafeName(name)
+	shown, cnt := a.gqlSafeName(sc, name)
 	if shown == "" {
 		shown = "(anonymous)"
-		if f, _ := a.gqlSafeName(op.field); f != "" && !strings.HasPrefix(f, "<") {
+		if f, _ := a.gqlSafeName(sc, op.field); f != "" && !strings.HasPrefix(f, "<") {
 			shown = "(anonymous: " + f + ")"
 		}
 	}
@@ -342,6 +342,11 @@ func (a *App) gqlLabel(r gqlRequest) (string, int) {
 // graphqlNote returns the note text (with a leading space) for a GraphQL
 // request, or "" for anything else. body is the request body as text.
 func (a *App) graphqlNote(method, rawURL, ct, body string) (string, int) {
+	return a.graphqlNoteWith(a.scrub, method, rawURL, ct, body)
+}
+
+// graphqlNoteWith is graphqlNote counting redactions into sc.
+func (a *App) graphqlNoteWith(sc *Scrubber, method, rawURL, ct, body string) (string, int) {
 	var reqs []gqlRequest
 	batch, size := false, ""
 	pathOK := gqlPathLooksGraphQL(rawURL)
@@ -410,7 +415,7 @@ func (a *App) graphqlNote(method, rawURL, ct, body string) (string, int) {
 	var labels []string
 	redacted := 0
 	for _, r := range reqs {
-		l, c := a.gqlLabel(r)
+		l, c := a.gqlLabel(sc, r)
 		redacted += c
 		if l != "" {
 			labels = append(labels, l)
