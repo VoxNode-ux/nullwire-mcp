@@ -1128,6 +1128,40 @@ func (s *Scrubber) scrubHighEntropyMax(in string, maxLen int) (string, int) {
 	return b.String(), count
 }
 
+// identifierHexKeys name fields whose hex value is an identifier (a commit, a
+// digest, a checksum), not a secret.
+var identifierHexKeys = map[string]bool{
+	"sha": true, "sha1": true, "sha256": true, "sha512": true, "md5": true,
+	"digest": true, "commit": true, "commit_id": true, "commit_sha": true,
+	"revision": true, "rev": true, "checksum": true, "etag": true,
+	"hash": true, "tree": true, "parent": true, "git_sha": true, "image_id": true,
+}
+
+// hexValueKeyIsIdentifier reports whether the entropy candidate that starts at
+// in[i] is the value of an identifier field such as sha=, digest: or "commit":.
+func hexValueKeyIsIdentifier(in string, i int) bool {
+	j := i
+	for j > 0 && (in[j-1] == ' ' || in[j-1] == '"' || in[j-1] == '\'' || in[j-1] == '\\') {
+		j--
+	}
+	if j == 0 || (in[j-1] != ':' && in[j-1] != '=') {
+		return false
+	}
+	key := strings.ReplaceAll(strings.ToLower(keyBefore(in, j-1)), "-", "_")
+	if key == "" || strings.Contains(key, "secret") || strings.Contains(key, "pass") || strings.Contains(key, "token") {
+		return false
+	}
+	if identifierHexKeys[key] {
+		return true
+	}
+	for _, suf := range []string{"_sha", "_sha1", "_sha256", "_digest", "_checksum", "_commit", "_hash"} {
+		if strings.HasSuffix(key, suf) {
+			return true
+		}
+	}
+	return false
+}
+
 func isV6Byte(c byte) bool {
 	return c == ':' || c == '.' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
