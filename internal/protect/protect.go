@@ -16,6 +16,8 @@ func Run(args []string) int {
 	cacert := pf.String("cacert", "", "extra CA certificates (PEM file or directory)")
 	dnsSpec := pf.String("dns", "auto", "upstream DNS (see main help)")
 	secretsConfig := pf.String("secrets-config", "", "path to -secrets-config JSON")
+	clientCert := pf.String("client-cert", "", "PEM client certificate for upstream mTLS (needs -client-key)")
+	clientKey := pf.String("client-key", "", "PEM private key for -client-cert")
 	scrubHeaders := pf.String("scrub-headers", "", "extra sensitive headers")
 	deep := pf.String("deep", "", "also scan this directory for MCP config JSON, .env and .toml files")
 	history := pf.Bool("history", false, "also scan shell history during the pre-scan (opt-in; history text is never shown)")
@@ -35,6 +37,11 @@ func Run(args []string) int {
 	}
 	if pf.NArg() > 0 {
 		fmt.Fprintf(os.Stderr, "nullwire-mcp protect: unexpected argument %q\n", pf.Arg(0))
+		return 2
+	}
+
+	if (*clientCert == "") != (*clientKey == "") {
+		fmt.Fprintln(os.Stderr, "nullwire-mcp protect: -client-cert and -client-key must be given together")
 		return 2
 	}
 
@@ -58,6 +65,9 @@ func Run(args []string) int {
 	}
 	if *cacert != "" {
 		serveArgs = append(serveArgs, "-cacert", *cacert)
+	}
+	if *clientCert != "" {
+		serveArgs = append(serveArgs, "-client-cert", *clientCert, "-client-key", *clientKey)
 	}
 	if *secretsConfig != "" {
 		serveArgs = append(serveArgs, "-secrets-config", *secretsConfig)

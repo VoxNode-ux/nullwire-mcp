@@ -293,3 +293,23 @@ func TestReexecServeStartFailure(t *testing.T) {
 		t.Errorf("expected a start-failure message, got:\n%s", stderr)
 	}
 }
+func TestRunClientCertFlags(t *testing.T) {
+	useFakeScrubber(t)
+	isolateHome(t)
+	asServerChild(t, 0)
+	for _, args := range [][]string{
+		{"-no-scan", "-client-cert", "c.pem"},
+		{"-no-scan", "-client-key", "k.pem"},
+	} {
+		var code int
+		_, stderr := capture(t, func() { code = Run(args) })
+		if code != 2 || !strings.Contains(stderr, "must be given together") {
+			t.Fatalf("%v: code=%d stderr=%q", args, code, stderr)
+		}
+	}
+	var code int
+	stdout, _ := capture(t, func() { code = Run([]string{"-no-scan", "-client-cert", "c.pem", "-client-key", "k.pem"}) })
+	if code != 0 || !strings.Contains(stdout, "-client-cert c.pem -client-key k.pem") {
+		t.Fatalf("code=%d stdout=%q", code, stdout)
+	}
+}
