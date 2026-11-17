@@ -3,10 +3,15 @@ package app
 import (
 	"bytes"
 	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
+	"encoding/json"
 	"encoding/base32"
 	"encoding/hex"
 	"math/big"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -366,5 +371,354 @@ func TestParseDeflateNegotiation(t *testing.T) {
 		if found != c.found || sf != c.serverFresh || cf != c.client {
 			t.Errorf("%q: got %v %v %v", c.in, found, sf, cf)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// body decoding, MCP errors
+
+func exGzip(t *testing.T, s string) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	zw := gzip.NewWriter(&b)
+	if _, err := zw.Write([]byte(s)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+func TestDecodeBodyMaxCut(t *testing.T) {
+	var zl, fl bytes.Buffer
+	zw := zlib.NewWriter(&zl)
+	_, _ = zw.Write([]byte("hello world"))
+	_ = zw.Close()
+	fw, _ := flate.NewWriter(&fl, flate.DefaultCompression)
+	_, _ = fw.Write([]byte("hello world"))
+	_ = fw.Close()
+	gz := exGzip(t, "hello world")
+
+	cases := []struct {
+		name  string
+		ce    string
+		in    []byte
+		limit int
+		text  string
+		cut   bool
+		ok    bool
+	}{
+		{"gzip", "gzip", gz, 1 << 10, "hello world", false, true},
+		{"x-gzip", "x-gzip", gz, 1 << 10, "hello world", false, true},
+		{"mixed case with spaces", " GZIP ", gz, 1 << 10, "hello world", false, true},
+		{"identity is ignored", "identity, gzip", gz, 1 << 10, "hello world", false, true},
+		{"zlib deflate", "deflate", zl.Bytes(), 1 << 10, "hello world", false, true},
+		{"raw deflate", "deflate", fl.Bytes(), 1 << 10, "hello world", false, true},
+		{"cut at the limit", "gzip", gz, 5, "hello", true, true},
+		{"exactly the limit counts as cut", "gzip", gz, 11, "hello world", true, true},
+		{"empty gzip body", "gzip", exGzip(t, ""), 1 << 10, "", false, true},
+		{"brotli is not decoded", "br", []byte("x"), 1 << 10, "", false, false},
+		{"unknown encoding", "snappy", []byte("x"), 1 << 10, "", false, false},
+		{"no encoding", "", []byte("x"), 1 << 10, "", false, false},
+		{"not gzip", "gzip", []byte("plain text"), 1 << 10, "", false, false},
+		{"gzip header and nothing else", "gzip", gz[:10], 1 << 10, "", false, false},
+	}
+	for _, c := range cases {
+		text, cut, ok := decodeBodyMaxCut(c.ce, c.in, c.limit)
+		if text != c.text || cut != c.cut || ok != c.ok {
+			t.Errorf("%s: got (%q, %v, %v), want (%q, %v, %v)", c.name, text, cut, ok, c.text, c.cut, c.ok)
+		}
+	}
+
+	// A stream cut short still gives what was decoded, marked as cut.
+	long := exGzip(t, strings.Repeat("abcdefghij", 30000))
+	text, cut, ok := decodeBodyMaxCut("gzip", long[:len(long)/2], 1<<20)
+	if !ok || !cut || len(text) == 0 {
+		t.Errorf("truncated stream: (%d bytes, %v, %v)", len(text), cut, ok)
+	}
+}
+
+func TestDecodeBodyMaxAndHelpers(t *testing.T) {
+	gz := exGzip(t, "hello world")
+	if text, ok := decodeBodyMax("gzip", gz, 5); !ok || text != "hello"+truncMarker {
+		t.Errorf("cut body: (%q, %v)", text, ok)
+	}
+	if text, ok := decodeBodyMax("gzip", gz, 100); !ok || text != "hello world" {
+		t.Errorf("whole body: (%q, %v)", text, ok)
+	}
+	if _, ok := decodeBodyMax("br", gz, 100); ok {
+		t.Error("br must not decode")
+	}
+
+	for ce, want := range map[string]bool{"gzip": true, "X-Gzip": true, " deflate ": true, "br": false, "zstd": false, "": false} {
+		if got := decodableEncoding(ce); got != want {
+			t.Errorf("decodableEncoding(%q) = %v, want %v", ce, got, want)
+		}
+	}
+	for in, want := range map[string]string{"identity": "", "identity, gzip": "gzip", " gzip , br ": "gzip, br", "": "", ",,": "", "Identity": ""} {
+		if got := effectiveContentEncoding(in); got != want {
+			t.Errorf("effectiveContentEncoding(%q) = %q, want %q", in, got, want)
+		}
+	}
+	h := http.Header{}
+	h.Add("Content-Encoding", "identity")
+	h.Add("Content-Encoding", "gzip")
+	if got := joinedContentEncoding(h); got != "identity, gzip" {
+		t.Errorf("joinedContentEncoding = %q", got)
+	}
+
+	if got := bodyTextMax(h, gz, 1<<10); got != "hello world" {
+		t.Errorf("gzip body: %q", got)
+	}
+	br := http.Header{"Content-Encoding": {"br"}}
+	if got := bodyTextMax(br, []byte("abc"), 1<<10); got != "[encoded body omitted: Content-Encoding br, 3 bytes captured]" {
+		t.Errorf("br body: %q", got)
+	}
+	if got := bodyTextMax(http.Header{}, []byte("plain"), 1<<10); got != "plain" {
+		t.Errorf("plain body: %q", got)
+	}
+	if got := bodyTextMax(h, nil, 1<<10); got != "" {
+		t.Errorf("empty body: %q", got)
+	}
+	if got := bodyTextMax(h, gz, 5); got != "hello"+truncMarker {
+		t.Errorf("body cut at the limit: %q", got)
+	}
+}
+
+type exRPC struct {
+	id     string
+	method string
+	params string
+}
+
+func (r exRPC) req() rpcRequest {
+	req := rpcRequest{Method: r.method}
+	if r.id != "" {
+		req.ID = json.RawMessage(r.id)
+	}
+	if r.params != "" {
+		req.Params = json.RawMessage(r.params)
+	}
+	return req
+}
+
+func exToolResult(t *testing.T, resp *rpcResponse) (string, bool) {
+	t.Helper()
+	if resp == nil || resp.Error != nil {
+		t.Fatalf("expected a tool result, got %+v", resp)
+	}
+	res, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result is %T", resp.Result)
+	}
+	return toolText(t, res)
+}
+
+func TestMCPDispatchEdges(t *testing.T) {
+	app := newTestApp(t)
+
+	// initialize echoes the client's protocol version, or falls back.
+	for params, want := range map[string]string{`{"protocolVersion":"2024-11-05"}`: "2024-11-05", ``: "2025-11-25", `not json`: "2025-11-25"} {
+		resp := app.dispatchTo(exRPC{"1", "initialize", params}.req())
+		res, _ := resp.Result.(map[string]any)
+		if resp.Error != nil || res["protocolVersion"] != want {
+			t.Errorf("initialize %q: %+v", params, resp)
+		}
+	}
+
+	errCases := []struct {
+		name string
+		r    exRPC
+		code int
+		msg  string
+	}{
+		{"empty tool name", exRPC{"1", "tools/call", `{"name":""}`}, -32602, "invalid params"},
+		{"no params", exRPC{"1", "tools/call", ``}, -32602, "invalid params"},
+		{"unknown tool", exRPC{"1", "tools/call", `{"name":"nope"}`}, -32602, "unknown tool"},
+		{"unknown method", exRPC{"1", "nope", ``}, -32601, "method not found"},
+	}
+	for _, c := range errCases {
+		resp := app.dispatchTo(c.r.req())
+		if resp.Error == nil || resp.Error.Code != c.code || resp.Error.Message != c.msg {
+			t.Errorf("%s: %+v", c.name, resp)
+		}
+	}
+
+	toolCases := []struct {
+		name, tool, args, want string
+		isErr                  bool
+	}{
+		{"inspect with bad arguments", "inspect_traffic", `{"limit":"x"}`, "invalid arguments", true},
+		{"inspect with null arguments", "inspect_traffic", `null`, `"flows"`, false},
+		{"inspect limit below the minimum", "inspect_traffic", `{"limit":0}`, `"returned": 0`, false},
+		{"inspect limit above the maximum", "inspect_traffic", `{"limit":100000}`, `"ring_capacity"`, false},
+		{"har with bad arguments", "export_har", `{"limit":"x"}`, "invalid arguments", true},
+		{"curl without arguments", "export_sanitized_curl", ``, "flow_id is required", true},
+		{"curl with bad arguments", "export_sanitized_curl", `{"flow_id":"a"}`, "invalid arguments", true},
+		{"curl with zero", "export_sanitized_curl", `{"flow_id":0}`, "must be a positive integer", true},
+		{"curl with a fraction", "export_sanitized_curl", `{"flow_id":1.5}`, "must be a positive integer", true},
+		{"curl with a huge id", "export_sanitized_curl", `{"flow_id":2e15}`, "must be a positive integer", true},
+		{"curl for a flow that is gone", "export_sanitized_curl", `{"flow_id":99}`, "flow not in RAM ring buffer", true},
+		{"clear", "clear_ram_buffer", ``, "RAM ring buffer wiped", false},
+	}
+	for _, c := range toolCases {
+		params := `{"name":"` + c.tool + `"`
+		if c.args != "" {
+			params += `,"arguments":` + c.args
+		}
+		params += `}`
+		text, isErr := exToolResult(t, app.dispatchTo(exRPC{"1", "tools/call", params}.req()))
+		if !strings.Contains(text, c.want) || isErr != c.isErr {
+			t.Errorf("%s: (%q, %v)", c.name, text, isErr)
+		}
+	}
+}
+
+func TestMCPLineAndBatchEdges(t *testing.T) {
+	app := newTestApp(t)
+
+	for name, line := range map[string]string{
+		"empty line":            "   ",
+		"notification":          `{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		"null id notification":  `{"jsonrpc":"2.0","id":null,"method":"notifications/cancelled"}`,
+		"batch of notification": `[{"jsonrpc":"2.0","method":"notifications/initialized"}]`,
+	} {
+		if out := rpc(t, app, line); out != "" {
+			t.Errorf("%s must produce no output, got %q", name, out)
+		}
+	}
+
+	m := parseFrame(t, rpc(t, app, `{"jsonrpc":"2.0","id":7}`))
+	if e, _ := m["error"].(map[string]any); e == nil || e["code"] != float64(-32600) || e["message"] != "invalid request" {
+		t.Errorf("missing method: %v", m)
+	}
+	m = parseFrame(t, rpc(t, app, `[]`))
+	if e, _ := m["error"].(map[string]any); e == nil || e["code"] != float64(-32600) || e["message"] != "empty batch" {
+		t.Errorf("empty batch: %v", m)
+	}
+	m = parseFrame(t, rpc(t, app, `[1,`))
+	if e, _ := m["error"].(map[string]any); e == nil || e["code"] != float64(-32700) {
+		t.Errorf("broken batch: %v", m)
+	}
+
+	out := rpc(t, app, `[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/initialized"},{"jsonrpc":"2.0","id":2},"bad"]`)
+	var resps []map[string]any
+	if err := json.Unmarshal([]byte(out), &resps); err != nil || len(resps) != 3 {
+		t.Fatalf("batch reply: %v\n%s", err, out)
+	}
+	if resps[0]["id"] != float64(1) || resps[0]["result"] == nil {
+		t.Errorf("ping: %v", resps[0])
+	}
+	if e, _ := resps[1]["error"].(map[string]any); e == nil || e["message"] != "missing method" || resps[1]["id"] != float64(2) {
+		t.Errorf("missing method in a batch: %v", resps[1])
+	}
+	if e, _ := resps[2]["error"].(map[string]any); e == nil || e["message"] != "invalid request" || resps[2]["id"] != nil {
+		t.Errorf("invalid entry in a batch: %v", resps[2])
+	}
+}
+
+func TestShellQuoteAndCurlEdges(t *testing.T) {
+	tag := "[REDACTED_TOKEN#abc123]"
+	cases := map[string]string{
+		"":                     "''",
+		"plain":                "'plain'",
+		"it's":                 `'it'\''s'`,
+		tag:                    `"$NULLWIRE_AUTH_TOKEN"`,
+		"Bearer " + tag:        `'Bearer '"$NULLWIRE_AUTH_TOKEN"`,
+		"[REDACTED_COOKIE#abc123]": `"$NULLWIRE_COOKIE"`,
+		"[REDACTED_IP#abc123]":     `"$NULLWIRE_IP"`,
+		"[REDACTED_KEY#abc123]":    `"$NULLWIRE_PRIVATE_KEY"`,
+		"[REDACTED_PAN#abc123]":    `"$NULLWIRE_CARD_NUMBER"`,
+	}
+	for in, want := range cases {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
+		}
+	}
+
+	if got := buildCurl(FlowEntry{ID: 4, Method: "CONNECT"}); !strings.Contains(got, "Flow 4 was a blind CONNECT tunnel") {
+		t.Errorf("CONNECT: %q", got)
+	}
+	e := FlowEntry{
+		ID: 5, Method: "HEAD", URL: "http://x/a",
+		RequestHeaders: map[string]string{"Host": "x", "Content-Length": "3", "Content-Encoding": "gzip", "X-A": tag, "Accept": "*/*"},
+		RequestBody:    "[protobuf/gRPC body decoded without a schema]",
+	}
+	got := buildCurl(e)
+	for _, want := range []string{"# Replay of flow 5", "export NULLWIRE_AUTH_TOKEN=", "curl -I 'http://x/a'", `-H 'Accept: */*'`, `-H 'X-A: '"$NULLWIRE_AUTH_TOKEN"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("curl is missing %q:\n%s", want, got)
+		}
+	}
+	for _, not := range []string{"Host", "Content-Length", "Content-Encoding", "--data-raw"} {
+		if strings.Contains(got, not) {
+			t.Errorf("curl must not contain %q:\n%s", not, got)
+		}
+	}
+	e = FlowEntry{ID: 6, Method: "POST", URL: "http://x/", RequestBody: "a=1" + truncMarker,
+		RequestHeaders: map[string]string{"Content-Encoding": "br"}}
+	if got := buildCurl(e); !strings.Contains(got, "--data-raw 'a=1'") || !strings.Contains(got, "Content-Encoding: br") {
+		t.Errorf("POST curl:\n%s", got)
+	}
+	e.RequestBody = "[encoded body omitted: Content-Encoding br, 3 bytes captured]"
+	if got := buildCurl(e); strings.Contains(got, "--data-raw") {
+		t.Errorf("an omitted body must not be replayed:\n%s", got)
+	}
+}
+
+func TestLoadSecretsConfigErrors(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if c, err := loadSecretsConfig(""); err != nil || c == nil {
+		t.Errorf("no path: (%v, %v)", c, err)
+	}
+	cases := map[string]struct{ body, want string }{
+		"invalid json":      {`{`, "invalid JSON"},
+		"empty pattern":     {`{"extra_regex_patterns":[{"name":"x","pattern":""}]}`, "empty pattern"},
+		"bad pattern":       {`{"extra_regex_patterns":[{"name":"x","pattern":"("}]}`, "extra_regex_patterns[0]"},
+		"bad vendor":        {`{"custom_vendors":[{"name":"v","pattern":"("}]}`, "custom_vendors[0]"},
+	}
+	for name, c := range cases {
+		_, err := loadSecretsConfig(write(name+".json", c.body))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want it to contain %q", name, err, c.want)
+		}
+	}
+	if _, err := loadSecretsConfig(filepath.Join(dir, "missing.json")); err == nil || !strings.Contains(err.Error(), "-secrets-config") {
+		t.Errorf("missing file: %v", err)
+	}
+	if c, err := loadSecretsConfig(write("ok.json", `{"extra_regex_patterns":[{"name":"x","pattern":"abc[0-9]+"}]}`)); err != nil || len(c.ExtraRegexPatterns) != 1 {
+		t.Errorf("valid config: (%+v, %v)", c, err)
+	}
+}
+
+func TestParseTargetsAndDNSErrors(t *testing.T) {
+	if def, named, err := parseTargets("http://a.example, api=http://b.example"); err != nil || def == nil || named["api"] == nil {
+		t.Errorf("default and named: (%v, %v, %v)", def, named, err)
+	}
+	for name, spec := range map[string]string{
+		"nothing":           "",
+		"two defaults":      "http://a.example,http://b.example",
+		"name used twice":   "api=http://a.example,API=http://b.example",
+		"unusable upstream": "ftp://a.example",
+	} {
+		if _, _, err := parseTargets(spec); err == nil {
+			t.Errorf("%s: %q must be refused", name, spec)
+		}
+	}
+	for _, spec := range []string{"", " , ", "not-an-ip", "1.1.1.1:0", "1.1.1.1:99999", "1.1.1.1:x"} {
+		if _, err := parseDNSServers(spec); err == nil {
+			t.Errorf("parseDNSServers(%q) must fail", spec)
+		}
+	}
+	if got, err := parseDNSServers("1.1.1.1, [2606:4700::1111]:5353"); err != nil || len(got) != 2 || got[0] != "1.1.1.1:53" || got[1] != "[2606:4700::1111]:5353" {
+		t.Errorf("valid servers: (%v, %v)", got, err)
 	}
 }

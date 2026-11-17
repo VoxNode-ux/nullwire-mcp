@@ -135,3 +135,148 @@ func FuzzBinaryWalkers(f *testing.F) {
 		}
 	})
 }
+func TestMsgPackExtBinFloatAndIntBranches(t *testing.T) {
+	runWalkCases(t, func(b []byte) (string, bool) { return msgpackToJSON(b, 0) }, []walkCase{
+		{"ext 8", "\xc7\x04\x07abcd", `"[ext(7) 4 bytes]"`, true},
+		{"ext 16", "\xc8\x00\x02\x05ab", `"[ext(5) 2 bytes]"`, true},
+		{"ext 32", "\xc9\x00\x00\x00\x01\x05a", `"[ext(5) 1 bytes]"`, true},
+		{"fixext with a negative type", "\xd4\xff\x01", `"[ext(-1) 1 bytes]"`, true},
+		{"fixext 16", "\xd8\x01" + strings.Repeat("a", 16), `"[ext(1) 16 bytes]"`, true},
+		{"cut ext payload", "\xc7\x04\x07ab", `"[ext(7) 4 bytes]"`, false},
+		{"cut ext header", "\xc7\x04", ``, false},
+		{"bin 16", "\xc5\x00\x03abc", `"[binary 3 bytes]"`, true},
+		{"bin 32", "\xc6\x00\x00\x00\x02ab", `"[binary 2 bytes]"`, true},
+		{"float 32", "\xca\x3f\xc0\x00\x00", `1.5`, true},
+		{"float 32 NaN", "\xca\x7f\xc0\x00\x00", `null`, true},
+		{"float 64", "\xcb\x40\x59\x00\x00\x00\x00\x00\x00", `100`, true},
+		{"float 64 infinity", "\xcb\x7f\xf0\x00\x00\x00\x00\x00\x00", `null`, true},
+		{"cut float", "\xcb\x3f", ``, false},
+		{"uint 16 and 32", "\x92\xcd\x01\x00\xce\x00\x01\x00\x00", `[256,65536]`, true},
+		{"signed ints of every width", "\x94\xd0\x80\xd1\xff\x00\xd2\xff\xff\xff\xfe\xd3\xff\xff\xff\xff\xff\xff\xff\xff", `[-128,-256,-2,-1]`, true},
+		{"cut uint", "\xcd\x01", ``, false},
+		{"fixints", "\x92\x7f\xe0", `[127,-32]`, true},
+		{"str 16", "\xda\x00\x02hi", `"hi"`, true},
+		{"str 32", "\xdb\x00\x00\x00\x02hi", `"hi"`, true},
+		{"empty fixstr", "\xa0", `""`, true},
+		{"array 16", "\xdc\x00\x02\x01\x02", `[1,2]`, true},
+		{"array 32", "\xdd\x00\x00\x00\x01\x05", `[5]`, true},
+		{"map 16", "\xde\x00\x01\xa1a\x01", `{"a":1}`, true},
+		{"map 32", "\xdf\x00\x00\x00\x01\xa1a\x02", `{"a":2}`, true},
+		{"empty containers", "\x92\x90\x80", `[[],{}]`, true},
+	})
+}
+
+func TestMsgPackMapKeys(t *testing.T) {
+	runWalkCases(t, func(b []byte) (string, bool) { return msgpackToJSON(b, 0) }, []walkCase{
+		{"float key", "\x81\xcb\x3f\xf8\x00\x00\x00\x00\x00\x00\xa1x", `{"1.5":"x"}`, true},
+		{"bool key", "\x81\xc3\x01", `{"true":1}`, true},
+		{"nil key", "\x81\xc0\x01", `{"null":1}`, true},
+		{"negative number key", "\x81\xff\x01", `{"-1":1}`, true},
+		{"array key", "\x81\x91\x01\xa1x", `{"[1]":"x"}`, true},
+		{"map key", "\x81\x81\xa1a\x01\x02", `{"{\"a\":1}":2}`, true},
+		{"binary key", "\x81\xc4\x02ab\x01", `{"\"[binary 2 bytes]\"":1}`, true},
+		{"str 8 key", "\x81\xd9\x01k\x01", `{"k":1}`, true},
+		{"cut before a key", "\x81", `{}`, false},
+	})
+}
+
+func TestMsgPackLimitStopsNesting(t *testing.T) {
+	out, complete := msgpackToJSON([]byte("\x91\x91\x01"), 1)
+	if out != `[]` || complete {
+		t.Errorf("got (%q, %v)", out, complete)
+	}
+}
+
+func TestCBORNumbersAndSimpleValues(t *testing.T) {
+	runWalkCases(t, func(b []byte) (string, bool) { return cborToJSON(b, 0) }, []walkCase{
+		{"integer widths", "\x84\x18\xff\x19\x01\x00\x1a\x00\x01\x00\x00\x1b\x00\x00\x00\x01\x00\x00\x00\x00", `[255,256,65536,4294967296]`, true},
+		{"half zero", "\xf9\x00\x00", `0`, true},
+		{"half negative zero", "\xf9\x80\x00", `-0`, true},
+		{"half one", "\xf9\x3c\x00", `1`, true},
+		{"half negative two", "\xf9\xc0\x00", `-2`, true},
+		{"half largest", "\xf9\x7b\xff", `65504`, true},
+		{"half negative infinity", "\xf9\xfc\x00", `null`, true},
+		{"half NaN", "\xf9\x7e\x00", `null`, true},
+		{"float 32", "\xfa\x3f\xc0\x00\x00", `1.5`, true},
+		{"float 32 NaN", "\xfa\x7f\xc0\x00\x00", `null`, true},
+		{"float 64 negative infinity", "\xfb\xff\xf0\x00\x00\x00\x00\x00\x00", `null`, true},
+		{"false true null undefined", "\x84\xf4\xf5\xf6\xf7", `[false,true,null,null]`, true},
+		{"simple value 0", "\xe0", `"[simple 0]"`, true},
+		{"simple value in the next byte", "\xf8\x20", `"[simple 32]"`, true},
+		{"text length forms", "\x84\x78\x03abc\x79\x00\x03abc\x7a\x00\x00\x00\x03abc\x7b\x00\x00\x00\x00\x00\x00\x00\x03abc", `["abc","abc","abc","abc"]`, true},
+		{"byte string length form", "\x58\x02ab", `"[binary 2 bytes]"`, true},
+		{"array and map with a length byte", "\x82\x98\x02\x01\x02\xb8\x01\x61a\x01", `[[1,2],{"a":1}]`, true},
+		{"tag with a wider argument", "\xd9\x01\x00\x01", `1`, true},
+		{"cut head", "\x19\x01", ``, false},
+		{"reserved head in an array", "\x81\x1f", `[]`, false},
+	})
+}
+
+func TestCBORKeysAndIndefiniteForms(t *testing.T) {
+	runWalkCases(t, func(b []byte) (string, bool) { return cborToJSON(b, 0) }, []walkCase{
+		{"float key", "\xa1\xf9\x3e\x00\x61x", `{"1.5":"x"}`, true},
+		{"negative key", "\xa1\x20\x01", `{"-1":1}`, true},
+		{"byte string key", "\xa1\x41a\x01", `{"\"[binary 1 bytes]\"":1}`, true},
+		{"tagged text key", "\xa1\xc1\x61a\x01", `{"\"a\"":1}`, true},
+		{"array key", "\xa1\x81\x01\x02", `{"[1]":2}`, true},
+		{"cut before a key", "\xa1", `{}`, false},
+		{"indefinite array cut", "\x9f\x01", `[1]`, false},
+		{"indefinite map cut after a key", "\xbf\x61a", `{"a":null}`, false},
+		{"indefinite text cut", "\x7f\x63abc", `"abc"`, false},
+		{"byte chunk of the wrong type", "\x5f\x61a\xff", `"[binary 0 bytes]"`, false},
+		{"embedded item that is not a byte string", "\xd8\x18\x01", ``, false},
+		{"embedded item that is indefinite", "\xd8\x18\x5f", ``, false},
+		{"embedded item cut short", "\xd8\x18\x45\xa1\x61a", `{"a":null}`, false},
+	})
+	out, complete := cborToJSON([]byte(strings.Repeat("\x81", 200)), 0)
+	if complete || !json.Valid([]byte(out)) || strings.Count(out, "[") > binMaxDepth {
+		t.Errorf("deep nesting: complete=%v, valid=%v", complete, json.Valid([]byte(out)))
+	}
+}
+
+func TestBinaryContentTypes(t *testing.T) {
+	for ct, want := range map[string]bool{
+		"application/msgpack":             true,
+		"application/x-msgpack":           true,
+		"application/vnd.msgpack":         true,
+		"application/messagepack":         true,
+		"application/x-messagepack":       true,
+		"application/foo+msgpack":         true,
+		"Application/MsgPack; charset=x":  true,
+		"application/json":                false,
+		"":                                false,
+	} {
+		if got := isMsgPackContentType(ct); got != want {
+			t.Errorf("isMsgPackContentType(%q) = %v, want %v", ct, got, want)
+		}
+	}
+	for ct, want := range map[string]bool{
+		"application/cbor":              true,
+		"application/x-cbor":            true,
+		"application/cbor-seq":          true,
+		"application/senml+cbor":        true,
+		"application/foo+cbor-seq":      true,
+		"application/CBOR; charset=bin": true,
+		"application/json":              false,
+		"":                              false,
+	} {
+		if got := isCBORContentType(ct); got != want {
+			t.Errorf("isCBORContentType(%q) = %v, want %v", ct, got, want)
+		}
+	}
+}
+
+func TestBinaryBodyJSONNotes(t *testing.T) {
+	text, note, ok := binaryBodyJSON("application/msgpack", []byte("\x81\xa1a"), 0)
+	if !ok || text != `{"a":null}` || !strings.Contains(note, "ends early") {
+		t.Errorf("cut MessagePack: (%q, %q, %v)", text, note, ok)
+	}
+	text, note, ok = binaryBodyJSON("application/cbor", []byte("\xa1\x61a\x01"), 0)
+	if !ok || text != `{"a":1}` || !strings.Contains(note, "CBOR body shown as JSON") {
+		t.Errorf("complete CBOR: (%q, %q, %v)", text, note, ok)
+	}
+	text, note, ok = binaryBodyJSON("application/cbor", []byte("\xff"), 0)
+	if !ok || text != "[CBOR body not readable, not captured: 1 bytes]" || !strings.Contains(note, "could not be read") {
+		t.Errorf("unreadable CBOR: (%q, %q, %v)", text, note, ok)
+	}
+}
