@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -931,5 +932,921 @@ func TestGzipBodiesAreDecodedAndScrubbed(t *testing.T) {
 		RequestBody:    out}
 	if cmd := buildCurl(e); strings.Contains(strings.ToLower(cmd), "content-encoding") {
 		t.Errorf("replay must drop Content-Encoding for a decoded body:\n%s", cmd)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// coverage: upstream and proxy routing
+// ---------------------------------------------------------------------------
+
+// covReq builds a relative-URL request with a Host and header pairs.
+func covReq(method, target, host string, hdr ...string) *http.Request {
+	r := httptest.NewRequest(method, target, nil)
+	r.Host = host
+	for i := 0; i+1 < len(hdr); i += 2 {
+		r.Header.Set(hdr[i], hdr[i+1])
+	}
+	return r
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %v", raw, err)
+	}
+	return u
+}
+
+func TestCovResolveUpstreamXTargetURLRejections(t *testing.T) {
+	app := newTestApp(t) // port 1, so http://127.0.0.1:1 is the proxy itself
+	cases := []struct {
+		name, target string
+		status       int
+		msg          string
+	}{
+		{"bad scheme", "ftp://example.com/x", http.StatusBadRequest, "http(s)"},
+		{"no scheme", "example.com/x", http.StatusBadRequest, "http(s)"},
+		{"no host", "http:///x", http.StatusBadRequest, "http(s)"},
+		{"malformed", "http://[::1", http.StatusBadRequest, "invalid target URL"},
+		{"self loop ip", "http://127.0.0.1:1/v1", http.StatusLoopDetected, "proxy itself"},
+		{"self loop localhost", "http://localhost:1", http.StatusLoopDetected, "proxy itself"},
+		{"self loop ipv6", "http://[::1]:1/", http.StatusLoopDetected, "proxy itself"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := covReq("GET", "/v1/x", "127.0.0.1:8080", "X-Target-URL", tc.target)
+			u, reverse, status, err := app.resolveUpstream(r)
+			if err == nil || u != nil {
+				t.Fatalf("want an error and no URL, got %v / %v", u, err)
+			}
+			if status != tc.status || !reverse {
+				t.Errorf("status = %d reverse = %v, want %d true", status, reverse, tc.status)
+			}
+			if !strings.Contains(err.Error(), tc.msg) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.msg)
+			}
+
+			rec := httptest.NewRecorder()
+			app.ServeHTTP(rec, covReq("GET", "/v1/x", "127.0.0.1:8080", "X-Target-URL", tc.target))
+			if rec.Code != tc.status || !strings.HasPrefix(rec.Body.String(), "nullwire-mcp: ") {
+				t.Errorf("ServeHTTP = %d %q, want %d with a nullwire-mcp message", rec.Code, rec.Body.String(), tc.status)
+			}
+		})
+	}
+
+	// A blank header is the same as no header: nothing to route to.
+	_, _, status, err := app.resolveUpstream(covReq("GET", "/x", "127.0.0.1:8080", "X-Target-URL", "   "))
+	if err == nil || status != http.StatusBadRequest || !strings.Contains(err.Error(), "no upstream") {
+		t.Errorf("blank X-Target-URL: %d %v", status, err)
+	}
+	// Only loopback Host headers are answered in reverse mode.
+	_, reverse, status, err := app.resolveUpstream(covReq("GET", "/x", "evil.example.com"))
+	if err == nil || status != http.StatusForbidden || !reverse {
+		t.Errorf("foreign Host: %d %v reverse=%v", status, err, reverse)
+	}
+}
+
+func TestCovResolveUpstreamForwardModeRejections(t *testing.T) {
+	app := newTestApp(t)
+	for _, c := range []struct {
+		raw    string
+		status int
+	}{
+		{"ftp://example.com/x", http.StatusBadRequest},
+		{"http://127.0.0.1:1/x", http.StatusLoopDetected},
+		{"https://localhost:1/x", http.StatusLoopDetected},
+	} {
+		u := mustParseURL(t, c.raw)
+		r := &http.Request{Method: "GET", URL: u, Host: u.Host, Header: http.Header{}}
+		got, reverse, status, err := app.resolveUpstream(r)
+		if err == nil || got != nil || status != c.status || reverse {
+			t.Errorf("%s: got %v reverse=%v status=%d err=%v, want status %d", c.raw, got, reverse, status, err, c.status)
+		}
+	}
+	u := mustParseURL(t, "http://example.com:8080/a?b=1")
+	got, reverse, status, err := app.resolveUpstream(&http.Request{Method: "GET", URL: u, Host: u.Host, Header: http.Header{}})
+	if err != nil || status != 0 || reverse || got == nil || got.String() != "http://example.com:8080/a?b=1" {
+		t.Errorf("plain forward request: %v reverse=%v status=%d err=%v", got, reverse, status, err)
+	}
+}
+
+func TestCovResolveUpstreamTargetMapErrors(t *testing.T) {
+	app := newTestApp(t)
+	app.gwMap = map[string]*url.URL{
+		"alpha": mustParseURL(t, "http://gw.example.com/base"),
+		"me":    mustParseURL(t, "http://127.0.0.1:1"),
+	}
+	app.upstreams = map[string]*url.URL{"named": mustParseURL(t, "http://named.example.com")}
+
+	// An unknown gateway name is a 404 that lists the names that exist,
+	// including the ones given to -target.
+	_, _, status, err := app.resolveUpstream(covReq("GET", "/_gw/nope/x", "127.0.0.1:8080"))
+	if err == nil || status != http.StatusNotFound || !strings.Contains(err.Error(), `unknown gateway name "nope"`) ||
+		!strings.Contains(err.Error(), "alpha") || !strings.Contains(err.Error(), "named") {
+		t.Errorf("unknown gateway name: %d %v", status, err)
+	}
+	// The bare prefix has no name at all.
+	if _, _, status, err = app.resolveUpstream(covReq("GET", "/_gw", "127.0.0.1:8080")); err == nil || status != http.StatusNotFound {
+		t.Errorf("bare /_gw: %d %v", status, err)
+	}
+	// The prefix must not be percent-encoded.
+	if _, _, status, err = app.resolveUpstream(covReq("GET", "/%5Fgw/alpha/x", "127.0.0.1:8080")); err == nil ||
+		status != http.StatusBadRequest || !strings.Contains(err.Error(), "percent-encoded") {
+		t.Errorf("encoded prefix: %d %v", status, err)
+	}
+	// A route that points back at the proxy is refused.
+	if _, _, status, err = app.resolveUpstream(covReq("GET", "/_gw/me/x", "127.0.0.1:8080")); err == nil || status != http.StatusLoopDetected {
+		t.Errorf("self-pointing gateway: %d %v", status, err)
+	}
+	// A known name keeps the base path and the query; the match ignores case.
+	u, reverse, status, err := app.resolveUpstream(covReq("GET", "/_gw/ALPHA/v1/chat?x=1", "127.0.0.1:8080"))
+	if err != nil || status != 0 || !reverse || u == nil || u.String() != "http://gw.example.com/base/v1/chat?x=1" {
+		t.Errorf("alpha: %v reverse=%v status=%d err=%v", u, reverse, status, err)
+	}
+	// Names from -target also work under /_gw/.
+	if u, _, _, err = app.resolveUpstream(covReq("GET", "/_gw/named/ping", "127.0.0.1:8080")); err != nil || u == nil || u.Host != "named.example.com" || u.Path != "/ping" {
+		t.Errorf("-target name under /_gw/: %v %v", u, err)
+	}
+
+	// With only -target-map set, a path outside /_gw/ has no route.
+	only := newTestApp(t)
+	only.gwMap = map[string]*url.URL{"alpha": mustParseURL(t, "http://gw.example.com")}
+	_, _, status, err = only.resolveUpstream(covReq("GET", "/v1/chat", "127.0.0.1:8080"))
+	if err == nil || status != http.StatusNotFound || !strings.Contains(err.Error(), "unknown route") || !strings.Contains(err.Error(), "/_gw/<name>/") {
+		t.Errorf("unknown route: %d %v", status, err)
+	}
+}
+
+func TestCovMatchUpstreamAndUpstreamNames(t *testing.T) {
+	app := newTestApp(t)
+	if got := app.upstreamNames(); len(got) != 0 {
+		t.Errorf("no upstreams: names = %v", got)
+	}
+	if _, _, _, found, err := app.matchUpstream("/alpha/x", ""); found || err != nil {
+		t.Errorf("no upstreams must never match: found=%v err=%v", found, err)
+	}
+
+	app.upstreams = map[string]*url.URL{
+		"zeta":  mustParseURL(t, "http://z.example.com"),
+		"alpha": mustParseURL(t, "http://a.example.com"),
+		"mid":   mustParseURL(t, "http://b.example.com/base"),
+	}
+	if got := strings.Join(app.upstreamNames(), ","); got != "alpha,mid,zeta" {
+		t.Errorf("upstreamNames = %q, want sorted alpha,mid,zeta", got)
+	}
+
+	cases := []struct {
+		path, raw   string
+		found       bool
+		host, rest  string
+		wantRawRest string
+	}{
+		{"/alpha/v1/x", "", true, "a.example.com", "/v1/x", ""},
+		{"/ALPHA/v1", "", true, "a.example.com", "/v1", ""},
+		{"/mid", "", true, "b.example.com", "/", ""},
+		{"/zeta/", "", true, "z.example.com", "/", ""},
+		{"/alpha/v1/x", "/alpha/v1/x", true, "a.example.com", "/v1/x", "/v1/x"},
+		{"/gamma/x", "", false, "", "", ""},
+		{"alpha/x", "", false, "", "", ""},
+		{"/", "", false, "", "", ""},
+	}
+	for _, c := range cases {
+		base, rest, rawRest, found, err := app.matchUpstream(c.path, c.raw)
+		if err != nil || found != c.found {
+			t.Errorf("matchUpstream(%q, %q): found=%v err=%v, want found=%v", c.path, c.raw, found, err, c.found)
+			continue
+		}
+		if !found {
+			continue
+		}
+		if base.Host != c.host || rest != c.rest || rawRest != c.wantRawRest {
+			t.Errorf("matchUpstream(%q, %q) = %s %q %q, want %s %q %q", c.path, c.raw, base.Host, rest, rawRest, c.host, c.rest, c.wantRawRest)
+		}
+	}
+	if _, _, _, found, err := app.matchUpstream("/alpha/v1", "/%61lpha/v1"); found || err == nil || !strings.Contains(err.Error(), "percent-encoded") {
+		t.Errorf("encoded prefix: found=%v err=%v", found, err)
+	}
+
+	// Through resolveUpstream: no -target and an unknown first segment.
+	_, _, status, err := app.resolveUpstream(covReq("GET", "/gamma/x", "127.0.0.1:8080"))
+	if err == nil || status != http.StatusNotFound || !strings.Contains(err.Error(), "unknown upstream") ||
+		!strings.Contains(err.Error(), "/alpha/, /mid/, /zeta/") {
+		t.Errorf("unknown upstream: %d %v", status, err)
+	}
+	// The default -target takes a path that names no upstream.
+	app.target = mustParseURL(t, "http://default.example.com/root")
+	u, _, status, err := app.resolveUpstream(covReq("GET", "/gamma/x", "127.0.0.1:8080"))
+	if err != nil || status != 0 || u.Host != "default.example.com" || u.Path != "/root/gamma/x" {
+		t.Errorf("default target: %v %d %v", u, status, err)
+	}
+	// An upstream prefix wins over the default and is stripped.
+	u, _, _, err = app.resolveUpstream(covReq("GET", "/mid/v1?q=1", "127.0.0.1:8080"))
+	if err != nil || u.Host != "b.example.com" || u.Path != "/base/v1" || u.RawQuery != "q=1" {
+		t.Errorf("mid upstream: %v %v", u, err)
+	}
+	if _, _, status, err = app.resolveUpstream(covReq("GET", "/%61lpha/v1", "127.0.0.1:8080")); err == nil || status != http.StatusBadRequest {
+		t.Errorf("percent-encoded upstream prefix: %d %v", status, err)
+	}
+}
+
+func TestCovIgnoredURLSubstringsAreNotCaptured(t *testing.T) {
+	app := newTestApp(t)
+	app.ignoreURLSubstrings = []string{"", "/healthz"} // an empty entry must ignore nothing
+	flow := func(u string) rawFlow {
+		return rawFlow{method: "GET", url: u, reqHeaders: http.Header{}, respHeaders: http.Header{}, status: 200}
+	}
+	if _, ok := app.buildEntry(flow("http://svc.test/healthz?probe=1")); ok {
+		t.Errorf("a URL with an ignored substring must not be stored")
+	}
+	if e, ok := app.buildEntry(flow("http://svc.test/api")); !ok || !strings.Contains(e.URL, "svc.test/api") {
+		t.Errorf("an ordinary URL must be stored: %v %q", ok, e.URL)
+	}
+
+	// End to end: the client still gets its answer, but only /api is recorded.
+	up := newUpstream(t, &upstreamSeen{})
+	app.target = mustParseURL(t, up.URL)
+	for _, p := range []string{"/healthz", "/api"} {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, covReq("GET", p, "127.0.0.1:8080"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", p, rec.Code)
+		}
+	}
+	waitForRing(t, app, 1)
+	if n := app.ring.Len(); n != 1 {
+		t.Errorf("ring has %d entries, want only the /api flow", n)
+	}
+	if e := app.ring.ListRecent(1, "", "")[0]; !strings.HasSuffix(e.URL, "/api") {
+		t.Errorf("stored flow = %q", e.URL)
+	}
+}
+
+func TestCovCopyHeadersDropsHopByHop(t *testing.T) {
+	src := http.Header{"Connection": {"close, x-a"}, "X-A": {"1"}, "Te": {"trailers"}, "Trailer": {"X-T"}, "Upgrade": {"websocket"}, "Transfer-Encoding": {"chunked"}, "Keep-Alive": {"timeout=5"}, "Content-Type": {"text/plain"}, "X-Drop": {"1"}, "x-lower": {"v"}}
+	dst := copyHeaders(src, "x-drop")
+	if len(dst) != 2 || dst.Get("Content-Type") != "text/plain" || dst.Get("X-Lower") != "v" {
+		t.Errorf("copyHeaders = %v, want only Content-Type and X-Lower", dst)
+	}
+	dst["Content-Type"][0] = "changed"
+	if src.Get("Content-Type") != "text/plain" {
+		t.Errorf("copyHeaders must copy the value slices")
+	}
+}
+
+func TestCovServeHTTPStripsHopByHopHeaders(t *testing.T) {
+	app := newTestApp(t)
+	got := make(chan http.Header, 1)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(up.Close)
+	app.target = mustParseURL(t, up.URL)
+
+	req := covReq("GET", "/x", "127.0.0.1:8080",
+		"Connection", "keep-alive, X-Hop-Custom",
+		"X-Hop-Custom", "drop-me",
+		"Keep-Alive", "timeout=5",
+		"Proxy-Connection", "keep-alive",
+		"Proxy-Authorization", "Basic dXNlcjpwYXNz",
+		"X-Target-URL", up.URL,
+		"X-Keep", "stay")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	var h http.Header
+	select {
+	case h = <-got:
+	case <-time.After(3 * time.Second):
+		t.Fatal("upstream never saw the request")
+	}
+	for _, name := range []string{"X-Hop-Custom", "Keep-Alive", "Proxy-Connection", "Proxy-Authorization", "X-Target-URL"} {
+		if v := h.Get(name); v != "" {
+			t.Errorf("upstream received %s: %q", name, v)
+		}
+	}
+	if h.Get("X-Keep") != "stay" {
+		t.Errorf("an ordinary header was lost: %v", h)
+	}
+}
+
+func TestCovServeHTTPTruncatesStoredBodiesButForwardsAll(t *testing.T) {
+	app := newTestApp(t)
+	respBig := strings.Repeat("lorem ipsum dolor ", 17000) // 306000 bytes, over maxRespBody
+	reqBig := strings.Repeat("hello world ", 4000)         // 48000 bytes, over maxReqBody
+	var mu sync.Mutex
+	gotLen := -1
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotLen = len(b)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, respBig)
+	}))
+	t.Cleanup(up.Close)
+	app.target = mustParseURL(t, up.URL)
+
+	req := httptest.NewRequest("POST", "/big", strings.NewReader(reqBig))
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || rec.Body.Len() != len(respBig) {
+		t.Fatalf("client got %d with %d bytes, want 200 with %d", rec.Code, rec.Body.Len(), len(respBig))
+	}
+	mu.Lock()
+	if gotLen != len(reqBig) {
+		t.Errorf("upstream received %d bytes, want the full %d", gotLen, len(reqBig))
+	}
+	mu.Unlock()
+
+	waitForRing(t, app, 1)
+	e := app.ring.ListRecent(1, "POST", "/big")[0]
+	if !strings.HasSuffix(e.ResponseBody, truncMarker) || len(e.ResponseBody) > maxRespBody+len(truncMarker) {
+		t.Errorf("stored response: %d bytes, marker=%v", len(e.ResponseBody), strings.HasSuffix(e.ResponseBody, truncMarker))
+	}
+	if !strings.HasSuffix(e.RequestBody, truncMarker) || len(e.RequestBody) > maxReqBody+len(truncMarker) {
+		t.Errorf("stored request: %d bytes, marker=%v", len(e.RequestBody), strings.HasSuffix(e.RequestBody, truncMarker))
+	}
+}
+
+func TestCovServeHTTPUnreachableUpstreamReturns502(t *testing.T) {
+	app := newTestApp(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := ln.Addr().String()
+	_ = ln.Close() // nothing listens here any more
+	app.target = mustParseURL(t, "http://"+dead)
+
+	req := httptest.NewRequest("POST", "/v1/chat", strings.NewReader("ping body"))
+	req.Host = "127.0.0.1:8080"
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "upstream error") {
+		t.Fatalf("got %d %q, want 502 with an upstream error", rec.Code, rec.Body.String())
+	}
+	waitForRing(t, app, 1)
+	e := app.ring.ListRecent(1, "POST", "/v1/chat")[0]
+	if e.StatusCode != http.StatusBadGateway || !strings.Contains(e.ResponseBody, "upstream error") {
+		t.Errorf("flow = %d %q", e.StatusCode, e.ResponseBody)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// coverage: tunnels and upgrades
+// ---------------------------------------------------------------------------
+
+// covNoHijack is a recorder that claims to be hijackable but always refuses.
+type covNoHijack struct{ *httptest.ResponseRecorder }
+
+func (covNoHijack) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return nil, nil, fmt.Errorf("hijack refused")
+}
+
+func covConnect(authority string) *http.Request {
+	return &http.Request{Method: http.MethodConnect, Host: authority, URL: &url.URL{Host: authority}, Header: http.Header{}}
+}
+
+func TestCovConnectRejectsMalformedAuthority(t *testing.T) {
+	app := newTestApp(t)
+	for _, authority := range []string{"", "example.com", "example.com:abc", ":80", "example.com:0", "example.com:-1", "example.com:65536"} {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, covConnect(authority))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "host:port") {
+			t.Errorf("CONNECT %q = %d %q, want 400 about host:port", authority, rec.Code, rec.Body.String())
+		}
+	}
+	if n := app.tunnels.Load(); n != 0 {
+		t.Errorf("rejected CONNECTs left %d tunnels counted", n)
+	}
+}
+
+func TestCovConnectRefusesSelfDial(t *testing.T) {
+	app := newTestApp(t) // port 1
+	for _, authority := range []string{"127.0.0.1:1", "localhost:1", "[::1]:1", "0.0.0.0:1", "127.0.0.2:1"} {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, covConnect(authority))
+		if rec.Code != http.StatusLoopDetected || !strings.Contains(rec.Body.String(), "proxy itself") {
+			t.Errorf("CONNECT %s = %d %q, want 508", authority, rec.Code, rec.Body.String())
+		}
+	}
+	if n := app.tunnels.Load(); n != 0 {
+		t.Errorf("refused CONNECTs left %d tunnels counted", n)
+	}
+}
+
+func TestCovTunnelCapacity(t *testing.T) {
+	app := newTestApp(t)
+	for i := 0; i < maxTunnels; i++ {
+		if !app.acquireTunnel() {
+			t.Fatalf("acquire %d of %d failed", i+1, maxTunnels)
+		}
+	}
+	if app.acquireTunnel() {
+		t.Fatalf("acquire beyond maxTunnels must fail")
+	}
+	if n := app.tunnels.Load(); n != maxTunnels {
+		t.Errorf("a refused acquire must not change the count: %d", n)
+	}
+
+	// At capacity both entry points answer 503 before touching the network.
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, covConnect("example.com:443"))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "too many concurrent tunnels") {
+		t.Errorf("CONNECT at capacity = %d %q", rec.Code, rec.Body.String())
+	}
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
+	resp := &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: http.Header{}, Body: c1}
+	rec = httptest.NewRecorder()
+	app.handleUpgrade(covNoHijack{rec}, resp, rawFlow{started: time.Now(), method: "GET", url: "http://x.test/ws", reqHeaders: http.Header{}}, true)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "too many concurrent tunnels") {
+		t.Errorf("upgrade at capacity = %d %q", rec.Code, rec.Body.String())
+	}
+	if n := app.tunnels.Load(); n != maxTunnels {
+		t.Errorf("count after refusals = %d, want %d", n, maxTunnels)
+	}
+
+	app.releaseTunnel()
+	if !app.acquireTunnel() {
+		t.Errorf("a released slot must be usable again")
+	}
+	for i := 0; i < maxTunnels; i++ {
+		app.releaseTunnel()
+	}
+	if n := app.tunnels.Load(); n != 0 {
+		t.Errorf("count after releasing everything = %d", n)
+	}
+}
+
+func TestCovConnectWithoutHijackerReleasesTunnel(t *testing.T) {
+	app := newTestApp(t)
+	rec := httptest.NewRecorder() // not an http.Hijacker
+	app.ServeHTTP(rec, covConnect("example.com:443"))
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "hijacked") {
+		t.Errorf("CONNECT without hijack = %d %q", rec.Code, rec.Body.String())
+	}
+	if n := app.tunnels.Load(); n != 0 {
+		t.Errorf("tunnel slot leaked: %d", n)
+	}
+}
+
+func TestCovHandleUpgradeFailureBranches(t *testing.T) {
+	flow := func() rawFlow {
+		return rawFlow{started: time.Now(), method: "GET", url: "http://x.test/ws", reqHeaders: http.Header{}}
+	}
+
+	// A body that cannot be written to, and a writer that cannot be hijacked.
+	app := newTestApp(t)
+	resp := &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}
+	rec := httptest.NewRecorder()
+	app.handleUpgrade(rec, resp, flow(), true)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "not supported") {
+		t.Errorf("unsupported upgrade = %d %q", rec.Code, rec.Body.String())
+	}
+	waitForRing(t, app, 1)
+	if e := app.ring.ListRecent(1, "GET", "/ws")[0]; e.StatusCode != http.StatusBadGateway {
+		t.Errorf("recorded status = %d, want 502", e.StatusCode)
+	}
+
+	// Hijack itself fails: nothing is written and the slot is given back.
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
+	resp = &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: http.Header{}, Body: c1}
+	app.handleUpgrade(covNoHijack{httptest.NewRecorder()}, resp, flow(), false)
+	if n := app.tunnels.Load(); n != 0 {
+		t.Errorf("tunnel slot leaked after a failed hijack: %d", n)
+	}
+}
+
+func TestCovServeHTTPUpgradeRefusedByUpstream(t *testing.T) {
+	app := newTestApp(t)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ok" {
+			_, _ = io.WriteString(w, "plain ok")
+			return
+		}
+		http.Error(w, "upgrade refused", http.StatusUpgradeRequired)
+	}))
+	t.Cleanup(up.Close)
+	app.target = mustParseURL(t, up.URL)
+
+	hdr := []string{"Connection", "Upgrade", "Upgrade", "websocket", "Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version", "13"}
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, covReq("GET", "/ws", "127.0.0.1:8080", hdr...))
+	if rec.Code != http.StatusUpgradeRequired || !strings.Contains(rec.Body.String(), "upgrade refused") {
+		t.Errorf("refused upgrade = %d %q, want the upstream's 426 passed on", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, covReq("GET", "/ok", "127.0.0.1:8080", hdr...))
+	if rec.Code != http.StatusOK || rec.Body.String() != "plain ok" {
+		t.Errorf("upstream ignoring the upgrade = %d %q", rec.Code, rec.Body.String())
+	}
+
+	waitForRing(t, app, 2)
+	refused := app.ring.ListRecent(1, "GET", "/ws")[0]
+	if refused.StatusCode != http.StatusUpgradeRequired || strings.Contains(refused.Note, "upgraded connection") {
+		t.Errorf("refused flow = %d %q", refused.StatusCode, refused.Note)
+	}
+	if ok := app.ring.ListRecent(1, "GET", "/ok")[0]; ok.StatusCode != http.StatusOK {
+		t.Errorf("ok flow status = %d", ok.StatusCode)
+	}
+	if n := app.tunnels.Load(); n != 0 {
+		t.Errorf("no tunnel should be open: %d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// coverage: MCP batch, safeDispatch and tools
+// ---------------------------------------------------------------------------
+
+func covBatchFrames(t *testing.T, out string) []map[string]any {
+	t.Helper()
+	if !strings.HasSuffix(out, "\n") || strings.Count(out, "\n") != 1 {
+		t.Fatalf("a batch reply must be exactly one line, got %q", out)
+	}
+	var frames []map[string]any
+	if err := json.Unmarshal([]byte(out), &frames); err != nil {
+		t.Fatalf("batch reply is not a JSON array: %v (%q)", err, out)
+	}
+	for i, f := range frames {
+		if f["jsonrpc"] != "2.0" {
+			t.Errorf("frame %d: jsonrpc = %v", i, f["jsonrpc"])
+		}
+	}
+	return frames
+}
+
+func covErrCode(t *testing.T, m map[string]any) int {
+	t.Helper()
+	e, ok := m["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("no error object in %v", m)
+	}
+	code, _ := e["code"].(float64)
+	return int(code)
+}
+
+func TestCovBatchEmptyAndMalformed(t *testing.T) {
+	app := newTestApp(t)
+	for _, line := range []string{`[]`, `[ ]`, "  []  "} {
+		m := parseFrame(t, rpc(t, app, line))
+		if covErrCode(t, m) != -32600 || m["id"] != nil {
+			t.Errorf("%q = %v, want -32600 with a null id", line, m)
+		}
+		if msg := m["error"].(map[string]any)["message"]; msg != "empty batch" {
+			t.Errorf("%q message = %v", line, msg)
+		}
+	}
+	for _, line := range []string{`[{"jsonrpc":"2.0","id":1,"method":"ping"}`, `[1,`, `[{`} {
+		m := parseFrame(t, rpc(t, app, line))
+		if covErrCode(t, m) != -32700 || m["id"] != nil {
+			t.Errorf("%q = %v, want -32700 with a null id", line, m)
+		}
+	}
+}
+
+func TestCovBatchNonObjectEntries(t *testing.T) {
+	app := newTestApp(t)
+	// 1 and "x" are not requests; null is read as an empty notification and skipped.
+	frames := covBatchFrames(t, rpc(t, app, `[1,"x",null]`))
+	if len(frames) != 2 {
+		t.Fatalf("got %d frames, want 2: %v", len(frames), frames)
+	}
+	for _, f := range frames {
+		if covErrCode(t, f) != -32600 || f["id"] != nil {
+			t.Errorf("frame = %v, want -32600 with a null id", f)
+		}
+	}
+}
+
+func TestCovBatchMixedNotificationCallAndErrors(t *testing.T) {
+	app := newTestApp(t)
+	line := `[` +
+		`{"jsonrpc":"2.0","method":"notifications/initialized"},` +
+		`{"jsonrpc":"2.0","id":1,"method":"ping"},` +
+		`{"jsonrpc":"2.0","id":2},` +
+		`{"jsonrpc":"2.0","id":3,"method":"nope"},` +
+		`{"jsonrpc":"2.0","id":null,"method":"notifications/cancelled"}` +
+		`]`
+	frames := covBatchFrames(t, rpc(t, app, line))
+	if len(frames) != 3 {
+		t.Fatalf("got %d frames, want 3 (the two notifications get no reply): %v", len(frames), frames)
+	}
+	if frames[0]["id"] != float64(1) || frames[0]["error"] != nil || resultOf(t, frames[0])["resultType"] != "complete" {
+		t.Errorf("ping frame = %v", frames[0])
+	}
+	if frames[1]["id"] != float64(2) || covErrCode(t, frames[1]) != -32600 ||
+		frames[1]["error"].(map[string]any)["message"] != "missing method" {
+		t.Errorf("missing-method frame = %v", frames[1])
+	}
+	if frames[2]["id"] != float64(3) || covErrCode(t, frames[2]) != -32601 {
+		t.Errorf("unknown-method frame = %v", frames[2])
+	}
+}
+
+func TestCovBatchOnlyNotificationsIsSilent(t *testing.T) {
+	app := newTestApp(t)
+	line := `[{"jsonrpc":"2.0","method":"notifications/initialized"},{"jsonrpc":"2.0","id":null,"method":"notifications/cancelled"}]`
+	if out := rpc(t, app, line); out != "" {
+		t.Errorf("a batch of notifications must produce no output, got %q", out)
+	}
+}
+
+func TestCovBatchToolCalls(t *testing.T) {
+	app := newTestApp(t)
+	line := `[` +
+		`{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"clear_ram_buffer"}},` +
+		`{"jsonrpc":"2.0","id":"b","method":"tools/call","params":{"name":"nope"}},` +
+		`{"jsonrpc":"2.0","id":"c","method":"tools/call","params":{}}` +
+		`]`
+	frames := covBatchFrames(t, rpc(t, app, line))
+	if len(frames) != 3 {
+		t.Fatalf("got %d frames: %v", len(frames), frames)
+	}
+	if frames[0]["id"] != "a" || resultOf(t, frames[0])["isError"] != false {
+		t.Errorf("clear frame = %v", frames[0])
+	}
+	if frames[1]["id"] != "b" || covErrCode(t, frames[1]) != -32602 || frames[1]["error"].(map[string]any)["message"] != "unknown tool" {
+		t.Errorf("unknown tool frame = %v", frames[1])
+	}
+	if frames[2]["id"] != "c" || covErrCode(t, frames[2]) != -32602 || frames[2]["error"].(map[string]any)["message"] != "invalid params" {
+		t.Errorf("empty params frame = %v", frames[2])
+	}
+}
+
+func TestCovSafeDispatch(t *testing.T) {
+	app := newTestApp(t)
+	resp := app.safeDispatch(rpcRequest{ID: json.RawMessage(`7`), Method: "ping"})
+	if resp == nil || resp.Error != nil || string(resp.ID) != "7" {
+		t.Errorf("ping = %+v", resp)
+	}
+	resp = app.safeDispatch(rpcRequest{ID: json.RawMessage(`"x"`), Method: "no/such"})
+	if resp == nil || resp.Error == nil || resp.Error.Code != -32601 || string(resp.ID) != `"x"` {
+		t.Errorf("unknown method = %+v", resp)
+	}
+}
+
+type covInspectPayload struct {
+	RingSize       int               `json:"ring_size"`
+	RingCapacity   int               `json:"ring_capacity"`
+	Returned       int               `json:"returned"`
+	ScrubbedTotals map[string]uint64 `json:"scrubbed_totals"`
+	Flows          []FlowEntry       `json:"flows"`
+}
+
+func covSeedRing(app *App) {
+	app.ring.Push(FlowEntry{Method: "GET", URL: "https://a.test/one"})
+	app.ring.Push(FlowEntry{Method: "POST", URL: "https://a.test/Two", RedactionCount: 2})
+	app.ring.Push(FlowEntry{Method: "GET", URL: "https://b.test/three"})
+	app.ring.Push(FlowEntry{Method: "get", URL: "https://a.test/four"})
+}
+
+func covInspect(t *testing.T, app *App, args string) (covInspectPayload, string) {
+	t.Helper()
+	text, isErr := toolText(t, app.toolInspect(json.RawMessage(args)))
+	if isErr {
+		t.Fatalf("toolInspect(%s) failed: %s", args, text)
+	}
+	var p covInspectPayload
+	if err := json.Unmarshal([]byte(text), &p); err != nil {
+		t.Fatalf("toolInspect(%s) is not JSON: %v", args, err)
+	}
+	return p, text
+}
+
+func covURLs(flows []FlowEntry) string {
+	var parts []string
+	for _, f := range flows {
+		parts = append(parts, strings.TrimPrefix(f.URL, "https://"))
+	}
+	return strings.Join(parts, " ")
+}
+
+func TestCovToolInspectEmptyRing(t *testing.T) {
+	app := newTestApp(t)
+	p, text := covInspect(t, app, "")
+	if p.Returned != 0 || p.RingSize != 0 || p.RingCapacity != ringCapacity || len(p.Flows) != 0 {
+		t.Errorf("empty ring payload = %+v", p)
+	}
+	if !strings.Contains(text, `"flows": []`) {
+		t.Errorf("an empty ring must encode flows as [], got %s", text)
+	}
+	if p, _ = covInspect(t, app, `{"method":"GET","url_filter":"x","limit":3}`); p.Returned != 0 {
+		t.Errorf("filters on an empty ring returned %d", p.Returned)
+	}
+}
+
+func TestCovToolInspectFilters(t *testing.T) {
+	app := newTestApp(t)
+	covSeedRing(app)
+	app.scrub.Tokens.Store(3)
+
+	cases := []struct {
+		args string
+		want string // URLs, newest first
+	}{
+		{``, "a.test/four b.test/three a.test/Two a.test/one"},
+		{`null`, "a.test/four b.test/three a.test/Two a.test/one"},
+		{`{}`, "a.test/four b.test/three a.test/Two a.test/one"},
+		{`{"limit":2}`, "a.test/four b.test/three"},
+		{`{"limit":2.9}`, "a.test/four b.test/three"},
+		{`{"limit":0}`, "a.test/four"},
+		{`{"limit":-5}`, "a.test/four"},
+		{`{"limit":9999}`, "a.test/four b.test/three a.test/Two a.test/one"},
+		{`{"method":"GET"}`, "a.test/four b.test/three a.test/one"},
+		{`{"method":"post"}`, "a.test/Two"},
+		{`{"method":"DELETE"}`, ""},
+		{`{"url_filter":"A.TEST"}`, "a.test/four a.test/Two a.test/one"},
+		{`{"url_filter":"two"}`, "a.test/Two"},
+		{`{"url_filter":"a.test","method":"GET"}`, "a.test/four a.test/one"},
+		{`{"url_filter":"a.test","method":"GET","limit":1}`, "a.test/four"},
+		{`{"url_filter":"nowhere"}`, ""},
+		// Arguments the tool does not define are ignored, not honoured.
+		{`{"last":1,"offset":1,"redacted_only":true,"path":"/one"}`, "a.test/four b.test/three a.test/Two a.test/one"},
+	}
+	for _, c := range cases {
+		p, _ := covInspect(t, app, c.args)
+		if got := covURLs(p.Flows); got != c.want || p.Returned != len(p.Flows) {
+			t.Errorf("args %q: flows = %q (returned %d), want %q", c.args, got, p.Returned, c.want)
+		}
+		if p.RingSize != 4 || p.RingCapacity != ringCapacity {
+			t.Errorf("args %q: ring size/capacity = %d/%d", c.args, p.RingSize, p.RingCapacity)
+		}
+	}
+	if p, _ := covInspect(t, app, ""); p.ScrubbedTotals["tokens"] != 3 {
+		t.Errorf("scrubbed_totals = %v, want tokens 3", p.ScrubbedTotals)
+	}
+}
+
+func TestCovToolInspectInvalidArguments(t *testing.T) {
+	app := newTestApp(t)
+	for _, args := range []string{`{"limit":"ten"}`, `{not json`, `[1]`, `{"method":5}`} {
+		text, isErr := toolText(t, app.toolInspect(json.RawMessage(args)))
+		if !isErr || !strings.Contains(text, "invalid arguments") {
+			t.Errorf("args %s = %q (isError %v), want an invalid-arguments error", args, text, isErr)
+		}
+	}
+	// And through the protocol, an explicit null arguments value is fine.
+	m := parseFrame(t, rpc(t, app, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"inspect_traffic","arguments":null}}`))
+	if text, isErr := toolText(t, resultOf(t, m)); isErr || !strings.Contains(text, `"returned": 0`) {
+		t.Errorf("null arguments = %q (isError %v)", text, isErr)
+	}
+}
+
+func TestCovShellQuote(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", `''`},
+		{"abc", `'abc'`},
+		{"it's", `'it'\''s'`},
+		{"''", `''\'''\'''`},
+		{"a\nb", "'a\nb'"},
+		{"[REDACTED_TOKEN#abc123]", `"$NULLWIRE_AUTH_TOKEN"`},
+		{"Bearer [REDACTED_TOKEN#abc123]", `'Bearer '"$NULLWIRE_AUTH_TOKEN"`},
+		{"a[REDACTED_COOKIE#abcdef]b'c", `'a'"$NULLWIRE_COOKIE"'b'\''c'`},
+		{"[REDACTED_IP#aaaaaa]:[REDACTED_KEY#bbbbbb]", `"$NULLWIRE_IP"':'"$NULLWIRE_PRIVATE_KEY"`},
+		{"[REDACTED_PAN#012345]", `"$NULLWIRE_CARD_NUMBER"`},
+		// Not a tag the exporter wrote: upper-case hex and an unknown kind stay literal.
+		{"[REDACTED_TOKEN#ABCDEF]", `'[REDACTED_TOKEN#ABCDEF]'`},
+		{"[REDACTED_FOO#abcdef]", `'[REDACTED_FOO#abcdef]'`},
+	}
+	for _, c := range cases {
+		if got := shellQuote(c.in); got != c.want {
+			t.Errorf("shellQuote(%q) = %s, want %s", c.in, got, c.want)
+		}
+	}
+	for kind, want := range map[string]string{"TOKEN": "NULLWIRE_AUTH_TOKEN", "COOKIE": "NULLWIRE_COOKIE", "IP": "NULLWIRE_IP", "KEY": "NULLWIRE_PRIVATE_KEY", "PAN": "NULLWIRE_CARD_NUMBER", "other": "NULLWIRE_AUTH_TOKEN"} {
+		if got := envFor(kind); got != want {
+			t.Errorf("envFor(%q) = %q, want %q", kind, got, want)
+		}
+	}
+}
+
+func TestCovToolExportCurlErrors(t *testing.T) {
+	app := newTestApp(t)
+	app.ring.Push(FlowEntry{Method: "GET", URL: "https://a.test/"})
+	cases := []struct{ args, want string }{
+		{``, "flow_id is required"},
+		{`null`, "flow_id is required"},
+		{`{}`, "flow_id is required"},
+		{`{"flow_id":0}`, "positive integer"},
+		{`{"flow_id":-3}`, "positive integer"},
+		{`{"flow_id":1.5}`, "positive integer"},
+		{`{"flow_id":1e16}`, "positive integer"},
+		{`{"flow_id":999}`, "not in RAM ring buffer"},
+		{`{"flow_id":"1"}`, "invalid arguments"},
+		{`{oops`, "invalid arguments"},
+	}
+	for _, c := range cases {
+		text, isErr := toolText(t, app.toolExportCurl(json.RawMessage(c.args)))
+		if !isErr || !strings.Contains(text, c.want) {
+			t.Errorf("args %q = %q (isError %v), want an error containing %q", c.args, text, isErr, c.want)
+		}
+	}
+}
+
+func TestCovToolExportCurlQuotingAndRedaction(t *testing.T) {
+	app := newTestApp(t)
+	entry := FlowEntry{Method: "POST", URL: "https://api.test/v1?q=it's"}
+	entry.RequestHeaders = map[string]string{"Authorization": "Bearer [REDACTED_TOKEN#abc123]", "Cookie": "[REDACTED_COOKIE#def456]", "Content-Type": "application/json", "Content-Encoding": "gzip", "Host": "api.test", "Content-Length": "40", "Accept-Encoding": "gzip"}
+	entry.RequestBody = "line1\nit's [REDACTED_TOKEN#abc123]" + truncMarker
+	app.ring.Push(entry)
+	text, isErr := toolText(t, app.toolExportCurl(json.RawMessage(`{"flow_id":1}`)))
+	if isErr {
+		t.Fatalf("export failed: %s", text)
+	}
+	if !strings.HasPrefix(text, "# Replay of flow 1\n# Set environment variables first:\n") {
+		t.Errorf("unexpected header:\n%s", text)
+	}
+	for _, legend := range []string{
+		"# export NULLWIRE_AUTH_TOKEN=...   # was [REDACTED_TOKEN#abc123]",
+		"# export NULLWIRE_COOKIE=...   # was [REDACTED_COOKIE#def456]",
+	} {
+		if !strings.Contains(text, legend) {
+			t.Errorf("missing legend line %q in:\n%s", legend, text)
+		}
+	}
+	if n := strings.Count(text, "# export NULLWIRE_AUTH_TOKEN="); n != 1 {
+		t.Errorf("a tag used twice must be listed once, got %d", n)
+	}
+	i := strings.Index(text, "curl -X")
+	if i < 0 {
+		t.Fatalf("no curl command in:\n%s", text)
+	}
+	cmd := text[i:]
+	for _, want := range []string{
+		`curl -X 'POST' 'https://api.test/v1?q=it'\''s'`,
+		`-H 'Authorization: Bearer '"$NULLWIRE_AUTH_TOKEN"`,
+		`-H 'Content-Type: application/json'`,
+		`-H 'Cookie: '"$NULLWIRE_COOKIE"`,
+		"--data-raw 'line1\n" + `it'\''s '"$NULLWIRE_AUTH_TOKEN"`,
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("curl command lacks %s:\n%s", want, cmd)
+		}
+	}
+	for _, bad := range []string{"Host:", "Content-Length", "Accept-Encoding", "Content-Encoding", "[REDACTED_", "truncated"} {
+		if strings.Contains(cmd, bad) {
+			t.Errorf("curl command must not contain %q:\n%s", bad, cmd)
+		}
+	}
+}
+
+func TestCovToolExportCurlSpecialFlows(t *testing.T) {
+	app := newTestApp(t)
+	app.ring.Push(FlowEntry{Method: "HEAD", URL: "https://x.test/"})
+	app.ring.Push(FlowEntry{Method: "CONNECT", URL: "x.test:443"})
+	app.ring.Push(FlowEntry{Method: "POST", URL: "https://x.test/up", RequestBody: "[encoded body omitted: gzip]"})
+
+	text, _ := toolText(t, app.toolExportCurl(json.RawMessage(`{"flow_id":1}`)))
+	if !strings.Contains(text, "curl -I 'https://x.test/'") {
+		t.Errorf("HEAD flow = %q", text)
+	}
+	text, _ = toolText(t, app.toolExportCurl(json.RawMessage(`{"flow_id":2}`)))
+	if !strings.Contains(text, "Flow 2 was a blind CONNECT tunnel") || strings.Contains(text, "curl ") {
+		t.Errorf("CONNECT flow = %q", text)
+	}
+	text, _ = toolText(t, app.toolExportCurl(json.RawMessage(`{"flow_id":3}`)))
+	if strings.Contains(text, "--data-raw") {
+		t.Errorf("a placeholder body must not be replayed: %q", text)
+	}
+}
+
+func TestCovToolClearWipesRingAndCounters(t *testing.T) {
+	app := newTestApp(t)
+	covSeedRing(app)
+	app.scrub.Tokens.Store(4)
+	app.scrub.Cookies.Store(2)
+	app.scrub.IPs.Store(1)
+
+	text, isErr := toolText(t, app.toolClear())
+	if isErr || !strings.Contains(text, "wiped") {
+		t.Errorf("toolClear = %q (isError %v)", text, isErr)
+	}
+	if app.ring.Len() != 0 {
+		t.Errorf("ring still has %d entries", app.ring.Len())
+	}
+	if _, ok := app.ring.GetByID(1); ok {
+		t.Errorf("a cleared flow must not be found by ID")
+	}
+	if app.scrub.Tokens.Load() != 0 || app.scrub.Cookies.Load() != 0 || app.scrub.IPs.Load() != 0 {
+		t.Errorf("counters not reset: %d/%d/%d", app.scrub.Tokens.Load(), app.scrub.Cookies.Load(), app.scrub.IPs.Load())
+	}
+	if _, isErr = toolText(t, app.toolClear()); isErr {
+		t.Errorf("clearing an empty ring must succeed")
+	}
+
+	// The same through the protocol.
+	covSeedRing(app)
+	m := parseFrame(t, rpc(t, app, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"clear_ram_buffer"}}`))
+	if _, isErr = toolText(t, resultOf(t, m)); isErr || app.ring.Len() != 0 {
+		t.Errorf("clear over RPC: isError=%v ring=%d", isErr, app.ring.Len())
 	}
 }
