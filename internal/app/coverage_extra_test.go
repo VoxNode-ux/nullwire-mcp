@@ -78,12 +78,12 @@ func TestXcovHandleLine(t *testing.T) {
 	for _, c := range cases {
 		out := captureStdout(t, func() { app.handleLine([]byte(c.in)) })
 		ls := xcovLines(out)
-		switch {
-		case c.code == -1:
+		switch c.code {
+		case -1:
 			if len(ls) != 0 {
 				t.Fatalf("%s: unexpected output %q", c.name, out)
 			}
-		case c.code == 0:
+		case 0:
 			if len(ls) != 1 || strings.Contains(ls[0], `"error"`) {
 				t.Fatalf("%s: want a result, got %q", c.name, out)
 			}
@@ -329,7 +329,8 @@ func TestXcovUpgradePaths(t *testing.T) {
 	if rec.Code != http.StatusOK || rec.Body.String() != "no upgrade" {
 		t.Fatalf("non-101: status %d body %q", rec.Code, rec.Body.String())
 	}
-	if app.upgradeTransport() != app.upgradeTransport() || app.upgradeTransport().ForceAttemptHTTP2 {
+	tr1, tr2 := app.upgradeTransport(), app.upgradeTransport()
+	if tr1 != tr2 || tr1.ForceAttemptHTTP2 {
 		t.Fatal("upgradeTransport must be cached and HTTP/1.1 only")
 	}
 
