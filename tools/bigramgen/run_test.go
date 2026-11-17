@@ -38,7 +38,7 @@ func TestRunWritesTable(t *testing.T) {
 	args := []string{
 		"-benign", " " + benignDir + " ,, ",
 		"-secrets", secrets,
-		"-synthetic", "2000", "-synthetic-benign", "2000B",
+		"-synthetic", "2000", "-synthetic-benign", "2000",
 		"-holdout-mod", "1000000007", "-out", out,
 	}
 	if err := run(args, &stdout, &stderr); err != nil {
@@ -72,7 +72,7 @@ func TestRunErrors(t *testing.T) {
 		{"unreadable secrets line", []string{"-benign", benignFile, "-secrets", hugeLine}, "-secrets"},
 		{"no benign and no secrets", nil, "no table"},
 		{"no secret class", []string{"-benign", benignFile}, "no table"},
-		{"unwritable out", []string{"-benign", benignFile, "-synthetic", "2000", "-synthetic-benign", "2000B", "-out", filepath.Join(dir, "no", "such", "out.go")}, "out.go"},
+		{"unwritable out", []string{"-benign", benignFile, "-synthetic", "2000", "-synthetic-benign", "2000", "-out", filepath.Join(dir, "no", "such", "out.go")}, "out.go"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
