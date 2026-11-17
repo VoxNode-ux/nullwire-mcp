@@ -324,6 +324,9 @@ func (s *Scrubber) scrubUnwrapped(in string, ctx ScrubContext) (string, int) {
 	for _, sp := range panSpans(dec) {
 		addKind(sp.start, sp.end, "PAN")
 	}
+	for _, sp := range s.presetSpans(dec) {
+		addKind(sp.start, sp.end, "TOKEN")
+	}
 	s.unwrappedExtraSpans(in, dec, idx, ctx, addKind)
 	if len(spans) == 0 {
 		return in, 0

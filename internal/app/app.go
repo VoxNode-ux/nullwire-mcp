@@ -196,6 +196,14 @@ type SecretsConfig struct {
 	IgnorePatterns      []string       `json:"ignore_patterns"` // body text matching one of these is left alone
 	CustomVendors       []VendorConfig `json:"custom_vendors"`
 	ExtraRegexPatterns  []ExtraPattern `json:"extra_regex_patterns"`
+
+	// Host egress controls: exact hosts, *.domain wildcards, IPs and CIDRs.
+	// blocked always beats allowed; a non-empty allowed list denies the rest.
+	AllowedUpstreamHosts []string `json:"allowed_upstream_hosts"`
+	BlockedUpstreamHosts []string `json:"blocked_upstream_hosts"`
+
+	// Presets switches on compliance redaction: pci-dss, hipaa, gdpr or all.
+	Presets []string `json:"presets"`
 }
 
 type ExtraPattern struct {
@@ -233,6 +241,12 @@ func loadSecretsConfig(path string) (*SecretsConfig, error) {
 			}
 		}
 	}
+	if _, err := newEgressPolicy(c.AllowedUpstreamHosts, c.BlockedUpstreamHosts); err != nil {
+		return nil, fmt.Errorf("-secrets-config %s: %v", path, err)
+	}
+	if _, err := normalizePresets(c.Presets); err != nil {
+		return nil, fmt.Errorf("-secrets-config %s: presets: %v", path, err)
+	}
 	return &c, nil
 }
 
@@ -245,6 +259,7 @@ type Scrubber struct {
 	vendorGate     *vendors.Gate // Aho-Corasick pre-check over every prefix (run on lower-cased text)
 	vendorRules    []vendorRule // strong, weak, DSN and custom prefix rules
 	allow          *allowlist   // body exemptions from the user's config; nil when none are set
+	presets        presetSet    // -preset: pci-dss, hipaa, gdpr (all off by default)
 
 	reBearer          *regexp.Regexp
 	reSensitiveHeader *regexp.Regexp
@@ -356,6 +371,11 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		return nil, fmt.Errorf("secrets config: %v", err)
 	}
 
+	pnames, err := normalizePresets(cfg.Presets)
+	if err != nil {
+		return nil, fmt.Errorf("secrets config: presets: %v", err)
+	}
+
 	return &Scrubber{
 		Tokens:         new(atomic.Uint64),
 		Cookies:        new(atomic.Uint64),
@@ -363,6 +383,7 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		nonce:          nonce,
 		taint:          newTaintRing(nonce),
 		allow:          allow,
+		presets:        newPresetSet(pnames),
 		extraSensitive: extra,
 		ignoreHeaders:  ignore,
 		extraPatterns:  extras,
@@ -642,6 +663,12 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	var nPAN int
 	out, nPAN = s.scrubPANs(out)
 	count += nPAN
+
+	if s.presets.enabled() {
+		var nPreset int
+		out, nPreset = s.scrubPresets(out)
+		count += nPreset
+	}
 
 	if o.allowB64 && hasBase64Run(out) {
 		out = s.scrubBase64(out, &count)
@@ -1319,6 +1346,8 @@ func (s *Scrubber) ScrubHeaders(h http.Header) (map[string]string, int) {
 type App struct {
 	ring                *RingBuffer
 	scrub               *Scrubber
+	egress              *egressPolicy   // -secrets-config allowed/blocked_upstream_hosts; nil means no policy
+	disabledTools       map[string]bool // -disable-tools
 	port                int
 	target              *url.URL
 	upstreams           map[string]*url.URL
@@ -1515,7 +1544,21 @@ func (a *App) matchUpstream(p, rawPath string) (base *url.URL, rest, rawRest str
 	return b, tail, rawRest, true, nil
 }
 
+// resolveUpstream picks the destination and then applies the egress policy to
+// its host, so every route (forward proxy, X-Target-URL, -target, -target-map)
+// is checked in one place.
 func (a *App) resolveUpstream(r *http.Request) (*url.URL, bool, int, error) {
+	u, reverse, status, err := a.resolveUpstreamRaw(r)
+	if err != nil {
+		return u, reverse, status, err
+	}
+	if perr := a.egress.checkHost(u.Hostname()); perr != nil {
+		return nil, reverse, http.StatusForbidden, perr
+	}
+	return u, reverse, 0, nil
+}
+
+func (a *App) resolveUpstreamRaw(r *http.Request) (*url.URL, bool, int, error) {
 	if r.URL.IsAbs() && r.URL.Host != "" {
 		if r.URL.Scheme != "http" && r.URL.Scheme != "https" {
 			return nil, false, http.StatusBadRequest, fmt.Errorf("unsupported scheme %q", r.URL.Scheme)
@@ -1688,9 +1731,13 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := rt.RoundTrip(outReq)
 	if err != nil {
 		msg := "nullwire-mcp: upstream error: " + err.Error()
-		http.Error(w, msg, http.StatusBadGateway)
+		code := http.StatusBadGateway
+		if errors.Is(err, errEgressDenied) {
+			code = http.StatusForbidden // the resolved address is blocked (DNS rebinding guard)
+		}
+		http.Error(w, msg, code)
 		flow.reqBody = reqCap.Bytes()
-		flow.status = http.StatusBadGateway
+		flow.status = code
 		flow.respHeaders = http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}}
 		flow.respBody = []byte(msg)
 		flow.latencyMs = time.Since(start).Milliseconds()
@@ -1868,6 +1915,12 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.T
 		http.Error(w, "nullwire-mcp: refusing to tunnel back to the proxy itself", http.StatusLoopDetected)
 		return
 	}
+	if perr := a.egress.checkHost(host); perr != nil {
+		msg := "nullwire-mcp: " + perr.Error()
+		http.Error(w, msg, http.StatusForbidden)
+		go a.capture(rawFlow{started: start, method: http.MethodConnect, url: target, reqHeaders: r.Header.Clone(), respHeaders: http.Header{}, status: http.StatusForbidden, note: msg, latencyMs: time.Since(start).Milliseconds()})
+		return
+	}
 	if !a.acquireTunnel() {
 		http.Error(w, "nullwire-mcp: too many concurrent tunnels", http.StatusServiceUnavailable)
 		return
@@ -1882,8 +1935,12 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.T
 	up, err := a.dial(r.Context(), target)
 	if err != nil {
 		msg := "nullwire-mcp: cannot reach " + target + ": " + err.Error()
-		http.Error(w, msg, http.StatusBadGateway)
-		flow.status = http.StatusBadGateway
+		code := http.StatusBadGateway
+		if errors.Is(err, errEgressDenied) {
+			code = http.StatusForbidden // the resolved address is blocked (DNS rebinding guard)
+		}
+		http.Error(w, msg, code)
+		flow.status = code
 		flow.note = msg
 		flow.latencyMs = time.Since(start).Milliseconds()
 		go a.capture(flow)
@@ -2154,8 +2211,13 @@ func onTermux() bool {
 	return os.Getenv("TERMUX_VERSION") != "" || strings.Contains(os.Getenv("PREFIX"), "com.termux")
 }
 
-func newDialer(servers []string) *net.Dialer {
+func newDialer(servers []string, egress *egressPolicy) *net.Dialer {
 	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	if egress.needsDialControl() {
+		// Runs on the resolved address of every connection attempt, so a name
+		// that resolves or rebinds into a blocked CIDR is refused.
+		d.Control = egress.control
+	}
 	if len(servers) > 0 {
 		d.Resolver = &net.Resolver{
 			PreferGo: true,
@@ -2727,7 +2789,7 @@ func (a *App) dispatchTo(req rpcRequest) *rpcResponse {
 	case "ping":
 		return &rpcResponse{ID: id, Result: map[string]any{"resultType": "complete"}}
 	case "tools/list":
-		return &rpcResponse{ID: id, Result: map[string]any{"resultType": "complete", "ttlMs": 300000, "cacheScope": "global", "tools": toolDefinitions()}}
+		return &rpcResponse{ID: id, Result: map[string]any{"resultType": "complete", "ttlMs": 300000, "cacheScope": "global", "tools": a.toolDefs()}}
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -2735,6 +2797,9 @@ func (a *App) dispatchTo(req rpcRequest) *rpcResponse {
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
 			return &rpcResponse{ID: id, Error: &rpcError{Code: -32602, Message: "invalid params"}}
+		}
+		if a.disabledTools[p.Name] {
+			return &rpcResponse{ID: id, Error: &rpcError{Code: -32602, Message: "tool disabled: " + p.Name}}
 		}
 		var result map[string]any
 		switch p.Name {
@@ -2858,6 +2923,8 @@ func Main() {
 	clientCert := flag.String("client-cert", "", "PEM client certificate presented to upstream servers (mTLS); needs -client-key")
 	clientKey := flag.String("client-key", "", "PEM private key for -client-cert")
 	scrubHeaders := flag.String("scrub-headers", "", "extra sensitive headers")
+	disableTools := flag.String("disable-tools", "", "comma-separated MCP tools to turn off, e.g. export_sanitized_curl,export_har (they are hidden from tools/list and refused by tools/call)")
+	presetSpec := flag.String("preset", "", "comma-separated compliance redaction presets: pci-dss, hipaa, gdpr, all (off by default)")
 	allowUninspectable := flag.Bool("allow-uninspectable", false, "forward request bodies whose Content-Encoding (br, zstd, ...) cannot be inspected; by default they are refused with 415")
 	maxBodySpec := flag.String("max-body", "", "stored body size per request/response, e.g. 1m (default 32 KiB request / 256 KiB response; at most 2m). Secrets are scrubbed before the cut")
 	wsDeflate := flag.Bool("ws-deflate", false, "keep WebSocket permessage-deflate and decode it for capture (default: drop the offer so frames stay readable)")
@@ -2879,6 +2946,18 @@ func Main() {
 			cfg.SensitiveHeaders = append(cfg.SensitiveHeaders, h)
 		}
 	}
+	cfg.Presets = append(cfg.Presets, splitPresetFlag(*presetSpec)...)
+	if _, err := normalizePresets(cfg.Presets); err != nil {
+		fatalf("nullwire-mcp: -preset: %v", err)
+	}
+	egress, err := newEgressPolicy(cfg.AllowedUpstreamHosts, cfg.BlockedUpstreamHosts)
+	if err != nil {
+		fatalf("nullwire-mcp: %v", err)
+	}
+	disabled, err := disabledToolSet(*disableTools)
+	if err != nil {
+		fatalf("nullwire-mcp: %v", err)
+	}
 	scrub, err := NewScrubberWithConfig(cfg)
 	if err != nil {
 		fatalf("nullwire-mcp: %v", err)
@@ -2899,7 +2978,7 @@ func Main() {
 			fatalf("nullwire-mcp: %v", err)
 		}
 	}
-	dialer := newDialer(dnsServers)
+	dialer := newDialer(dnsServers, egress)
 
 	rootCAs, caSource, err := buildRootCAs(*cacert, onTermux())
 	if err != nil {
@@ -2912,7 +2991,7 @@ func Main() {
 	tlsCfg := buildTLSConfig(rootCAs, clientCrt)
 
 	app := &App{
-		ring: NewRingBuffer(), scrub: scrub, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable, maxBody: maxBody, wsDeflate: *wsDeflate,
+		ring: NewRingBuffer(), scrub: scrub, egress: egress, disabledTools: disabled, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable, maxBody: maxBody, wsDeflate: *wsDeflate,
 		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 32, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true},
 	}
 	if *target != "" {

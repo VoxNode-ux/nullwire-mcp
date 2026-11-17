@@ -446,7 +446,7 @@ func TestXcovDrawBarAndLogf(t *testing.T) {
 }
 
 func TestXcovNewDialer(t *testing.T) {
-	d := newDialer(nil)
+	d := newDialer(nil, nil)
 	if d.Resolver != nil || d.Timeout != 10*time.Second {
 		t.Fatalf("default dialer: %+v", d)
 	}
@@ -465,7 +465,7 @@ func TestXcovNewDialer(t *testing.T) {
 		}
 	}()
 	ctx := context.Background()
-	d = newDialer([]string{xcovClosedAddr(t), ln.Addr().String()}) // first fails, second answers
+	d = newDialer([]string{xcovClosedAddr(t), ln.Addr().String()}, nil) // first fails, second answers
 	if d.Resolver == nil || !d.Resolver.PreferGo {
 		t.Fatal("custom DNS dialer needs a Go resolver")
 	}
@@ -474,7 +474,7 @@ func TestXcovNewDialer(t *testing.T) {
 		t.Fatalf("fallback server not used: %v", err)
 	}
 	_ = c.Close()
-	d = newDialer([]string{xcovClosedAddr(t)})
+	d = newDialer([]string{xcovClosedAddr(t)}, nil)
 	if c, err := d.Resolver.Dial(ctx, "tcp", "ignored"); err == nil {
 		_ = c.Close()
 		t.Fatal("dead DNS server reported success")
