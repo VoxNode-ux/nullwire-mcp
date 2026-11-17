@@ -105,6 +105,54 @@ func splitTOMLTop(s string) []string {
 	return append(parts, s[start:])
 }
 
+// tomlInlineBlocks returns the bodies of the top-level { } blocks of s (quoted
+// text is skipped) and s with those blocks cut out.
+func tomlInlineBlocks(s string) (bodies []string, rest string) {
+	var out strings.Builder
+	var q byte
+	depth, start := 0, 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if q != 0 {
+			if depth == 0 {
+				out.WriteByte(c)
+			}
+			if c == '\\' && q == '"' && i+1 < len(s) {
+				i++
+				if depth == 0 {
+					out.WriteByte(s[i])
+				}
+			} else if c == q {
+				q = 0
+			}
+			continue
+		}
+		switch {
+		case c == '"' || c == '\'':
+			q = c
+			if depth == 0 {
+				out.WriteByte(c)
+			}
+		case c == '{':
+			if depth == 0 {
+				start = i + 1
+			}
+			depth++
+		case c == '}' && depth > 0:
+			depth--
+			if depth == 0 {
+				bodies = append(bodies, s[start:i])
+				out.WriteByte(' ')
+			}
+		default:
+			if depth == 0 {
+				out.WriteByte(c)
+			}
+		}
+	}
+	return bodies, out.String()
+}
+
 // tomlScalar returns the text of a quoted scalar, or the bare text otherwise.
 func tomlScalar(v string) string {
 	v = strings.TrimSpace(v)
@@ -141,6 +189,24 @@ func scanTOMLFile(s Scrubber, path string, report *strings.Builder) (ok bool, hi
 			return strings.Join(parts, ".")
 		}
 		return currentTable + "." + strings.Join(parts, ".")
+	}
+	// inline scans the body of one inline table, { a = "x", b = ["y"] }, under base.
+	inline := func(lineNo int, base, body string) {
+		for _, pair := range splitTOMLTop(body) {
+			kv := strings.SplitN(pair, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			k := strings.TrimSpace(strings.Trim(strings.TrimSpace(kv[0]), `"'`))
+			pv := strings.TrimSpace(kv[1])
+			if strings.HasPrefix(pv, "[") {
+				for _, str := range tomlStrings(pv) {
+					show(lineNo, qualify(base, k), str)
+				}
+				continue
+			}
+			show(lineNo, qualify(base, k), tomlScalar(pv))
+		}
 	}
 	lines := strings.Split(string(raw), "\n")
 	for i := 0; i < len(lines); i++ {
@@ -185,7 +251,12 @@ func scanTOMLFile(s Scrubber, path string, report *strings.Builder) (ok bool, hi
 				i++
 				text += "\n" + stripTOMLComment(lines[i])
 			}
-			for _, str := range tomlStrings(text) {
+			// [{ token = "x" }]: each inline table keeps the key context (items.token).
+			bodies, rest := tomlInlineBlocks(text)
+			for _, body := range bodies {
+				inline(startLine, strings.Trim(m[1], `"'`), body)
+			}
+			for _, str := range tomlStrings(rest) {
 				show(startLine, name, str)
 			}
 		case strings.HasPrefix(val, "{"):
@@ -193,21 +264,7 @@ func scanTOMLFile(s Scrubber, path string, report *strings.Builder) (ok bool, hi
 			if !strings.HasSuffix(v, "}") {
 				continue
 			}
-			for _, pair := range splitTOMLTop(v[1 : len(v)-1]) {
-				kv := strings.SplitN(pair, "=", 2)
-				if len(kv) != 2 {
-					continue
-				}
-				k := strings.TrimSpace(strings.Trim(strings.TrimSpace(kv[0]), `"'`))
-				pv := strings.TrimSpace(kv[1])
-				if strings.HasPrefix(pv, "[") {
-					for _, str := range tomlStrings(pv) {
-						show(startLine, qualify(strings.Trim(m[1], `"'`), k), str)
-					}
-					continue
-				}
-				show(startLine, qualify(strings.Trim(m[1], `"'`), k), tomlScalar(pv))
-			}
+			inline(startLine, strings.Trim(m[1], `"'`), v[1:len(v)-1])
 		default:
 			v := stripTOMLComment(val)
 			if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') {

@@ -76,7 +76,21 @@ func scanByType(s Scrubber, path string, report *strings.Builder) (bool, int, in
 func scanKV(s Scrubber, key, sep, val string) (shown string, n int, found bool) {
 	scrubbed, n := s.ScrubText(key + sep + val)
 	if n > 0 {
-		return strings.TrimPrefix(scrubbed, key+sep), n, true
+		if strings.HasPrefix(scrubbed, key+sep) {
+			return strings.TrimPrefix(scrubbed, key+sep), n, true
+		}
+		// The key itself was rewritten (it held an IP or a token). Report a finding only
+		// when the value part changed too; otherwise the key's own redaction is not a
+		// secret value.
+		if i := strings.Index(scrubbed, sep); i >= 0 {
+			if rest := scrubbed[i+len(sep):]; rest != val {
+				return rest, n, true
+			}
+		}
+		if envSecretNames.MatchString(lastSegment(key)) {
+			return HiddenValue, 0, true
+		}
+		return "", 0, false
 	}
 	if envSecretNames.MatchString(lastSegment(key)) {
 		return HiddenValue, 0, true
