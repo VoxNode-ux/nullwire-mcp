@@ -89,6 +89,8 @@ go test -race ./...
 | `internal/app/tokenscore.go` | Log-odds score behind the randomness detector |
 | `internal/app/bigram_trained.go` | Trained character-pair table (an empty stub until `go generate` runs) |
 | `tools/bigramgen/` | Generator that trains the character-pair table |
+| `tools/trigramgen/` | Generator for the optional trigram table used only on borderline scores (`internal/app/trigram_trained.go`, empty = off) |
+| `tools/internal/corpus/` | Shared reproducible benign/secret corpora and holdout split |
 | `internal/vendors/` | Vendor prefix tiers |
 | `internal/app/cloud_secrets.go` | Prefix-less cloud credentials (AWS, Azure, Cloudflare) and their headers |
 | `internal/scan/` | The `scan` command (`scan.go`, `env_scan.go`, `toml_scan.go`, `yaml_scan.go`, `zip_scan.go`, `history_scan.go`, plus the small `Scrubber` interface in `scrubber.go`) |
