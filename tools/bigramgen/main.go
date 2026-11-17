@@ -13,9 +13,11 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"go/format"
+	"io"
 	"math"
 	"os"
 	"sort"
@@ -103,20 +105,35 @@ func render(es []entry) ([]byte, error) {
 	b.WriteString("// trainedBigram holds the pairs with enough evidence in the training corpus.\n")
 	b.WriteString("var trainedBigram = []bigramEntry{\n")
 	for _, e := range es {
-		fmt.Fprintf(&b, "\t{%d, %d, %d},\n", e.a, e.b, e.v)
+		_, _ = fmt.Fprintf(&b, "\t{%d, %d, %d},\n", e.a, e.b, e.v)
 	}
 	b.WriteString("}\n")
 	return format.Source([]byte(b.String()))
 }
 
 func main() {
-	benignArg := flag.String("benign", "", "comma-separated files or directories of benign text (code, docs)")
-	secretsFile := flag.String("secrets", "", "optional file with one real secret per line")
-	synth := flag.Int("synthetic", 0, "number of synthetic random secret-like strings to add")
-	synthBenign := flag.Int("synthetic-benign", 0, "number of synthetic benign identifiers (diverse casing, never a small word list) to add")
-	holdoutMod := flag.Int("holdout-mod", 0, "if > 0, files whose path hash % N == 0 are kept out of training (they are the holdout)")
-	out := flag.String("out", "bigram_trained.go", "output file")
-	flag.Parse()
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		_, _ = fmt.Fprintln(os.Stderr, "bigramgen:", err)
+		os.Exit(1)
+	}
+}
+
+// run is main without the process: it parses args, trains and writes the table.
+func run(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("bigramgen", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	benignArg := fs.String("benign", "", "comma-separated files or directories of benign text (code, docs)")
+	secretsFile := fs.String("secrets", "", "optional file with one real secret per line")
+	synth := fs.Int("synthetic", 0, "number of synthetic random secret-like strings to add")
+	synthBenign := fs.Int("synthetic-benign", 0, "number of synthetic benign identifiers (diverse casing, never a small word list) to add")
+	holdoutMod := fs.Int("holdout-mod", 0, "if > 0, files whose path hash % N == 0 are kept out of training (they are the holdout)")
+	out := fs.String("out", "bigram_trained.go", "output file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	var benign, secret counts
 	nb := 0
@@ -125,19 +142,16 @@ func main() {
 		if root == "" {
 			continue
 		}
-		err := corpus.Walk(root, *holdoutMod, false, func(text string) { nb += addText(&benign, text) })
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "bigramgen:", err)
-			os.Exit(1)
+		if err := corpus.Walk(root, *holdoutMod, false, func(text string) { nb += addText(&benign, text) }); err != nil {
+			return err
 		}
 	}
 
 	ns := 0
 	if *secretsFile != "" {
-		f, err := os.Open(*secretsFile)
+		f, err := os.Open(*secretsFile) // #nosec G304 -- offline developer tool: the path is the -secrets flag
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "bigramgen:", err)
-			os.Exit(1)
+			return err
 		}
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 1<<20), 1<<20)
@@ -147,11 +161,11 @@ func main() {
 				ns++
 			}
 		}
-		if err := sc.Err(); err != nil {
-			fmt.Fprintln(os.Stderr, "bigramgen: reading -secrets:", err)
-			os.Exit(1)
-		}
+		err = sc.Err()
 		_ = f.Close()
+		if err != nil {
+			return fmt.Errorf("reading -secrets: %w", err)
+		}
 	}
 	for _, s := range synthetic(*synth) {
 		addToken(&secret, s)
@@ -165,17 +179,15 @@ func main() {
 
 	es := train(&benign, &secret)
 	if len(es) == 0 {
-		fmt.Fprintf(os.Stderr, "bigramgen: no table (benign tokens %d, secret tokens %d); need both\n", nb, ns)
-		os.Exit(1)
+		return fmt.Errorf("no table (benign tokens %d, secret tokens %d); need both", nb, ns)
 	}
 	src, err := render(es)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "bigramgen:", err)
-		os.Exit(1)
+		return err
 	}
 	if err := os.WriteFile(*out, src, 0o600); err != nil {
-		fmt.Fprintln(os.Stderr, "bigramgen:", err)
-		os.Exit(1)
+		return err
 	}
-	fmt.Printf("bigramgen: %d pairs from %d benign and %d secret tokens -> %s\n", len(es), nb, ns, *out)
+	_, _ = fmt.Fprintf(stdout, "bigramgen: %d pairs from %d benign and %d secret tokens -> %s\n", len(es), nb, ns, *out)
+	return nil
 }
