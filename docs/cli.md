@@ -218,3 +218,16 @@ It accepts the server options (`--port`, `--target`, `--target-map`, `--cacert`,
 | **A long number (timestamp, id) is not redacted** | Runs of only decimal digits are exempt from the randomness detector on purpose. If one is really a secret, put it under a secret-looking field name, or add a pattern under `extra_regex_patterns`. |
 | **`address already in use`** | Another NullWire (or program) uses the port. Pick another with `-port`. |
 | **The assistant sees no flows** | Check the status bar's `RAM Ring: n/50`. If it stays at 0, your traffic isn't going through the proxy. |
+
+## Host egress controls
+
+`-secrets-config` accepts `allowed_upstream_hosts` and `blocked_upstream_hosts`. Each entry is an exact host (`api.example.com`), a wildcard (`*.example.com`, subdomains only), an IP or a CIDR (`10.0.0.0/8`, `2001:db8::/32`). Bad syntax fails startup.
+
+- `blocked` always beats `allowed`; when `allowed` is non-empty, unlisted hosts are denied.
+- Checked for HTTP proxying (403 before the request is sent) and `CONNECT` tunnels (403).
+- IP/CIDR rules are also enforced on the address the dialer actually connects to, so a name that resolves or rebinds into a blocked range is refused (403).
+- Allowed CIDRs admit by address. If `allowed_upstream_hosts` has only IPs/CIDRs, host names pass the name check and their resolved address must be inside an allowed CIDR. If it has any name rule, host names must match one.
+
+## `-disable-tools`
+
+`-disable-tools export_sanitized_curl,export_har` hides the listed MCP tools from `tools/list` and refuses `tools/call` for them. Unknown names fail startup. Tools: `inspect_traffic`, `export_har`, `export_sanitized_curl`, `clear_ram_buffer`.

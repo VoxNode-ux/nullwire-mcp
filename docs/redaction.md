@@ -89,3 +89,13 @@ These are the redaction changes since 1.2.0. They are not yet in a tagged releas
 **Tooling**
 - New `go generate` step to train the randomness detector's character-pair table (see [Development](architecture.md#development)).
 - New regression tests: `guardrail_test.go` (false positives, leaks, concurrency) and `unwrap_unicode_test.go`.
+
+## Compliance presets (`-preset`, `"presets"` in `-secrets-config`)
+
+Off by default. `-preset pci-dss,hipaa,gdpr` or `-preset all`; unknown names fail startup. All hits are tagged `[REDACTED_TOKEN#...]`.
+
+| Preset | Detects | Guard against false positives |
+|---|---|---|
+| `pci-dss` | CVV/CVC/CID values (3-4 digits) and track 1/2 data | only after a `cvv`/`cvc`/`cid`/`csc`/`cvn`/`track1`/`track2` field name and `:` or `=`. (Card numbers are always redacted by the Luhn rule.) |
+| `hipaa` | US SSN `AAA-GG-SSSS` | SSA rules (area not 000/666/9xx, group not 00, serial not 0000) and a nearby `ssn`, `social security`, `tin` or `taxpayer` |
+| `gdpr` | IBAN, compact or in groups of four, any case | known country, exact length for that country, ISO 7064 mod 97-10 |
