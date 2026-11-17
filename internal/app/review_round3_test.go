@@ -60,8 +60,9 @@ func TestHexIdentifiersInHeadersAndQueriesSurvive(t *testing.T) {
 	for _, name := range []string{"X-B3-TraceId", "Sentry-Trace"} {
 		h := http.Header{}
 		h.Set(name, trace)
-		if m, _ := s.ScrubHeaders(h); m[name] != trace {
-			t.Errorf("%s changed: %q", name, m[name])
+		key := http.CanonicalHeaderKey(name)
+		if m, _ := s.ScrubHeaders(h); m[key] != trace {
+			t.Errorf("%s changed: %q", name, m[key])
 		}
 	}
 	sha := "9fceb02d0ae598e95dc970b74767f19372d61af8"
