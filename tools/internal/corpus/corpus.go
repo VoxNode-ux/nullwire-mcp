@@ -181,7 +181,8 @@ func Benign(n int, seed int64) []string {
 			s = strings.ToUpper(strings.Join(parts, "_"))
 		}
 		if r.Intn(6) == 0 {
-			s += string(rune('0' + r.Intn(10)))
+			d := r.Intn(10)
+			s += "0123456789"[d : d+1]
 		}
 		if len(s) >= MinTokenLen && len(s) <= MaxTokenLen {
 			out = append(out, s)
