@@ -590,6 +590,11 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 				// tagged) was handled by an earlier rule; redacting it again would
 				// overwrite that tag and count it twice.
 				if strings.Contains(m, "[REDACTED_") {
+					// Already counted by reUserInfo: collapse the whole DSN (host and
+					// path included) into one tag without counting it again.
+					if strings.Contains(m, "://") {
+						return s.tag("TOKEN", m)
+					}
 					return m
 				}
 				if vr.weak && !weakVendorMatchOK(m, vr.prefixes) {
