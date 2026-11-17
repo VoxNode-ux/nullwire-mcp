@@ -1135,6 +1135,8 @@ var identifierHexKeys = map[string]bool{
 	"digest": true, "commit": true, "commit_id": true, "commit_sha": true,
 	"revision": true, "rev": true, "checksum": true, "etag": true,
 	"hash": true, "tree": true, "parent": true, "git_sha": true, "image_id": true,
+	"trace_id": true, "traceid": true, "request_id": true, "requestid": true,
+	"correlation_id": true, "correlationid": true, "span_id": true, "spanid": true, "parent_id": true,
 }
 
 // hexValueKeyIsIdentifier reports whether the entropy candidate that starts at
@@ -1154,7 +1156,7 @@ func hexValueKeyIsIdentifier(in string, i int) bool {
 	if identifierHexKeys[key] {
 		return true
 	}
-	for _, suf := range []string{"_sha", "_sha1", "_sha256", "_digest", "_checksum", "_commit", "_hash"} {
+	for _, suf := range []string{"_sha", "_sha1", "_sha256", "_digest", "_checksum", "_commit", "_hash", "_trace_id", "_request_id", "_correlation_id", "_span_id", "_parent_id"} {
 		if strings.HasSuffix(key, suf) {
 			return true
 		}

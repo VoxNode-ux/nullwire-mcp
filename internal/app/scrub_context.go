@@ -62,6 +62,13 @@ var entropyExemptHeaders = map[string]bool{
 	"x-amz-cf-id":      true,
 	"x-amz-request-id": true,
 	"cf-ray":           true,
+	// Trace and span ids are 16 or 32 hex digits by design.
+	"x-b3-traceid":      true,
+	"x-b3-spanid":       true,
+	"x-b3-parentspanid": true,
+	"b3":                true,
+	"sentry-trace":      true,
+	"x-trace-id":        true,
 }
 
 // scrubHeaderValue scrubs one header value (lname is the lower-cased name).
@@ -486,7 +493,7 @@ func (s *Scrubber) scrubHexSecrets(in string) (string, int) {
 		if n := j - i; n == 32 || n == 40 || n == 64 {
 			beforeOK := i == 0 || !isWordByte(in[i-1])
 			afterOK := j == len(in) || !isWordByte(in[j])
-			if beforeOK && afterOK && shannonEntropyBits(in[i:j]) >= entropyHexWebhookMin {
+			if beforeOK && afterOK && !hexValueKeyIsIdentifier(in, i) && shannonEntropyBits(in[i:j]) >= entropyHexWebhookMin {
 				b.WriteString(in[last:i])
 				b.WriteString(s.tag("TOKEN", in[i:j]))
 				s.Tokens.Add(1)
