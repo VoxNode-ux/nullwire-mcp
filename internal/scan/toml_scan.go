@@ -8,12 +8,29 @@ import (
 
 var tomlAnyKeyValue = regexp.MustCompile(`^\s*([A-Za-z0-9_."'-]+)\s*=\s*(.*)$`)
 
-// stripTOMLComment removes a trailing # comment, ignoring # inside quotes.
-func stripTOMLComment(s string) string {
+// tomlTriple reports whether s[i:] starts with three c bytes.
+func tomlTriple(s string, i int, c byte) bool {
+	return i+2 < len(s) && s[i+1] == c && s[i+2] == c
+}
+
+// stripTOMLCommentState removes a trailing # comment, ignoring # inside quotes
+// and inside multi-line (triple-quoted) strings. ml is the delimiter byte (a double
+// or single quote) of a multi-line string still open at the start of s, or 0;
+// the byte of one still open at the end is returned, so a caller walking an
+// array line by line can carry the state across lines. While a multi-line
+// string is open the text is returned unchanged, trailing spaces included.
+func stripTOMLCommentState(s string, ml byte) (string, byte) {
 	var q byte
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
+		case ml != 0:
+			if c == '\\' && ml == '"' {
+				i++
+			} else if c == ml && tomlTriple(s, i, ml) {
+				ml = 0
+				i += 2
+			}
 		case q != 0:
 			if c == '\\' && q == '"' {
 				i++
@@ -21,12 +38,26 @@ func stripTOMLComment(s string) string {
 				q = 0
 			}
 		case c == '"' || c == '\'':
-			q = c
+			if tomlTriple(s, i, c) {
+				ml = c
+				i += 2
+			} else {
+				q = c
+			}
 		case c == '#':
-			return strings.TrimRight(s[:i], " \t")
+			return strings.TrimRight(s[:i], " \t"), 0
 		}
 	}
-	return strings.TrimRight(s, " \t")
+	if ml != 0 {
+		return s, ml
+	}
+	return strings.TrimRight(s, " \t"), 0
+}
+
+// stripTOMLComment removes a trailing # comment, ignoring # inside quotes.
+func stripTOMLComment(s string) string {
+	out, _ := stripTOMLCommentState(s, 0)
+	return out
 }
 
 // tomlStrings returns the contents of every quoted string in s.
@@ -35,6 +66,15 @@ func tomlStrings(s string) []string {
 	for i := 0; i < len(s); i++ {
 		q := s[i]
 		if q != '"' && q != '\'' {
+			continue
+		}
+		if tomlTriple(s, i, q) { // multi-line string
+			end := strings.Index(s[i+3:], strings.Repeat(string(q), 3))
+			if end < 0 {
+				break
+			}
+			out = append(out, s[i+3:i+3+end])
+			i += 3 + end + 2
 			continue
 		}
 		j := i + 1
@@ -53,13 +93,22 @@ func tomlStrings(s string) []string {
 	return out
 }
 
-// tomlDepth returns how many [ or { are still open in s, ignoring quoted text.
-func tomlDepth(s string) int {
+// tomlDepthState returns how many [ or { s opens minus closes, ignoring quoted
+// text and multi-line (triple-quoted) strings. ml is the multi-line delimiter open
+// at the start of s (0 for none); the one open at the end is returned.
+func tomlDepthState(s string, ml byte) (int, byte) {
 	depth := 0
 	var q byte
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
+		case ml != 0:
+			if c == '\\' && ml == '"' {
+				i++
+			} else if c == ml && tomlTriple(s, i, ml) {
+				ml = 0
+				i += 2
+			}
 		case q != 0:
 			if c == '\\' && q == '"' {
 				i++
@@ -67,24 +116,42 @@ func tomlDepth(s string) int {
 				q = 0
 			}
 		case c == '"' || c == '\'':
-			q = c
+			if tomlTriple(s, i, c) {
+				ml = c
+				i += 2
+			} else {
+				q = c
+			}
 		case c == '[' || c == '{':
 			depth++
 		case c == ']' || c == '}':
 			depth--
 		}
 	}
-	return depth
+	return depth, ml
+}
+
+// tomlDepth returns how many [ or { are still open in s, ignoring quoted text.
+func tomlDepth(s string) int {
+	d, _ := tomlDepthState(s, 0)
+	return d
 }
 
 // splitTOMLTop splits s on commas that are outside quotes and nested brackets.
 func splitTOMLTop(s string) []string {
 	var parts []string
 	depth, start := 0, 0
-	var q byte
+	var q, ml byte
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
+		case ml != 0:
+			if c == '\\' && ml == '"' {
+				i++
+			} else if c == ml && tomlTriple(s, i, ml) {
+				ml = 0
+				i += 2
+			}
 		case q != 0:
 			if c == '\\' && q == '"' {
 				i++
@@ -92,7 +159,12 @@ func splitTOMLTop(s string) []string {
 				q = 0
 			}
 		case c == '"' || c == '\'':
-			q = c
+			if tomlTriple(s, i, c) {
+				ml = c
+				i += 2
+			} else {
+				q = c
+			}
 		case c == '[' || c == '{':
 			depth++
 		case c == ']' || c == '}':
@@ -109,10 +181,28 @@ func splitTOMLTop(s string) []string {
 // text is skipped) and s with those blocks cut out.
 func tomlInlineBlocks(s string) (bodies []string, rest string) {
 	var out strings.Builder
-	var q byte
+	var q, ml byte
 	depth, start := 0, 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		if ml != 0 { // inside a multi-line string
+			if depth == 0 {
+				out.WriteByte(c)
+			}
+			if c == '\\' && ml == '"' && i+1 < len(s) {
+				i++
+				if depth == 0 {
+					out.WriteByte(s[i])
+				}
+			} else if c == ml && tomlTriple(s, i, ml) {
+				if depth == 0 {
+					out.WriteString(s[i+1 : i+3])
+				}
+				ml = 0
+				i += 2
+			}
+			continue
+		}
 		if q != 0 {
 			if depth == 0 {
 				out.WriteByte(c)
@@ -129,9 +219,17 @@ func tomlInlineBlocks(s string) (bodies []string, rest string) {
 		}
 		switch {
 		case c == '"' || c == '\'':
-			q = c
-			if depth == 0 {
-				out.WriteByte(c)
+			if tomlTriple(s, i, c) {
+				ml = c
+				if depth == 0 {
+					out.WriteString(s[i : i+3])
+				}
+				i += 2
+			} else {
+				q = c
+				if depth == 0 {
+					out.WriteByte(c)
+				}
 			}
 		case c == '{':
 			if depth == 0 {
@@ -190,8 +288,11 @@ func scanTOMLFile(s Scrubber, path string, report *strings.Builder) (ok bool, hi
 		}
 		return currentTable + "." + strings.Join(parts, ".")
 	}
-	// inline scans the body of one inline table, { a = "x", b = ["y"] }, under base.
-	inline := func(lineNo int, base, body string) {
+	// inline scans the body of one inline table, { a = "x", b = ["y"], c = { d = "z" } },
+	// under base. Nested tables and tables inside arrays recurse with the dotted
+	// key (auth.creds.token).
+	var inline func(lineNo int, base, body string)
+	inline = func(lineNo int, base, body string) {
 		for _, pair := range splitTOMLTop(body) {
 			kv := strings.SplitN(pair, "=", 2)
 			if len(kv) != 2 {
@@ -199,13 +300,23 @@ func scanTOMLFile(s Scrubber, path string, report *strings.Builder) (ok bool, hi
 			}
 			k := strings.TrimSpace(strings.Trim(strings.TrimSpace(kv[0]), `"'`))
 			pv := strings.TrimSpace(kv[1])
-			if strings.HasPrefix(pv, "[") {
-				for _, str := range tomlStrings(pv) {
-					show(lineNo, qualify(base, k), str)
+			sub := base + "." + k
+			switch {
+			case strings.HasPrefix(pv, "{"):
+				if strings.HasSuffix(pv, "}") {
+					inline(lineNo, sub, pv[1:len(pv)-1])
 				}
-				continue
+			case strings.HasPrefix(pv, "["):
+				bodies, rest := tomlInlineBlocks(pv)
+				for _, b := range bodies {
+					inline(lineNo, sub, b)
+				}
+				for _, str := range tomlStrings(rest) {
+					show(lineNo, qualify(sub), str)
+				}
+			default:
+				show(lineNo, qualify(sub), tomlScalar(pv))
 			}
-			show(lineNo, qualify(base, k), tomlScalar(pv))
 		}
 	}
 	lines := strings.Split(string(raw), "\n")
@@ -246,10 +357,18 @@ func scanTOMLFile(s Scrubber, path string, report *strings.Builder) (ok bool, hi
 			}
 			show(startLine, name, strings.TrimSpace(strings.Join(parts, "\n")))
 		case strings.HasPrefix(val, "["):
-			text := stripTOMLComment(val)
-			for tomlDepth(text) > 0 && i+1 < len(lines) {
+			// ml carries an open multi-line string from line to line, so a # or ]
+			// inside it neither starts a comment nor closes the array.
+			text, ml := stripTOMLCommentState(val, 0)
+			depth, dml := tomlDepthState(text, 0)
+			for (depth > 0 || dml != 0) && i+1 < len(lines) {
 				i++
-				text += "\n" + stripTOMLComment(lines[i])
+				var seg string
+				seg, ml = stripTOMLCommentState(lines[i], ml)
+				text += "\n" + seg
+				var d int
+				d, dml = tomlDepthState(seg, dml)
+				depth += d
 			}
 			// [{ token = "x" }]: each inline table keeps the key context (items.token).
 			bodies, rest := tomlInlineBlocks(text)

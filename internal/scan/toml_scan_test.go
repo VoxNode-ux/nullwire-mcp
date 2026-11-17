@@ -169,3 +169,81 @@ func TestScanTOMLFileErrorsAndClean(t *testing.T) {
 		t.Errorf("clean file: %q", rep.String())
 	}
 }
+
+func TestStripTOMLCommentStateMultiline(t *testing.T) {
+	// A multi-line string opened on this line keeps its # and its trailing spaces.
+	out, ml := stripTOMLCommentState(`x = ["""a # b  `, 0)
+	if out != `x = ["""a # b  ` || ml != '"' {
+		t.Errorf("got %q, %q", out, ml)
+	}
+	// The next line closes it; the # after the closing quotes is a real comment.
+	out, ml = stripTOMLCommentState(`c # d""" # e`, '"')
+	if out != `c # d"""` || ml != 0 {
+		t.Errorf("got %q, %q", out, ml)
+	}
+	// Single-quoted literal strings work the same way, and a lone quote does not open one.
+	if out, ml = stripTOMLCommentState(`'''a # b`, 0); out != `'''a # b` || ml != '\'' {
+		t.Errorf("got %q, %q", out, ml)
+	}
+	if got := stripTOMLComment(`a = "" # c`); got != `a = ""` {
+		t.Errorf("empty string: got %q", got)
+	}
+}
+
+func TestTOMLDepthStateMultiline(t *testing.T) {
+	d, ml := tomlDepthState(`["""a ] {`, 0)
+	if d != 1 || ml != '"' {
+		t.Errorf("got depth %d, ml %q", d, ml)
+	}
+	d, ml = tomlDepthState(`b ] [ """]`, ml)
+	if d != -1 || ml != 0 {
+		t.Errorf("got depth %d, ml %q", d, ml)
+	}
+	if got := tomlDepth(`["""x ] y""", [`); got != 2 {
+		t.Errorf("tomlDepth with a multi-line string = %d, want 2", got)
+	}
+}
+
+func TestTOMLHelpersSkipMultilineStrings(t *testing.T) {
+	if got := tomlStrings(`["""a "q" b""", 'c']`); !reflect.DeepEqual(got, []string{`a "q" b`, "c"}) {
+		t.Errorf("tomlStrings = %q", got)
+	}
+	got := splitTOMLTop(`a = """x, y "z" , w""", b = 1`)
+	if len(got) != 2 {
+		t.Errorf("splitTOMLTop = %q", got)
+	}
+	bodies, rest := tomlInlineBlocks(`["""{ not a block }""", { a = 1 }]`)
+	if len(bodies) != 1 || strings.TrimSpace(bodies[0]) != "a = 1" || !strings.Contains(rest, "{ not a block }") {
+		t.Errorf("tomlInlineBlocks = %q, %q", bodies, rest)
+	}
+}
+
+func TestScanTOMLFileNestedInlineAndMultilineInArray(t *testing.T) {
+	p := writeFile(t, t.TempDir(), "c.toml", strings.Join([]string{
+		`[auth]`,
+		`nested = { creds = { token = "` + marker + `" }, other = "plain" }`,
+		`deep = { a = { b = { c = "` + marker + `" } } }`,
+		`mixed = { list = [{ key = "` + marker + `" }] }`,
+		`hosts = [`,
+		`  """`,
+		`  has # hash and ] bracket`,
+		`  ` + marker,
+		`  """,`,
+		`  "plain",`,
+		`]`,
+		`after = "` + marker + `"`,
+	}, "\n"))
+	var rep strings.Builder
+	ok, hits, tokens := scanTOMLFile(&fakeScrub{}, p, &rep)
+	if !ok || hits != 5 || tokens != 5 {
+		t.Errorf("got ok=%v hits=%d tokens=%d\n%s", ok, hits, tokens, rep.String())
+	}
+	if strings.Contains(rep.String(), marker) {
+		t.Errorf("report leaked a secret:\n%s", rep.String())
+	}
+	for _, want := range []string{"auth.nested.creds.token", "auth.deep.a.b.c", "auth.mixed.list.key", "auth.hosts", "auth.after"} {
+		if !strings.Contains(rep.String(), want) {
+			t.Errorf("report is missing %q:\n%s", want, rep.String())
+		}
+	}
+}
