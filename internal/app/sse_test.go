@@ -473,7 +473,7 @@ func TestSSEIgnoredURLIsForwardedButNotStored(t *testing.T) {
 	if rec := sseGet(app, up); !strings.Contains(rec.Body.String(), "data: hi") {
 		t.Errorf("the client must still get the stream: %q", rec.Body.String())
 	}
-	time.Sleep(200 * time.Millisecond) // the final capture runs in the background
+	app.finishing.Wait() // the final capture runs in the background; wait for it
 	if n := app.ring.Len(); n != 0 {
 		t.Errorf("an ignored URL left %d entries", n)
 	}

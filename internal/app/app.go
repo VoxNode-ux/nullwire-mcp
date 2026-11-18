@@ -1368,6 +1368,7 @@ type App struct {
 	h1Once              sync.Once
 	h1                  *http.Transport
 	ignoreURLSubstrings []string
+	finishing           sync.WaitGroup // background finishLive calls; tests wait on it
 	tunnels             atomic.Int64
 	tunnelIdle          time.Duration
 	allowUninspectable  bool // forward request bodies whose Content-Encoding cannot be decoded
@@ -2120,7 +2121,7 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 		note += "; frames not inspected or stored"
 	}
 	flow.note = note
-	go a.finishLive(liveID, flow)
+	a.goFinishLive(liveID, flow)
 }
 
 func parseDNSServers(spec string) ([]string, error) {

@@ -275,5 +275,5 @@ func (a *App) streamSSE(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	if clientGone {
 		final.note = "Server-Sent Events stream closed by the client; text is captured and scrubbed" + skipped
 	}
-	go a.finishLive(liveID, final)
+	a.goFinishLive(liveID, final)
 }

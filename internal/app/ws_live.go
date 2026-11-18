@@ -33,6 +33,16 @@ func (a *App) pushLive(f rawFlow) (id uint64, ok bool) {
 	return id, true
 }
 
+// goFinishLive runs finishLive in the background and lets tests wait for it
+// with a.finishing.Wait(), instead of sleeping.
+func (a *App) goFinishLive(id uint64, f rawFlow) {
+	a.finishing.Add(1)
+	go func() {
+		defer a.finishing.Done()
+		a.finishLive(id, f)
+	}()
+}
+
 // finishLive stores the final capture of a connection. It replaces the live
 // entry in place; when that entry has been pushed out of the buffer meanwhile,
 // the final capture is pushed as a new entry, as it was before live capture.
