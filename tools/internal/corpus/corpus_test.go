@@ -3,6 +3,7 @@ package corpus
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -116,5 +117,50 @@ func TestInHoldoutDisabled(t *testing.T) {
 	}
 	if !InHoldout("anything", 1) {
 		t.Error("mod 1 puts every file in the holdout")
+	}
+}
+
+func TestRcovTokensBounds(t *testing.T) {
+	var got []string
+	text := "abc abcd " + strings.Repeat("a", MaxTokenLen+1) + " " + strings.Repeat("b", MaxTokenLen) + " tail"
+	n := Tokens(text, func(tok string) { got = append(got, tok) })
+	if n != 3 || len(got) != 3 || got[0] != "abcd" || got[1] != strings.Repeat("b", MaxTokenLen) || got[2] != "tail" {
+		t.Errorf("Tokens = %d %q", n, got)
+	}
+	if Tokens("", func(string) { t.Error("no token expected") }) != 0 {
+		t.Error("empty text has no tokens")
+	}
+}
+
+func TestRcovGeneratorsHandleZero(t *testing.T) {
+	if len(Secrets(0, SeedTrain)) != 0 || len(Benign(0, SeedTrain)) != 0 {
+		t.Error("n = 0 must give nothing")
+	}
+	for _, s := range Secrets(200, SeedHoldout) {
+		if strings.Contains(s, "eyJ") {
+			t.Fatalf("a secret holds the JWT prefix: %q", s)
+		}
+	}
+	for _, s := range Benign(200, SeedHoldout) {
+		if len(s) < MinTokenLen || len(s) > MaxTokenLen {
+			t.Fatalf("benign identifier out of bounds: %q", s)
+		}
+	}
+}
+
+func TestRcovWalkUnreadableFolder(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a non-root POSIX user (permission bits)")
+	}
+	root := t.TempDir()
+	mk(t, root, "ok/a.txt", "fine")
+	mk(t, root, "locked/b.txt", "hidden")
+	locked := filepath.Join(root, "locked")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) }) // #nosec G302 -- so the temp dir can be removed
+	if err := Walk(root, 0, false, func(string) {}); err == nil {
+		t.Error("an unreadable folder must be reported")
 	}
 }
