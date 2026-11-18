@@ -579,3 +579,41 @@ func TestCovGQLSkip(t *testing.T) {
 		}
 	}
 }
+
+func TestGQLResponseErrorsCountsAndCut(t *testing.T) {
+	for _, c := range []struct {
+		name, in string
+		n        int
+		more     bool
+	}{
+		{"complete", `{"errors":[{"message":"a"}]}`, 1, false},
+		{"two complete", `{"errors":[{"message":"a"},{"message":"b"}]}`, 2, false},
+		{"cut inside the array", `{"errors":[{"message":"a"},{"message":"b"}` + truncMarker, 2, true},
+		{"errors is not an array", `{"errors":{"message":"a"}}`, 0, false},
+		{"no errors key", `{"data":1}`, 0, false},
+		{"not an object", `[1]`, 0, false},
+		{"empty", ``, 0, false},
+	} {
+		if n, more := gqlResponseErrors(c.in); n != c.n || more != c.more {
+			t.Errorf("%s: gqlResponseErrors = %d, %v; want %d, %v", c.name, n, more, c.n, c.more)
+		}
+	}
+}
+
+func TestGraphQLErrorCountShowsPlusWhenResponseIsCut(t *testing.T) {
+	app := fxApp(t)
+	app.capture(rawFlow{
+		started: time.Now(), method: "POST", url: "http://127.0.0.1:9/graphql", status: 200,
+		reqHeaders:  http.Header{"Content-Type": {"application/json"}},
+		reqBody:     []byte(`{"query":"query Foo { a }"}`),
+		respHeaders: http.Header{"Content-Type": {"application/json"}},
+		respBody:    []byte(`{"data":null,"errors":[{"message":"a"},{"message":"b"}` + truncMarker),
+	})
+	es := app.ring.ListRecent(1, "POST", "/graphql")
+	if len(es) != 1 {
+		t.Fatalf("captured %d flows", len(es))
+	}
+	if !strings.Contains(es[0].Note, "GraphQL errors: 2+.") {
+		t.Errorf("note = %q", es[0].Note)
+	}
+}

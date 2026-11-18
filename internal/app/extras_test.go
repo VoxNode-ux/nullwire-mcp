@@ -975,3 +975,81 @@ func TestXMLOpenLocalName(t *testing.T) {
 		}
 	}
 }
+
+// scrubXMLSecrets is the regexp pass that mops up after the tree pass, so it
+// is called directly here to reach its early returns.
+func TestScrubXMLSecretsSkipsAndRedacts(t *testing.T) {
+	s, err := NewScrubber()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, in := range map[string]string{
+		"blank value":          "<Secret> </Secret>",
+		"blank cdata":          "<Secret><![CDATA[ ]]></Secret>",
+		"already redacted":     "<Secret>[REDACTED_TOKEN#aaaaaa]</Secret>",
+		"placeholder":          "<Secret>${API_KEY}</Secret>",
+		"template placeholder": "<Secret>{{ api_key }}</Secret>",
+		"benign leaf":          "<tokenType>Bearer</tokenType>",
+	} {
+		n := 0
+		if out := s.scrubXMLSecrets(in, &n); n != 0 || out != in {
+			t.Errorf("%s: n=%d out=%q, want the input unchanged", name, n, out)
+		}
+	}
+	for name, in := range map[string]string{
+		"plain value": "<Secret>hunter2hunter2</Secret>",
+		"cdata value": "<Secret><![CDATA[hunter2hunter2]]></Secret>",
+		"cut value":   "<Secret>hunter2hunter2",
+	} {
+		n := 0
+		out := s.scrubXMLSecrets(in, &n)
+		if n != 1 || strings.Contains(out, "hunter2hunter2") || !strings.Contains(out, "[REDACTED_") {
+			t.Errorf("%s: n=%d out=%q", name, n, out)
+		}
+	}
+}
+
+func TestDecodeBase58TextRejectsUnreadableOutput(t *testing.T) {
+	for name, payload := range map[string][]byte{
+		"invalid UTF-8":     []byte("abcdefg\xff"),
+		"control byte":      []byte("abcdefg\x01h"),
+		"delete byte":       []byte("abcdefg\x7fh"),
+		"too short to read": []byte("abc"),
+	} {
+		if b, ok := decodeBase58Text(b58Encode(payload)); ok || b != nil {
+			t.Errorf("%s: decodeBase58Text = %q, %v; want a failure", name, b, ok)
+		}
+	}
+	// Leading '1' characters are 0x00 bytes, which are not printable.
+	if _, ok := decodeBase58Text("111" + b58Encode([]byte("printable text ok"))); ok {
+		t.Error("a zero prefix must be rejected")
+	}
+	if b, ok := decodeBase58Text(b58Encode([]byte("tab\there ok"))); !ok || string(b) != "tab\there ok" {
+		t.Errorf("tabs and newlines are text: %q %v", b, ok)
+	}
+}
+
+func TestMostlyTextBoundaries(t *testing.T) {
+	ctrl := func(n int) []byte { return bytes.Repeat([]byte{1}, n) }
+	for name, in := range map[string][]byte{
+		"exactly 8 bytes":           []byte("abcdefgh"),
+		"1 control in 21 bytes":     append(bytes.Repeat([]byte("a"), 20), ctrl(1)...),
+		"tab, CR and LF are text":   []byte("a\tb\rc\nd efg"),
+		"multi-byte UTF-8 is text":  []byte("héllo wörld ✓"),
+	} {
+		if !mostlyText(in) {
+			t.Errorf("%s: want text", name)
+		}
+	}
+	for name, in := range map[string][]byte{
+		"7 bytes":                  []byte("abcdefg"),
+		"empty":                    nil,
+		"invalid UTF-8":            []byte("abcdefg\xc3("),
+		"1 control in 20 bytes":    append(bytes.Repeat([]byte("a"), 19), ctrl(1)...),
+		"mostly control":           ctrl(40),
+	} {
+		if mostlyText(in) {
+			t.Errorf("%s: want not text", name)
+		}
+	}
+}

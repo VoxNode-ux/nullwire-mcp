@@ -1850,3 +1850,109 @@ func TestCovToolClearWipesRingAndCounters(t *testing.T) {
 		t.Errorf("clear over RPC: isError=%v ring=%d", isErr, app.ring.Len())
 	}
 }
+
+func TestSplicePreWriteFailureClosesBoth(t *testing.T) {
+	c1, c2 := net.Pipe()
+	u1, u2 := net.Pipe()
+	_ = u2.Close() // the upstream is already gone, so writing the buffered bytes fails
+	toUp, toClient := splice(c1, u1, 0, []byte("hello"))
+	if toUp != 0 || toClient != 0 {
+		t.Errorf("counts = %d, %d; want 0, 0", toUp, toClient)
+	}
+	_ = c2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c2.Read(make([]byte, 1)); err == nil {
+		t.Error("the client side must be closed after a failed pre-write")
+	}
+	_ = c2.Close()
+}
+
+// net.Pipe ends have no CloseWrite, so end-of-input must close the destination.
+func TestSpliceClosesDestinationWithoutCloseWrite(t *testing.T) {
+	c1, c2 := net.Pipe()
+	u1, u2 := net.Pipe()
+	done := make(chan int64, 1)
+	go func() {
+		sent, _ := splice(c1, u1, 0, nil)
+		done <- sent
+	}()
+	got := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(u2)
+		got <- b
+	}()
+	if _, err := c2.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	_ = c2.Close()
+	select {
+	case b := <-got:
+		if string(b) != "hello" {
+			t.Errorf("upstream received %q", b)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the destination was never closed at end of input")
+	}
+	select {
+	case sent := <-done:
+		if sent != 5 {
+			t.Errorf("client->upstream bytes = %d, want 5", sent)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("splice did not return")
+	}
+	_ = u2.Close()
+}
+
+func TestServeHTTPChunkedStreamKeepsTrailersAndSendsNoUserAgent(t *testing.T) {
+	var mu sync.Mutex
+	var hadUA bool
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		_, hadUA = r.Header["User-Agent"]
+		mu.Unlock()
+		w.Header().Set("Trailer", "X-Sum")
+		_, _ = w.Write([]byte("part1"))
+		w.(http.Flusher).Flush() // no Content-Length: the response is chunked
+		_, _ = w.Write([]byte("part2"))
+		w.Header().Set("X-Sum", "abc")
+	}))
+	defer up.Close()
+
+	app := newTestApp(t)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, up.URL+"/stream", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "part1part2" {
+		t.Fatalf("status %d body %q", rec.Code, rec.Body.String())
+	}
+	if !rec.Flushed {
+		t.Error("an unknown-length response must be flushed to the client")
+	}
+	if got := rec.Header()[http.TrailerPrefix+"X-Sum"]; len(got) != 1 || got[0] != "abc" {
+		t.Errorf("trailer = %q, want [abc]", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hadUA {
+		t.Error("a client that sent no User-Agent must not get a default one added")
+	}
+}
+
+func TestBuildEntryWarnsOnEncodedBodies(t *testing.T) {
+	app := newTestApp(t)
+	app.capture(rawFlow{
+		started: time.Now(), method: "POST", url: "http://x.test/enc", status: 200,
+		reqHeaders:  http.Header{"Content-Encoding": {"br"}},
+		reqBody:     []byte("xx"),
+		respHeaders: http.Header{"Content-Encoding": {"br"}},
+		respBody:    []byte("yy"),
+	})
+	es := app.ring.ListRecent(1, "POST", "/enc")
+	if len(es) != 1 {
+		t.Fatalf("captured %d flows", len(es))
+	}
+	for _, want := range []string{"Request body encoded", "Response body encoded"} {
+		if !strings.Contains(es[0].Note, want) {
+			t.Errorf("note %q lacks %q", es[0].Note, want)
+		}
+	}
+}

@@ -399,3 +399,106 @@ func TestCovSSELiveLoopExitsWhenFlowIgnored(t *testing.T) {
 		t.Fatal("the refresher kept running although its URL is ignored")
 	}
 }
+
+// A client that cannot be written to ends the stream, and the flow says so.
+type sseFailWriter struct{ *httptest.ResponseRecorder }
+
+func (sseFailWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// sseNoFlush hides the Flush method of the recorder.
+type sseNoFlush struct{ http.ResponseWriter }
+
+func TestSSEClientWriteFailureStopsTheStream(t *testing.T) {
+	app := fxApp(t)
+	up := sseUpstream(t, nil, func(w http.ResponseWriter, fl http.Flusher, r *http.Request) {
+		_, _ = w.Write([]byte("data: hello\n\n"))
+		fl.Flush()
+		<-r.Context().Done() // the proxy must close the upstream body by itself
+	})
+	done := make(chan struct{})
+	go func() {
+		app.ServeHTTP(sseFailWriter{httptest.NewRecorder()}, httptest.NewRequest("GET", up.URL+"/stream", nil))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream kept running after the client write failed")
+	}
+	if e := sseWaitClosed(t, app); !strings.Contains(e.Note, "closed by the client") {
+		t.Errorf("note = %q", e.Note)
+	}
+}
+
+func TestSSETrailersAreForwardedOnCleanClose(t *testing.T) {
+	app := fxApp(t)
+	up := sseUpstream(t, map[string]string{"Trailer": "X-Sum"}, func(w http.ResponseWriter, fl http.Flusher, _ *http.Request) {
+		_, _ = w.Write([]byte("data: x\n\n"))
+		fl.Flush()
+		w.Header().Set("X-Sum", "abc") // declared above, sent after the body
+	})
+	rec := sseGet(app, up)
+	if got := rec.Header()[http.TrailerPrefix+"X-Sum"]; len(got) != 1 || got[0] != "abc" {
+		t.Errorf("trailer = %q, want [abc]", got)
+	}
+	if e := sseWaitClosed(t, app); strings.Contains(e.Note, "closed by the client") {
+		t.Errorf("a clean close must not be reported as a client close: %q", e.Note)
+	}
+}
+
+func TestSSEWorksWithoutAFlusher(t *testing.T) {
+	app := fxApp(t)
+	up := sseUpstream(t, nil, func(w http.ResponseWriter, fl http.Flusher, _ *http.Request) {
+		_, _ = w.Write([]byte("data: hi\n\n"))
+		fl.Flush()
+	})
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(sseNoFlush{rec}, httptest.NewRequest("GET", up.URL+"/stream", nil))
+	if !strings.Contains(rec.Body.String(), "data: hi") {
+		t.Errorf("the client must still get the stream: %q", rec.Body.String())
+	}
+	if e := sseWaitClosed(t, app); !strings.Contains(e.ResponseBody, "data: hi") {
+		t.Errorf("stored text: %q", e.ResponseBody)
+	}
+}
+
+// An ignored URL is forwarded but never stored.
+func TestSSEIgnoredURLIsForwardedButNotStored(t *testing.T) {
+	app := fxApp(t)
+	app.ignoreURLSubstrings = []string{"/stream"}
+	up := sseUpstream(t, nil, func(w http.ResponseWriter, fl http.Flusher, _ *http.Request) {
+		_, _ = w.Write([]byte("data: hi\n\n"))
+		fl.Flush()
+	})
+	if rec := sseGet(app, up); !strings.Contains(rec.Body.String(), "data: hi") {
+		t.Errorf("the client must still get the stream: %q", rec.Body.String())
+	}
+	time.Sleep(200 * time.Millisecond) // the final capture runs in the background
+	if n := app.ring.Len(); n != 0 {
+		t.Errorf("an ignored URL left %d entries", n)
+	}
+}
+
+func TestSSEDecoderStopsOnBadInput(t *testing.T) {
+	for name, in := range map[string][]byte{
+		"gzip":    []byte("this is not gzip data at all"),
+		"deflate": {0x78, 0xBB, 0, 0, 0, 0, 0, 0}, // a zlib header that asks for a dictionary
+	} {
+		col := newSSECollector(1 << 10)
+		d := newSSEDecoder(name, col)
+		finished := make(chan struct{})
+		go func() {
+			_, _ = d.Write(in) // fails once the decoder has stopped; that is ignored
+			_ = d.Close()
+			close(finished)
+		}()
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: the decoder hung on bad input", name)
+		}
+		if len(col.Bytes()) != 0 {
+			t.Errorf("%s: bad input produced %q", name, col.Bytes())
+		}
+	}
+}
