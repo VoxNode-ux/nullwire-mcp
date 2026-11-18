@@ -402,7 +402,6 @@ func TestReexecServeForwardsSignals(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	time.Sleep(100 * time.Millisecond) // let reexecServe finish registering its handler
 
 	self, err := os.FindProcess(os.Getpid())
 	if err != nil {

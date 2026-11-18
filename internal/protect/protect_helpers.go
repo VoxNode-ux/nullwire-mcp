@@ -34,16 +34,22 @@ func reexecServeEnv(args, env []string) int {
 		fmt.Fprintf(os.Stderr, "nullwire-mcp protect: cannot locate self: %v\n", err)
 		return 1
 	}
+	// Register for signals before the child exists, so the handler is already
+	// active whenever the child first writes anything. The channel is
+	// buffered, so a signal that arrives before the forwarding goroutine
+	// starts is held, not lost.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+
 	cmd := exec.Command(self, args...) // #nosec G204 -- re-runs this same executable
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Env = append(os.Environ(), env...)
 	if err := cmd.Start(); err != nil {
+		signal.Stop(sigs)
 		fmt.Fprintf(os.Stderr, "nullwire-mcp protect: %v\n", err)
 		return 1
 	}
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	done := make(chan struct{})
 	go func() {
 		for {
