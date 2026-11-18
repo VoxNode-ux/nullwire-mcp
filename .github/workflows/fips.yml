@@ -1,0 +1,42 @@
+name: FIPS 140-3
+
+# Runs the whole test suite with the frozen Go FIPS 140-3 cryptographic module
+# in "only" mode: any non-approved algorithm (MD5, SHA-1 signatures, Ed25519,
+# short HMAC keys, ...) makes the test fail instead of running quietly.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fips-only:
+    name: go test -race (fips140=only)
+    runs-on: ubuntu-24.04
+    env:
+      GOFIPS140: v1.26.0
+      GODEBUG: fips140=only
+      NULLWIRE_REQUIRE_FIPS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27"
+          check-latest: true
+          cache: false
+      - name: Show the FIPS settings
+        run: |
+          go version
+          echo "GOFIPS140=$(go env GOFIPS140) GODEBUG=$GODEBUG"
+      - name: Test with the FIPS module enforced
+        run: go test -race ./...
+      - name: Taint hash cost, SipHash against HMAC-SHA256
+        run: |
+          set -o pipefail
+          go test -run '^$' -bench BenchmarkTaintHash -benchmem ./internal/app | tee -a "$GITHUB_STEP_SUMMARY"
