@@ -128,3 +128,80 @@ func TestGraphQLEdgeCases(t *testing.T) {
 		t.Errorf("a real persisted query: %+v %v", r, ok)
 	}
 }
+
+func TestUninspectableRequestEncodingValues(t *testing.T) {
+	for in, want := range map[string]string{
+		"br":           "br",
+		"BR":           "br",
+		"gzip, br":     "gzip, br",
+		"identity, br": "br",
+		"zstd":         "zstd",
+		"compress":     "compress",
+	} {
+		h := http.Header{}
+		h.Set("Content-Encoding", in)
+		if got, bad := uninspectableRequestEncoding(h); !bad || got != want {
+			t.Errorf("%q: got (%q, %v), want (%q, true)", in, got, bad, want)
+		}
+	}
+	for _, in := range []string{"", "identity", "gzip", "x-gzip", "deflate", "GZIP", "identity, gzip"} {
+		h := http.Header{}
+		if in != "" {
+			h.Set("Content-Encoding", in)
+		}
+		if got, bad := uninspectableRequestEncoding(h); bad || got != "" {
+			t.Errorf("%q must be inspectable, got (%q, %v)", in, got, bad)
+		}
+	}
+}
+
+func TestScrubMultipartWithEdgeCases(t *testing.T) {
+	app := fxApp(t)
+	pw := "hunter2hunter2"
+	field := func(disposition, value string) string {
+		return "--b\r\nContent-Disposition: " + disposition + "\r\n\r\n" + value + "\r\n"
+	}
+
+	// Content types that are not usable multipart are scrubbed as plain text.
+	for name, ct := range map[string]string{
+		"unparsable":       "multipart/form-data; boundary",
+		"not multipart":    "text/plain; boundary=b",
+		"missing boundary": "multipart/form-data",
+		"empty":            "",
+	} {
+		out, n := app.scrubMultipartWith(app.scrub, ct, []byte("password="+pw), 0)
+		if strings.Contains(out, pw) || n < 1 {
+			t.Errorf("%s: leaked or uncounted: %q (%d)", name, out, n)
+		}
+	}
+
+	// A part whose disposition has no form name is shown as (unnamed).
+	body := field(`attachment; name="x"`, "value-one") + "--b--\r\n"
+	if out, _ := app.scrubMultipartWith(app.scrub, "multipart/form-data; boundary=b", []byte(body), 1<<10); !strings.Contains(out, "(unnamed)=value-one") {
+		t.Errorf("unnamed part: %q", out)
+	}
+
+	// A body cut off before its closing boundary keeps what was read and says so.
+	cut := field(`form-data; name="a"`, "first") + "--b\r\nContent-Disposition: form-data; name=\"password\"\r\n\r\n" + pw
+	out, n := app.scrubMultipartWith(app.scrub, "multipart/form-data; boundary=b", []byte(cut), 1<<10)
+	if !strings.Contains(out, "a=first") || strings.Contains(out, pw) || n < 1 || !strings.Contains(out, "[multipart body truncated or malformed]") {
+		t.Errorf("truncated body: %q (%d)", out, n)
+	}
+
+	// A valid boundary but no parts: the text is scrubbed as it is.
+	if out, n := app.scrubMultipartWith(app.scrub, "multipart/form-data; boundary=b", []byte("noise password="+pw), 1<<10); strings.Contains(out, pw) || n < 1 {
+		t.Errorf("no parts: %q (%d)", out, n)
+	}
+
+	// The per-part limit applies to fields and files; a file name is scrubbed.
+	tok := "ghp_" + strings.Repeat("a1", 20)
+	body = field(`form-data; name="long"`, strings.Repeat("a", 100)) +
+		field(`form-data; name="up"; filename="`+tok+`.txt"`, strings.Repeat("b", 100)) + "--b--\r\n"
+	out, n = app.scrubMultipartWith(app.scrub, "multipart/form-data; boundary=b", []byte(body), 10)
+	if !strings.Contains(out, "long="+strings.Repeat("a", 10)+"\n") || strings.Contains(out, strings.Repeat("a", 11)) {
+		t.Errorf("field limit: %q", out)
+	}
+	if !strings.Contains(out, "10 bytes seen, content not stored") || strings.Contains(out, tok) || n < 1 {
+		t.Errorf("file limit or file name: %q (%d)", out, n)
+	}
+}

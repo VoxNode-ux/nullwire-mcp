@@ -321,3 +321,214 @@ func TestGraphQLMultipartAndResponseErrorsInEntries(t *testing.T) {
 		t.Errorf("note = %q", e.Note)
 	}
 }
+
+func TestGQLOperationsEdgeCases(t *testing.T) {
+	cases := []struct {
+		name, src string
+		want      []gqlOp
+	}{
+		{"fragment keeps a type named query out", `fragment F on query { a } query Q { b }`,
+			[]gqlOp{{kind: "query", name: "Q", field: "b"}}},
+		{"alias is skipped for the field name", `query { x: a }`, []gqlOp{{kind: "query", field: "a"}}},
+		{"fragment spread is skipped", `{ ...F b }`, []gqlOp{{kind: "query", field: "b"}}},
+		{"inline fragment is not a root field", `{ ... on User { id } name }`, []gqlOp{{kind: "query"}}},
+		{"leading comment and shorthand", "# c\r\n{ a }", []gqlOp{{kind: "query", field: "a"}}},
+		{"stray closers at depth 0", `} ) ] { a }`, []gqlOp{{kind: "query", field: "a"}}},
+		{"unterminated block string stops the scan", `query A { f(x: """abc`, []gqlOp{{kind: "query", name: "A", field: "f"}}},
+		{"block string is skipped", `query A { f(x: """ query B { } """) }`, []gqlOp{{kind: "query", name: "A", field: "f"}}},
+		{"string with escaped quote", `query A { f(x: "a\"b { ") }`, []gqlOp{{kind: "query", name: "A", field: "f"}}},
+		{"string cut by a newline", "query A { f(x: \"abc\n) }", []gqlOp{{kind: "query", name: "A", field: "f"}}},
+		{"string ending in a backslash", `query A { f(x: "a\`, []gqlOp{{kind: "query", name: "A", field: "f"}}},
+		{"no operations", `hello world`, nil},
+		{"empty", ``, nil},
+	}
+	for _, c := range cases {
+		got := gqlOperations(c.src)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: gqlOperations = %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: op %d = %+v, want %+v", c.name, i, got[i], c.want[i])
+			}
+		}
+	}
+	if got := gqlOperations(strings.Repeat("query A { a } ", gqlMaxOps+10)); len(got) != gqlMaxOps {
+		t.Errorf("operations are capped at %d, got %d", gqlMaxOps, len(got))
+	}
+}
+
+func TestGQLJSONValueEnd(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+		ok   bool
+	}{
+		{`"abc"`, 5, true},
+		{`"abc`, 4, false},
+		{`"a\"b" rest`, 6, true},
+		{`{"a":"b"} x`, 9, true},
+		{`{"a":"b`, 7, false},
+		{`[1,[2,3]] x`, 9, true},
+		{`[1,[2`, 5, false},
+		{`}`, 1, false},
+		{`12,`, 2, true},
+		{`12`, 2, false},
+		{`true}`, 4, true},
+		{``, 0, false},
+	}
+	for _, c := range cases {
+		if end, ok := gqlJSONValueEnd(c.in, 0); end != c.want || ok != c.ok {
+			t.Errorf("gqlJSONValueEnd(%q) = (%d, %v), want (%d, %v)", c.in, end, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestGQLObjectFieldsEdgeCases(t *testing.T) {
+	collect := func(s string) (keys []string, end int, complete bool) {
+		end, complete = gqlObjectFields(s, 0, func(key string, vs, ve int, ok bool) bool {
+			keys = append(keys, key)
+			return true
+		})
+		return
+	}
+	if keys, _, complete := collect(`{ "a" : 1 , "b" : "x" , "c" : [1,2] }`); !complete || strings.Join(keys, ",") != "a,b,c" {
+		t.Errorf("complete object: keys=%v complete=%v", keys, complete)
+	}
+	for name, in := range map[string]string{
+		"key is not a string": `{ x }`,
+		"unterminated key":    `{"abc`,
+		"invalid key escape":  `{"\q": 1}`,
+		"key then EOF":        `{"a"`,
+		"no colon":            `{"a" 1}`,
+		"colon then EOF":      `{"a":`,
+		"colon then spaces":   `{"a":   `,
+		"no value":            `{"a":,"b":1}`,
+		"value cut":           `{"a":"unterminated`,
+		"empty text":          ``,
+		"only the brace":      `{`,
+	} {
+		if _, _, complete := collect(in); complete {
+			t.Errorf("%s: %q must not be complete", name, in)
+		}
+	}
+	// fn returning false stops the walk after the first key.
+	var seen []string
+	end, complete := gqlObjectFields(`{"a":1,"b":2}`, 0, func(key string, vs, ve int, ok bool) bool {
+		seen = append(seen, key)
+		return false
+	})
+	if complete || len(seen) != 1 || end != 6 {
+		t.Errorf("early stop: seen=%v end=%d complete=%v", seen, end, complete)
+	}
+}
+
+func TestGQLScanObjectEdgeCases(t *testing.T) {
+	// variables that is not an object is dropped; unknown keys are ignored.
+	m, _, _ := gqlScanObject(`{"variables":[1],"other":{"a":1},"id":"abc"}`, 0)
+	if _, ok := m["variables"]; ok || m["id"] != "abc" || len(m) != 1 {
+		t.Errorf("m = %v", m)
+	}
+	// A cut query whose start is not a string is dropped.
+	if m, _, _ = gqlScanObject(`{"query":{"a`, 0); len(m) != 0 {
+		t.Errorf("cut object-valued query: %v", m)
+	}
+	// A cut \u escape is trimmed until the string parses; nothing parses here.
+	if m, _, _ = gqlScanObject(`{"query":"\u12`, 0); len(m) != 0 {
+		t.Errorf("cut unicode escape: %v", m)
+	}
+	// A cut \u escape after some text keeps the text.
+	if m, _, _ = gqlScanObject(`{"query":"query A { a } \u12`, 0); m["query"] != "query A { a } " {
+		t.Errorf("cut unicode escape after text: %q", m["query"])
+	}
+	// Complete values of every known key are kept.
+	m, _, complete := gqlScanObject(`{"operationName":"Foo","doc_id":"1","queryId":2,"extensions":{"a":1}}`, 0)
+	if !complete || len(m) != 4 || m["operationName"] != "Foo" {
+		t.Errorf("m = %v complete=%v", m, complete)
+	}
+}
+
+func TestGQLScanBodyEdgeCases(t *testing.T) {
+	if objs, n, more := gqlScanBody(`[]`); len(objs) != 0 || n != 0 || more {
+		t.Errorf("empty array: %d %d %v", len(objs), n, more)
+	}
+	if objs, n, more := gqlScanBody(`[{"query":"query A { a }"}`); len(objs) != 1 || n != 1 || more {
+		t.Errorf("array without closing bracket: %d %d %v", len(objs), n, more)
+	}
+	if objs, n, more := gqlScanBody(`[[1,2`); len(objs) != 0 || n != 1 || !more {
+		t.Errorf("cut nested array: %d %d %v", len(objs), n, more)
+	}
+	if objs, n, more := gqlScanBody(`[ "s" , 1 , {"query":"query A { a }"} ]`); len(objs) != 1 || n != 3 || more {
+		t.Errorf("mixed array: %d %d %v", len(objs), n, more)
+	}
+}
+
+func TestGraphQLNoteStreamingFallbackAndLimits(t *testing.T) {
+	app := fxApp(t)
+	pad := strings.Repeat("x", gqlMaxBody+1024)
+
+	// An object over gqlMaxBody is cut and read with the streaming fallback.
+	got, _ := app.graphqlNote("POST", "", "", `{"operationName":"Big","query":"query Big { a }","pad":"`+pad+`"}`)
+	if got != " GraphQL query Big." {
+		t.Errorf("oversized object: %q", got)
+	}
+	// An oversized batch reports that it was cut.
+	got, _ = app.graphqlNote("POST", "", "", `[{"query":"query A { a }"},{"query":"mutation B { b }"},{"pad":"`+pad+`"}]`)
+	if got != " GraphQL batch of 3+: query A, mutation B." {
+		t.Errorf("oversized batch: %q", got)
+	}
+	// A valid batch longer than gqlMaxItems only reads the first gqlMaxItems entries.
+	items := strings.Repeat(`{"query":"query A { a }"},`, gqlMaxItems+1)
+	got, _ = app.graphqlNote("POST", "", "", "["+strings.TrimSuffix(items, ",")+"]")
+	want := " GraphQL batch of 101: query A, query A, query A, query A, query A (+95 more)."
+	if got != want {
+		t.Errorf("long batch: %q, want %q", got, want)
+	}
+	// Scalar and nested entries in a valid batch are skipped but counted.
+	got, _ = app.graphqlNote("POST", "", "", `[1,"s",[2],{"query":"query A { a }"}]`)
+	if got != " GraphQL batch of 4: query A." {
+		t.Errorf("mixed valid batch: %q", got)
+	}
+}
+
+func TestGraphQLNoteWeakIDAndLabels(t *testing.T) {
+	app := fxApp(t)
+	cases := []struct{ name, url, ct, body, want string }{
+		{"bare id with variables on a graphql path", "http://x/api/graphql", "", `{"id":"abc","variables":{}}`,
+			" GraphQL persisted operation (anonymous)."},
+		{"bare id with variables elsewhere", "http://x/api/data", "", `{"id":"abc","variables":{}}`, ""},
+		{"doc_id alone on a graphql path", "http://x/GraphQL", "", `{"doc_id":"123"}`,
+			" GraphQL persisted operation (anonymous)."},
+		{"doc_id alone elsewhere", "http://x/api", "", `{"doc_id":"123"}`, ""},
+		{"doc_id with variables", "http://x/api", "", `{"doc_id":"123","variables":{},"operationName":"Feed"}`,
+			" GraphQL persisted operation Feed."},
+		{"operationName that is not in the document", "", "", `{"operationName":"Z","query":"query A { a } query B { b }"}`,
+			" GraphQL operation Z."},
+		{"several operations without a name", "", "", `{"query":"query A { a } query B { b } query C { c }"}`,
+			" GraphQL query A (+2 more in document)."},
+		{"root field name too long to show", "", "", `{"query":"{ ` + strings.Repeat("x", 70) + ` }"}`,
+			" GraphQL query (anonymous)."},
+		{"shorthand body, unparsable URL", "%zz", "application/graphql", "{ me }", " GraphQL query (anonymous: me)."},
+		{"shorthand body, operationName in the URL", "http://x/q?operationName=Foo", "application/graphql", "{ me }", " GraphQL query Foo."},
+	}
+	for _, c := range cases {
+		if got, _ := app.graphqlNote("POST", c.url, c.ct, c.body); got != c.want {
+			t.Errorf("%s: note = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestGQLPathLooksGraphQLUnparsable(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"%zz/graphql?q=1":     true,
+		"%zz/other?graphql=1": false,
+		"%zz/other":           false,
+		"http://x/a/GraphQL":  true,
+		"http://x/a/b":        false,
+	} {
+		if got := gqlPathLooksGraphQL(raw); got != want {
+			t.Errorf("gqlPathLooksGraphQL(%q) = %v, want %v", raw, got, want)
+		}
+	}
+}

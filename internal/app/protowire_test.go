@@ -477,3 +477,19 @@ func TestIsGRPCContentType(t *testing.T) {
 		}
 	}
 }
+
+func TestProtoGroupInsideNestedMessage(t *testing.T) {
+	// A field whose bytes hold a group tag is not a sub-message: it stays text/bytes
+	// and the outer message still decodes.
+	inner := []byte{0x0b, 0x01, 0x02}
+	outer := pbCat(pbString(1, "name"), pbBytes(2, inner))
+	if _, ok := decodeProtoBody(pbHeader("application/x-protobuf"), outer, 1<<20); !ok {
+		t.Error("a message holding group-like bytes must still decode")
+	}
+	// A group tag at the top level is invalid.
+	for _, b := range [][]byte{{0x0b}, {0x0c}, pbCat(pbString(1, "ok"), []byte{0x0b})} {
+		if out, ok := decodeProtoBody(pbHeader("application/x-protobuf"), b, 1<<20); ok {
+			t.Errorf("%x decoded as %q", b, out)
+		}
+	}
+}

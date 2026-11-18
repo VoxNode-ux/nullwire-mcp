@@ -62,3 +62,44 @@ func BenchmarkScrubGate(b *testing.B) {
 		_ = scrubGate.Match(in)
 	}
 }
+
+func TestMaskGateSmallAutomaton(t *testing.T) {
+	const (
+		bitA uint32 = 1 << iota
+		bitB
+		bitC
+	)
+	g := newMaskGate(
+		maskGroup{bitA, []string{"he", "SHE", ""}},      // an empty literal is ignored; case is folded
+		maskGroup{bitB, []string{"his", "hers"}},
+		maskGroup{bitC, []string{"z"}},
+	)
+	for in, want := range map[string]uint32{
+		"":             0,
+		"nothing":      0,
+		"he":           bitA,
+		"HE":           bitA,
+		"ushers":       bitA | bitB, // "she" and "he" end inside "ushers", and "hers" ends it
+		"this":         bitB,        // "his"
+		"xhisx":        bitB,
+		"Z":            bitC,
+		"she z his":    bitA | bitB | bitC,
+		"h":            0,
+		"h-e":          0,
+		"héé":          0, // non-ASCII bytes fall in the "unused" class
+	} {
+		if got := g.Match(in); got != want {
+			t.Errorf("Match(%q) = %03b, want %03b", in, got, want)
+		}
+	}
+	// A gate with no literals matches nothing and does not stop early on empty text.
+	empty := newMaskGate(maskGroup{bitA, nil})
+	if got := empty.Match("anything at all"); got != 0 {
+		t.Errorf("literal-free gate matched %03b", got)
+	}
+	// The scan stops as soon as every bit has been seen.
+	all := newMaskGate(maskGroup{bitA, []string{"a"}}, maskGroup{bitB, []string{"b"}})
+	if got := all.Match("ab" + strings.Repeat("a", 1000)); got != bitA|bitB {
+		t.Errorf("early stop: %03b", got)
+	}
+}

@@ -137,3 +137,65 @@ func TestGatewayPrefixIsOnlyReservedWithAMap(t *testing.T) {
 		t.Errorf("%d, upstream saw %q", rec.Code, seen.path)
 	}
 }
+
+func TestGatewayPrefixAndNames(t *testing.T) {
+	for in, want := range map[string]bool{
+		"/_gw": true, "/_gw/": true, "/_gw/auth/x": true, "/_GW/x": true,
+		"/_gwx": false, "/_g": false, "": false, "/x/_gw": false, "_gw/x": false,
+	} {
+		if got := hasGatewayPrefix(in); got != want {
+			t.Errorf("hasGatewayPrefix(%q) = %v, want %v", in, got, want)
+		}
+	}
+	u := func(s string) *url.URL { v, _ := url.Parse(s); return v }
+	a := &App{
+		gwMap:     map[string]*url.URL{"b": u("http://b.test"), "a": u("http://a.test")},
+		upstreams: map[string]*url.URL{"a": u("http://a2.test"), "c": u("http://c.test")},
+	}
+	if got := strings.Join(a.gatewayNames(), ","); got != "a,b,c" {
+		t.Errorf("gatewayNames = %q, want a,b,c (merged, sorted, without duplicates)", got)
+	}
+	if got := (&App{}).gatewayNames(); len(got) != 0 {
+		t.Errorf("no routes: %v", got)
+	}
+}
+
+func TestMatchGatewayRawPathChecks(t *testing.T) {
+	u, _ := url.Parse("http://auth.test/base")
+	a := &App{gwMap: map[string]*url.URL{"auth": u}}
+
+	// The prefix must not be percent-encoded in the raw path.
+	for name, raw := range map[string]string{
+		"encoded underscore": "/%5Fgw/auth/x",
+		"raw path too short": "/_gw/au",
+		"name continues":     "/_gw/authz/x",
+		"other name":         "/_gw/other/x",
+	} {
+		if _, _, _, status, err := a.matchGateway("/_gw/auth/x", raw); status != http.StatusBadRequest || err == nil {
+			t.Errorf("%s: status=%d err=%v, want 400", name, status, err)
+		}
+	}
+	// A valid raw path keeps its encoding in rawRest.
+	base, rest, rawRest, status, err := a.matchGateway("/_gw/auth/a/b", "/_gw/auth/a%2Fb")
+	if err != nil || status != 0 || base != u || rest != "/a/b" || rawRest != "/a%2Fb" {
+		t.Errorf("valid: base=%v rest=%q rawRest=%q status=%d err=%v", base, rest, rawRest, status, err)
+	}
+	// The route name is not case-sensitive, in the path or in the raw path.
+	if _, rest, rawRest, _, err = a.matchGateway("/_gw/AUTH/x", "/_gw/AUTH/x"); err != nil || rest != "/x" || rawRest != "/x" {
+		t.Errorf("upper case name: rest=%q rawRest=%q err=%v", rest, rawRest, err)
+	}
+	// Without a tail the rest is "/".
+	if _, rest, rawRest, _, err = a.matchGateway("/_gw/auth", ""); err != nil || rest != "/" || rawRest != "" {
+		t.Errorf("no tail: rest=%q rawRest=%q err=%v", rest, rawRest, err)
+	}
+	if _, rest, _, _, err = a.matchGateway("/_gw/auth/", "/_gw/auth/"); err != nil || rest != "/" {
+		t.Errorf("trailing slash: rest=%q err=%v", rest, err)
+	}
+	// An unknown name is a 404 that lists the known ones.
+	if _, _, _, status, err = a.matchGateway("/_gw/nope/x", ""); status != http.StatusNotFound || err == nil || !strings.Contains(err.Error(), "auth") {
+		t.Errorf("unknown name: status=%d err=%v", status, err)
+	}
+	if _, _, _, status, _ = a.matchGateway("/_gw", ""); status != http.StatusNotFound {
+		t.Errorf("no name at all: status=%d", status)
+	}
+}

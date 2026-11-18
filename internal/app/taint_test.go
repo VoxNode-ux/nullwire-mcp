@@ -82,3 +82,139 @@ func TestTaintRingCatchesBase64AndJWTShapes(t *testing.T) {
 		t.Errorf("JWT signature not caught: %q (%d)", out, n)
 	}
 }
+
+func taintSecret(i int) string {
+	return lcgString(16, lcgBase64, uint32(i)*7919+1) + itoa(i)
+}
+
+func TestTaintRingEvictsOldestAndClears(t *testing.T) {
+	r := newTaintRing(make([]byte, 32))
+	first := taintSecret(1)
+	r.add(first)
+	if !r.hasFull(first) {
+		t.Fatal("a stored secret must be found")
+	}
+	for i := 2; i <= taintCap+10; i++ {
+		r.add(taintSecret(i))
+	}
+	if r.hasFull(first) {
+		t.Error("the oldest secret must be evicted once the ring is full")
+	}
+	if !r.hasFull(taintSecret(taintCap + 10)) {
+		t.Error("the newest secret must be stored")
+	}
+	if got := int(r.size.Load()); got != taintCap || len(r.set) != taintCap {
+		t.Errorf("size = %d, set = %d, want %d", got, len(r.set), taintCap)
+	}
+	// Adding a secret that is already stored changes nothing.
+	r.add(taintSecret(taintCap + 10))
+	if got := int(r.size.Load()); got != taintCap {
+		t.Errorf("duplicate changed the size to %d", got)
+	}
+
+	r.clear()
+	if r.size.Load() != 0 || len(r.set) != 0 || r.pos != 0 || r.filled != 0 || r.hasFull(taintSecret(taintCap+10)) {
+		t.Errorf("clear left state behind: size=%d set=%d pos=%d filled=%d", r.size.Load(), len(r.set), r.pos, r.filled)
+	}
+	r.add(first) // the ring works again after clearing
+	if !r.hasFull(first) || r.size.Load() != 1 {
+		t.Error("the ring must accept secrets after clear")
+	}
+	var none *taintRing
+	none.clear() // a nil ring is fine
+}
+
+func TestTaintAddIgnoresWeakAndShortSecrets(t *testing.T) {
+	r := newTaintRing(nil)
+	r.add("short")
+	r.add(strings.Repeat("a", 40))      // no randomness
+	r.add(strings.Repeat("ab12", 10))   // periodic
+	if r.size.Load() != 0 {
+		t.Errorf("weak secrets were stored: %d", r.size.Load())
+	}
+	if r.hasFull("short") || r.hasFull(strings.Repeat("a", 40)) {
+		t.Error("hasFull must reject short and low-entropy text")
+	}
+}
+
+func TestTaintWindowHitBounds(t *testing.T) {
+	r := newTaintRing(make([]byte, 16))
+	secret := lcgString(40, lcgBase64, 99)
+	r.add(secret)
+	if off, ok := r.windowHit("zz" + secret); !ok || off != 2 {
+		t.Errorf("windowHit = %d, %v; want 2, true", off, ok)
+	}
+	if _, ok := r.windowHit(secret[:taintWin-1]); ok {
+		t.Error("a run shorter than one window cannot hit")
+	}
+	if _, ok := r.windowHit(strings.Repeat("a", taintMaxScan+1)); ok {
+		t.Error("a run longer than taintMaxScan is not scanned")
+	}
+	if _, ok := r.windowHit(strings.Repeat("a", 60)); ok {
+		t.Error("a run with no randomness cannot hit")
+	}
+	if _, ok := r.windowHit(lcgString(60, lcgBase64, 12345)); ok {
+		t.Error("unrelated random text must not hit")
+	}
+}
+
+func TestTaintSpans(t *testing.T) {
+	r := newTaintRing(make([]byte, 32))
+	secret := lcgString(40, lcgBase64, 7)
+	r.add(secret)
+	// Leading dots and trailing colons are not part of the secret.
+	if got := r.spans("..." + secret + ":"); len(got) != 1 || got[0] != [2]int{3, 43} {
+		t.Errorf("trimmed run: %v", got)
+	}
+	if got := r.spans("....:::"); got != nil {
+		t.Errorf("only punctuation: %v", got)
+	}
+	// A secret next to a key=: only the secret is marked.
+	if got := r.spans("key=" + secret); len(got) != 1 || got[0] != [2]int{4, 44} {
+		t.Errorf("key=secret: %v", got)
+	}
+	// Base64 padding stays with the secret.
+	padded := lcgString(32, lcgBase64, 8) + "=="
+	r.add(padded)
+	if got := r.spans("tok:" + padded); len(got) != 1 || got[0] != [2]int{4, 4 + len(padded)} {
+		t.Errorf("padded secret: %v", got)
+	}
+	// A segment that already holds a redaction tag is left alone.
+	if got := r.spans("key=REDACTED_TOKEN_abcdefghijkl"); got != nil {
+		t.Errorf("redacted segment: %v", got)
+	}
+	// A stored window inside a longer run is cut at "/" and ".".
+	if got := r.spans("host.example/" + "zz" + secret + "/path"); len(got) != 1 {
+		t.Errorf("window in a longer run: %v", got)
+	}
+}
+
+func TestScrubTaintedNoOps(t *testing.T) {
+	s, err := NewScrubber()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := "some text with " + lcgString(30, lcgBase64, 5)
+	if out, n := s.scrubTainted(in); out != in || n != 0 {
+		t.Errorf("empty ring: %q, %d", out, n)
+	}
+	secret := lcgString(40, lcgBase64, 6)
+	_ = s.tag("TOKEN", secret)
+	if out, n := s.scrubTainted("tiny"); out != "tiny" || n != 0 {
+		t.Errorf("short input: %q, %d", out, n)
+	}
+	// A run that already holds a tag is not looked at again.
+	tagged := "x[REDACTED_TOKEN#abcdef]" + secret[:10]
+	if out, n := s.scrubTainted(tagged); out != tagged || n != 0 {
+		t.Errorf("tagged run: %q, %d", out, n)
+	}
+	// The same secret twice in one text is redacted both times.
+	out, n := s.scrubTainted("a " + secret + " b " + secret + " c")
+	if n != 2 || strings.Contains(out, secret) {
+		t.Errorf("two occurrences: %q, %d", out, n)
+	}
+	s.taint.clear()
+	if out, n := s.scrubTainted("a " + secret); n != 0 || out != "a "+secret {
+		t.Errorf("after clear: %q, %d", out, n)
+	}
+}

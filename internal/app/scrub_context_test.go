@@ -463,3 +463,76 @@ func TestBearerFollowedByProseInEachContext(t *testing.T) {
 		}
 	}
 }
+
+func TestQuoteFollows(t *testing.T) {
+	cases := []struct {
+		in   string
+		i    int
+		want bool
+	}{
+		{`"`, 0, true},
+		{`a"`, 1, true},
+		{`\"`, 0, true},
+		{`\`, 0, false},    // a backslash at the very end
+		{`\\`, 0, false},   // an escaped backslash is not a quote
+		{`%22`, 0, true},   // URL-encoded quote
+		{`%2`, 0, false},   // cut percent-escape
+		{`%23`, 0, false},  // another percent-escape
+		{`%2f`, 0, false},  // another percent-escape
+		{`abc`, 0, false},  // ordinary text
+		{`abc`, 3, false},  // index at the end
+		{`abc`, 10, false}, // index past the end
+		{``, 0, false},
+	}
+	for _, c := range cases {
+		if got := quoteFollows(c.in, c.i); got != c.want {
+			t.Errorf("quoteFollows(%q, %d) = %v, want %v", c.in, c.i, got, c.want)
+		}
+	}
+}
+
+func TestUnicodeEscapeASCII(t *testing.T) {
+	cases := []struct {
+		in   string
+		i    int
+		want byte
+		ok   bool
+	}{
+		{`\u003d`, 0, '=', true},
+		{`\u0026`, 0, '&', true},
+		{`\u0041`, 0, 'A', true},
+		{`\u007f`, 0, 0x7f, true},
+		{`xx\u003d`, 2, '=', true},
+		{`\u0000`, 0, 0, true},
+		{`\u00e9`, 0, 0, false},   // not ASCII
+		{`\u0080`, 0, 0, false},   // first non-ASCII value
+		{`\ud800`, 0, 0, false},   // surrogate
+		{`\uZZZZ`, 0, 0, false},   // not hex
+		{`\u00zz`, 0, 0, false},   // hex ends early
+		{`\u003`, 0, 0, false},    // too short
+		{`\x003d`, 0, 0, false},   // not a \u escape
+		{`au003d`, 0, 0, false},   // no backslash
+		{`abc\u003d`, 0, 0, false}, // i does not point at a backslash
+		{``, 0, 0, false},
+	}
+	for _, c := range cases {
+		got, ok := unicodeEscapeASCII(c.in, c.i)
+		if got != c.want || ok != c.ok {
+			t.Errorf("unicodeEscapeASCII(%q, %d) = (%q, %v), want (%q, %v)", c.in, c.i, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestUnwrapEscapedQuotePatterns(t *testing.T) {
+	// \\ followed by each kind of quote is left out of the decoded text, so it
+	// cannot read as an escaped quote and swallow the next field.
+	for _, in := range []string{`a\\"b`, `a\\\"b`, `a\\%22b`} {
+		dec, idx := unwrapEscapes(in)
+		if len(idx) != len(dec)+1 {
+			t.Errorf("%q: idx has %d entries for %d bytes", in, len(idx), len(dec))
+		}
+		if strings.Contains(dec, `\\`) {
+			t.Errorf("%q: dec = %q still holds a double backslash", in, dec)
+		}
+	}
+}

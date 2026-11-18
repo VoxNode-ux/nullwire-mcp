@@ -248,3 +248,49 @@ func holdoutSecrets(n int) []string {
 	}
 	return out
 }
+
+func TestTrigramMeanClampsToHi(t *testing.T) {
+	// A hand-made entry whose stored score is far above trigramHi is clamped.
+	key := uint32('a')<<14 | uint32('b')<<7 | uint32('c')
+	withTable(t, []uint32{key<<8 | 200})
+	if got := trigramMean("abc"); got != trigramHi {
+		t.Errorf("trigramMean = %v, want the clamp %v", got, trigramHi)
+	}
+	// The lowest biased score is exactly trigramLo and passes unchanged.
+	withTable(t, []uint32{key << 8})
+	if got := trigramMean("abc"); got != trigramLo {
+		t.Errorf("trigramMean = %v, want %v", got, trigramLo)
+	}
+	// Non-ASCII bytes never match and never panic.
+	if got := trigramMean("é\xffé\xff"); got != 0 {
+		t.Errorf("non-ASCII text: %v", got)
+	}
+}
+
+func TestScoreHelpersEdges(t *testing.T) {
+	if maxWindowEntropy("") != 0 || bigramMean("") != 0 || bigramMean("a") != 0 || bigramMean("é") != 0 {
+		t.Error("empty, one-byte and non-ASCII-only input score 0")
+	}
+	if got, want := maxWindowEntropy("abcdef"), shannonEntropyBits("abcdef"); got != want {
+		t.Errorf("a string shorter than the window: %v, want %v", got, want)
+	}
+	if got := maxWindowEntropy(strings.Repeat("a", 100)); got != 0 {
+		t.Errorf("one repeated byte: %v", got)
+	}
+	// Padding a random run with filler does not hide it: the best window wins.
+	random := "Zq8Xv3LmP0aTr9YkB2nWd6Hs"
+	padded := strings.Repeat("a", 40) + random + strings.Repeat("a", 40)
+	if got, whole := maxWindowEntropy(padded), shannonEntropyBits(padded); got < shannonEntropyBits(random)-1e-9 || got <= whole {
+		t.Errorf("padded run: window %v, whole %v, random part %v", got, whole, shannonEntropyBits(random))
+	}
+	// Past maxLenW the length term stops growing.
+	long := strings.Repeat(random, 5)
+	h, vr, bm := maxWindowEntropy(long), vowelRatio(long), bigramMean(long)
+	withTable(t, nil)
+	if got, want := tokenLogOdds(long), combineScore(h, bm, vr, maxLenW); got != want {
+		t.Errorf("long token: %v, want %v", got, want)
+	}
+	// Non-ASCII bytes in a borderline token go through the escalation without trouble.
+	withTable(t, []uint32{packTri('a', 'b', 'c', 3)})
+	_ = tokenLogOdds("abc\xc3\xa9abc\xc3\xa9abcdef")
+}

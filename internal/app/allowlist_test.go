@@ -159,3 +159,103 @@ func TestLoadSecretsConfigAllowlist(t *testing.T) {
 		t.Errorf("a bad pattern should be reported with its place in the file, got %v", err)
 	}
 }
+
+func TestNewAllowlistLimitsAndEmpty(t *testing.T) {
+	if a, err := newAllowlist(nil, nil); a != nil || err != nil {
+		t.Errorf("empty lists: %v, %v", a, err)
+	}
+	if a, err := newAllowlist([]string{}, []string{}); a != nil || err != nil {
+		t.Errorf("empty non-nil lists: %v, %v", a, err)
+	}
+	many := make([]string, maxIgnoreFields+1)
+	for i := range many {
+		many[i] = "f" + strings.Repeat("x", i%5) + string(rune('a'+i%26)) + string(rune('a'+i/26))
+	}
+	if _, err := newAllowlist(many, nil); err == nil || !strings.Contains(err.Error(), "ignore_fields has") {
+		t.Errorf("too many fields: %v", err)
+	}
+	pats := make([]string, maxIgnorePatterns+1)
+	for i := range pats {
+		pats[i] = "FIXTURE-" + strings.Repeat("a", i+1)
+	}
+	if _, err := newAllowlist(nil, pats); err == nil || !strings.Contains(err.Error(), "ignore_patterns has") {
+		t.Errorf("too many patterns: %v", err)
+	}
+	if _, err := newAllowlist([]string{strings.Repeat("a", maxFieldName+1)}, nil); err == nil {
+		t.Error("an over-long field name must be refused")
+	}
+	if _, err := newAllowlist(nil, []string{strings.Repeat("a", maxIgnorePattern+1)}); err == nil {
+		t.Error("an over-long pattern must be refused")
+	}
+	if _, err := newAllowlist([]string{"a\x7fb"}, nil); err == nil {
+		t.Error("DEL in a field name must be refused")
+	}
+	// A pattern that matches the control character the placeholders are built from.
+	for name, p := range map[string]string{"literal SOH": "\x01", "class": `[\x00-\x7f]`, "any": `(?s).`} {
+		if _, err := newAllowlist(nil, []string{p}); err == nil {
+			t.Errorf("%s: must be refused", name)
+		}
+	}
+	// Duplicate field names (any case) are folded into one.
+	a, err := newAllowlist([]string{"Password", "password", " PASSWORD "}, nil)
+	if err != nil || a == nil || len(a.fields) != 4 {
+		t.Errorf("duplicate fields: %v, %v", a, err)
+	}
+}
+
+func TestAllowMarkHelpers(t *testing.T) {
+	for in, want := range map[string]bool{
+		"\x00NW0\x00":       true,
+		"\x00NW12\x00":      true,
+		"\x00NW\x00":        false,
+		"":                  false,
+		"x\x00NW0\x00":      false,
+		"\x00NW0":           false,
+		"\x00NW1a\x00":      false,
+		"REAL_\x00NW0\x00":  false,
+		"\x00NW0\x00 tail":  false,
+	} {
+		if got := isAllowMarkOnly(in); got != want {
+			t.Errorf("isAllowMarkOnly(%q) = %v, want %v", in, got, want)
+		}
+	}
+	if !hasAllowMark("a \x00NW3\x00 b") || hasAllowMark("plain \x00 text") || hasAllowMark("") {
+		t.Error("hasAllowMark")
+	}
+}
+
+func TestAllowlistOverlapsAndForms(t *testing.T) {
+	s := newAllowScrubber(t, &SecretsConfig{
+		IgnoreFields:   []string{"build", "trace"},
+		IgnorePatterns: []string{`FIXTURE-[0-9]{6}`, `FIXTURE-123[0-9]{3}`},
+	})
+	// Two patterns that match the same text: the first holds it, the second finds nothing.
+	in := `{"ref":"FIXTURE-123456","other":"FIXTURE-123789"}`
+	if out, _ := s.ScrubText(in); out != in {
+		t.Errorf("overlapping patterns: %q", out)
+	}
+	// Every form the field rules know: JSON number, query, form, XML, with the original spelling kept.
+	for _, in := range []string{
+		`{"build":4711,"x":1}`,
+		`{"BUILD" : "plain-value-xyz"}`,
+		`https://example.test/p?build=plain-value-xyz&n=1`,
+		`<build>plain-value-xyz</build>`,
+		`<ns:Build attr="1">plain-value-xyz</ns:Build>`,
+		`trace=plain-value-xyz;other=1`,
+	} {
+		if out, _ := s.ScrubText(in); out != in {
+			t.Errorf("%q changed to %q", in, out)
+		}
+	}
+	// A recognised secret inside an exempt field is still redacted, and the
+	// field around it is kept.
+	tok := "ghp_" + strings.Repeat("a1", 20)
+	out, n := s.ScrubText(`{"build":"` + tok + `"}`)
+	if n < 1 || strings.Contains(out, tok) || !strings.HasPrefix(out, `{"build":"`) {
+		t.Errorf("secret in an exempt field: %q (%d)", out, n)
+	}
+	// Empty input and text that is only exempt need no work.
+	if out, n := s.scrubWithAllowlist("", scrubOpts{}); out != "" || n != 0 {
+		t.Errorf("empty input: %q, %d", out, n)
+	}
+}

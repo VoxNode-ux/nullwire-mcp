@@ -276,3 +276,99 @@ func TestSSECollector(t *testing.T) {
 		t.Error("isEventStream")
 	}
 }
+
+func TestSSECollectorTruncated(t *testing.T) {
+	c := newSSECollector(4)
+	_, _ = c.Write([]byte("ab"))
+	if c.Truncated() {
+		t.Error("not truncated while there is room")
+	}
+	_, _ = c.Write([]byte("cd")) // fills the collector exactly
+	if c.Truncated() {
+		t.Error("a write that fits exactly is not a cut")
+	}
+	_, _ = c.Write(nil) // an empty write to a full collector is not a cut either
+	if c.Truncated() {
+		t.Error("an empty write is not a cut")
+	}
+	_, _ = c.Write([]byte("e"))
+	if !c.Truncated() || string(c.Bytes()) != "abcd" || c.Close() != nil {
+		t.Errorf("after overflow: truncated=%v bytes=%q", c.Truncated(), c.Bytes())
+	}
+	c2 := newSSECollector(3)
+	_, _ = c2.Write([]byte("abcdef")) // one write larger than the room
+	if !c2.Truncated() || string(c2.Bytes()) != "abc" {
+		t.Errorf("oversized first write: truncated=%v bytes=%q", c2.Truncated(), c2.Bytes())
+	}
+}
+
+func sseTestFlow() rawFlow {
+	return rawFlow{started: time.Now(), method: "GET", url: "http://h/stream", status: 200,
+		reqHeaders: http.Header{}, respHeaders: http.Header{"Content-Type": {"text/event-stream"}}}
+}
+
+func TestSSELiveLoopExitsWhenEvicted(t *testing.T) {
+	app := fxApp(t)
+	flow := sseTestFlow()
+	id, ok := app.pushLive(flow)
+	if !ok {
+		t.Fatal("pushLive failed")
+	}
+	for i := 0; i < ringCapacity; i++ {
+		app.ring.Push(FlowEntry{})
+	}
+	col := newSSECollector(1 << 10)
+	_, _ = col.Write([]byte("data: hello\n\n"))
+	stop, done := make(chan struct{}), make(chan struct{})
+	go app.sseLiveLoop(id, flow, col, stop, done)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		close(stop)
+		t.Fatal("the refresher kept running after its entry was evicted")
+	}
+}
+
+func TestSSELiveLoopIdleThenStop(t *testing.T) {
+	app := fxApp(t)
+	flow := sseTestFlow()
+	id, _ := app.pushLive(flow)
+	col := newSSECollector(1 << 10)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go app.sseLiveLoop(id, flow, col, stop, done)
+	time.Sleep(sseLiveEvery + 200*time.Millisecond) // one idle tick: nothing changed, nothing refreshed
+	if e, _ := app.ring.GetByID(id); e.ResponseBody != "" {
+		t.Errorf("an unchanged collector must not refresh the entry: %q", e.ResponseBody)
+	}
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refresher did not stop")
+	}
+}
+
+func TestFinishLiveRepushesWhenEvicted(t *testing.T) {
+	app := fxApp(t)
+	flow := sseTestFlow()
+	id, _ := app.pushLive(flow)
+	for i := 0; i < ringCapacity; i++ {
+		app.ring.Push(FlowEntry{})
+	}
+	final := flow
+	final.note = "final capture"
+	app.finishLive(id, final)
+	es := app.ring.ListRecent(1, "GET", "/stream")
+	if len(es) != 1 || es[0].Note != "final capture" {
+		t.Fatalf("the final capture of an evicted entry must be pushed as a new one: %+v", es)
+	}
+	if app.ring.Len() != ringCapacity {
+		t.Errorf("ring length = %d, want %d", app.ring.Len(), ringCapacity)
+	}
+	// An id of 0 means the live entry was never made: the final capture is pushed.
+	app2 := fxApp(t)
+	app2.finishLive(0, final)
+	if app2.ring.Len() != 1 {
+		t.Errorf("finishLive(0) pushed %d entries, want 1", app2.ring.Len())
+	}
+}

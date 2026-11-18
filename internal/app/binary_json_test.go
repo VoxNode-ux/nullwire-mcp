@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"strings"
 	"testing"
@@ -278,5 +279,137 @@ func TestBinaryBodyJSONNotes(t *testing.T) {
 	text, note, ok = binaryBodyJSON("application/cbor", []byte("\xff"), 0)
 	if !ok || text != "[CBOR body not readable, not captured: 1 bytes]" || !strings.Contains(note, "could not be read") {
 		t.Errorf("unreadable CBOR: (%q, %q, %v)", text, note, ok)
+	}
+}
+
+func TestMsgPackEveryHeaderCutShort(t *testing.T) {
+	// Each value is cut inside its length or payload: the walk reports it as
+	// incomplete and whatever it wrote is still valid JSON (or nothing).
+	for name, in := range map[string]string{
+		"str 8 header":     "\xd9",
+		"str 16 header":    "\xda\x00",
+		"str 32 header":    "\xdb\x00\x00",
+		"bin 8 header":     "\xc4",
+		"bin 16 header":    "\xc5\x00",
+		"bin 32 header":    "\xc6\x00\x00\x00",
+		"ext 8 header":     "\xc7",
+		"ext 16 header":    "\xc8\x00",
+		"ext 32 header":    "\xc9\x00\x00\x00",
+		"fixext header":    "\xd4",
+		"fixext payload":   "\xd8\x01",
+		"array 16 header":  "\xdc\x00",
+		"array 32 header":  "\xdd\x00\x00",
+		"map 16 header":    "\xde\x00",
+		"map 32 header":    "\xdf\x00\x00\x00",
+		"uint 32":          "\xce\x00",
+		"uint 64":          "\xcf\x00\x00\x00\x00\x00\x00\x00",
+		"int 8":            "\xd0",
+		"int 32":           "\xd2\xff\xff",
+		"int 64":           "\xd3\x00",
+		"float 32":         "\xca\x3f\xc0",
+		"float 64":         "\xcb",
+		"array element":    "\x92\x01",
+		"array 16 element": "\xdc\x00\x03\x01",
+		"map value":        "\x82\xa1a\x01\xa1b",
+		"map key":          "\x82\xa1a\x01",
+	} {
+		out, complete := msgpackToJSON([]byte(in), 0)
+		if complete {
+			t.Errorf("%s: must be incomplete", name)
+		}
+		if out != "" && !json.Valid([]byte(out)) {
+			t.Errorf("%s: output %q is not valid JSON", name, out)
+		}
+	}
+}
+
+func TestBinaryWalkerLimits(t *testing.T) {
+	// A string longer than the room is cut at the limit.
+	if out, complete := msgpackToJSON([]byte("\xd9\x0aabcdefghij"), 5); out != `"abcd"` || complete {
+		t.Errorf("long string: (%q, %v)", out, complete)
+	}
+	// A container that starts after the limit is left out, and the comma with it.
+	if out, complete := msgpackToJSON([]byte("\x92\xa5hello\x91\x01"), 8); out != `["hello"]` || complete {
+		t.Errorf("container past the limit: (%q, %v)", out, complete)
+	}
+	// Output stays valid JSON whatever the limit.
+	body := []byte("\x83\xa4name\xa5alice\xa5items\x93\x01\x02\x03\xa4meta\x81\xa1k\xa1v")
+	for limit := 1; limit < 60; limit++ {
+		if out, _ := msgpackToJSON(body, limit); out != "" && !json.Valid([]byte(out)) {
+			t.Errorf("limit %d: invalid JSON %q", limit, out)
+		}
+	}
+	// Maps nested past binMaxDepth stop the walk.
+	deepMap := strings.Repeat("\x81\xa1a", binMaxDepth+6) + "\x01"
+	if out, complete := msgpackToJSON([]byte(deepMap), 0); complete || !json.Valid([]byte(out)) {
+		t.Errorf("deep maps: complete=%v valid=%v", complete, json.Valid([]byte(out)))
+	}
+}
+
+func TestBinJSONHelpers(t *testing.T) {
+	// take and be refuse a position outside the input and a negative size.
+	w := &binJSON{in: []byte("ab"), pos: -1}
+	if _, err := w.take(1); err == nil {
+		t.Error("take with a negative position must fail")
+	}
+	w.pos = 5
+	if _, err := w.take(1); err == nil {
+		t.Error("take past the end must fail")
+	}
+	if _, err := w.be(-1); err == nil {
+		t.Error("be(-1) must fail")
+	}
+	w = &binJSON{in: []byte("abc")}
+	if b, err := w.take(10); err != errBinTrunc || string(b) != "abc" || w.pos != 3 {
+		t.Errorf("take(10) = %q, %v, pos %d", b, err, w.pos)
+	}
+
+	if got := string(appendJSONBytes(nil, []byte("a\"b\\c\x01é\xff"))); got != `a\"b\\c\u0001é\ufffd` {
+		t.Errorf("appendJSONBytes = %q", got)
+	}
+	if got := string(appendUint(nil, 0)); got != "0" {
+		t.Errorf("appendUint(0) = %q", got)
+	}
+	if got := string(appendUint(nil, 1<<64-1)); got != "18446744073709551615" {
+		t.Errorf("appendUint(max) = %q", got)
+	}
+	if clip(1<<63) != 1<<62 || clip(5) != 5 {
+		t.Error("clip")
+	}
+	w = &binJSON{limit: 100}
+	w.float(1.25)
+	w.out = append(w.out, ' ')
+	w.float(math.NaN())
+	w.out = append(w.out, ' ')
+	w.float(math.Inf(-1))
+	if string(w.out) != "1.25 null null" {
+		t.Errorf("float = %q", w.out)
+	}
+}
+
+func TestCBORChunkAndTagEdgeCases(t *testing.T) {
+	for name, in := range map[string]string{
+		"text chunk of the wrong type":  "\x7f\x41a\xff",
+		"byte chunk cut":                "\x5f\x42a",
+		"text chunk cut":                "\x7f\x62a",
+		"indefinite text without break": "\x7f",
+		"indefinite bytes no break":     "\x5f",
+		"tag without an item":           "\xc1",
+		"definite array cut":            "\x83\x01",
+		"definite map cut":              "\xa2\x61a\x01",
+		"half float cut":                "\xf9\x3e",
+		"simple value cut":              "\xf8",
+	} {
+		out, complete := cborToJSON([]byte(in), 0)
+		if complete {
+			t.Errorf("%s: must be incomplete", name)
+		}
+		if out != "" && !json.Valid([]byte(out)) {
+			t.Errorf("%s: output %q is not valid JSON", name, out)
+		}
+	}
+	// A nested array that would start past the limit is left out.
+	if out, complete := cborToJSON([]byte("\x83\x01\x02\x81\x03"), 3); out != "[1,2]" || complete {
+		t.Errorf("array over the limit: (%q, %v)", out, complete)
 	}
 }

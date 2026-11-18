@@ -5,8 +5,9 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
-	"encoding/json"
 	"encoding/base32"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/hex"
 	"math/big"
 	"net/http"
@@ -720,5 +721,257 @@ func TestParseTargetsAndDNSErrors(t *testing.T) {
 	}
 	if got, err := parseDNSServers("1.1.1.1, [2606:4700::1111]:5353"); err != nil || len(got) != 2 || got[0] != "1.1.1.1:53" || got[1] != "[2606:4700::1111]:5353" {
 		t.Errorf("valid servers: (%v, %v)", got, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Encoded-text helpers and budgets
+
+// lcgString returns n deterministic pseudo-random characters of alphabet.
+func lcgString(n int, alphabet string, seed uint32) string {
+	b := make([]byte, n)
+	x := seed
+	for i := range b {
+		x = x*1103515245 + 12345
+		b[i] = alphabet[int(x>>16)%len(alphabet)]
+	}
+	return string(b)
+}
+
+const (
+	lcgBase64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	lcgHex    = "0123456789abcdef"
+)
+
+func TestScrubBase64WasteAndTextBudgets(t *testing.T) {
+	s, err := NewScrubber()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := base64.RawStdEncoding.EncodeToString([]byte(`{"password":"hunter2hunter2"}`))
+	n := 0
+	if out := s.scrubBase64("x "+secret+" y", &n); n != 1 || strings.Contains(out, secret) {
+		t.Fatalf("a lone base64 secret must be redacted: n=%d out=%q", n, out)
+	}
+
+	// Runs that decode to binary are charged to the waste budget (4 MiB); once it
+	// is used up even a real secret run is left alone.
+	var b strings.Builder
+	for i := 0; i < 60; i++ {
+		b.WriteString(lcgString(80000, lcgBase64, uint32(i+1)))
+		b.WriteByte(' ')
+	}
+	b.WriteString(secret)
+	in := b.String()
+	n = 0
+	if out := s.scrubBase64(in, &n); n != 0 || out != in {
+		t.Errorf("waste budget: n=%d, changed=%v", n, out != in)
+	}
+
+	// Runs that decode to harmless text are charged to the text budget (256 KiB).
+	text := base64.RawStdEncoding.EncodeToString([]byte(strings.Repeat("hello world, ordinary text. ", 100)))
+	b.Reset()
+	for i := 0; i < 80; i++ {
+		b.WriteString(text)
+		b.WriteByte(' ')
+	}
+	b.WriteString(secret)
+	in = b.String()
+	n = 0
+	if out := s.scrubBase64(in, &n); n != 0 || out != in {
+		t.Errorf("text budget: n=%d, changed=%v", n, out != in)
+	}
+}
+
+func TestScrubEncodedTextBudgets(t *testing.T) {
+	s, err := NewScrubber()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := hex.EncodeToString([]byte(`{"password":"hunter2hunter2"}`))
+	n := 0
+	if out := s.scrubEncodedText("x "+secret+" y", &n); n != 1 || strings.Contains(out, secret) {
+		t.Fatalf("a lone hex secret must be redacted: n=%d out=%q", n, out)
+	}
+
+	var b strings.Builder
+	for i := 0; i < 72; i++ { // binary-looking hex: 72 * 60000 > 4 MiB of waste
+		b.WriteString(lcgString(60000, lcgHex, uint32(i+1)))
+		b.WriteByte(' ')
+	}
+	b.WriteString(secret)
+	in := b.String()
+	n = 0
+	if out := s.scrubEncodedText(in, &n); n != 0 || out != in {
+		t.Errorf("waste budget: n=%d, changed=%v", n, out != in)
+	}
+
+	text := hex.EncodeToString([]byte(strings.Repeat("hello world, ordinary text. ", 100)))
+	b.Reset()
+	for i := 0; i < 50; i++ { // readable hex without secrets: 50 * 5600 > 256 KiB
+		b.WriteString(text)
+		b.WriteByte(' ')
+	}
+	b.WriteString(secret)
+	in = b.String()
+	n = 0
+	if out := s.scrubEncodedText(in, &n); n != 0 || out != in {
+		t.Errorf("text budget: n=%d, changed=%v", n, out != in)
+	}
+}
+
+func TestEncodedTextDecoderEdges(t *testing.T) {
+	printable := []byte("printable text ok")
+
+	// Base58: an invalid byte, and leading '1' characters (0x00 bytes).
+	for _, in := range []string{"abc0defghijkmnopqrstuv", "abcOdefghijkmnopqrstuv", "abcIdefghijkmnopqrstuv", "abcldefghijkmnopqrstuv"} {
+		if b, ok := decodeBase58Text(in); ok || b != nil {
+			t.Errorf("decodeBase58Text(%q) = %q, %v; want failure", in, b, ok)
+		}
+	}
+	if _, ok := decodeBase58Text("11" + b58Encode(printable)); ok {
+		t.Error("leading '1' characters stand for 0x00 bytes, which are not printable")
+	}
+	if _, ok := decodeBase58Text(b58Encode(append([]byte{0}, printable...))); ok {
+		t.Error("a leading 0x00 byte is not printable")
+	}
+	if b, ok := decodeBase58Text(b58Encode(printable)); !ok || !bytes.Equal(b, printable) {
+		t.Errorf("base58 round trip: %q %v", b, ok)
+	}
+	if _, ok := decodeBase58Text(""); ok {
+		t.Error("empty base58 is not text")
+	}
+
+	// Base32: padded, unpadded, invalid, binary.
+	b32 := base32.StdEncoding.EncodeToString(printable)
+	if !strings.HasSuffix(b32, "=") {
+		t.Fatalf("test input should be padded: %q", b32)
+	}
+	if b, ok := decodeBase32Text(b32); !ok || !bytes.Equal(b, printable) {
+		t.Errorf("padded base32: %q %v", b, ok)
+	}
+	if b, ok := decodeBase32Text(strings.TrimRight(b32, "=")); !ok || !bytes.Equal(b, printable) {
+		t.Errorf("unpadded base32: %q %v", b, ok)
+	}
+	if _, ok := decodeBase32Text("!!!!!!!!!!!!!!!!"); ok {
+		t.Error("invalid base32 must fail")
+	}
+	if _, ok := decodeBase32Text(base32.StdEncoding.EncodeToString([]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9})); ok {
+		t.Error("binary base32 must fail")
+	}
+
+	// Hex: odd length, invalid digit, binary, too short, a DEL byte.
+	for name, in := range map[string]string{
+		"odd length":   "abc",
+		"bad digit":    "zz" + strings.Repeat("41", 10),
+		"binary":       hex.EncodeToString([]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}),
+		"too short":    hex.EncodeToString([]byte("short")),
+		"DEL byte":     hex.EncodeToString([]byte("abcdefg\x7f")),
+		"bad UTF-8":    hex.EncodeToString([]byte("abcdefg\xff")),
+		"control byte": hex.EncodeToString([]byte("abcdefg\x01")),
+	} {
+		if _, ok := decodeHexText(in); ok {
+			t.Errorf("decodeHexText(%s) should fail", name)
+		}
+	}
+	if b, ok := decodeHexText(hex.EncodeToString([]byte("tab\tnew\nline\r ok"))); !ok || string(b) != "tab\tnew\nline\r ok" {
+		t.Errorf("tabs and line breaks are printable: %q %v", b, ok)
+	}
+
+	// Base64 text: padded, URL-safe, invalid.
+	if b, ok := decodeBase64Text(base64.StdEncoding.EncodeToString(printable)); !ok || !bytes.Equal(b, printable) {
+		t.Errorf("padded base64: %q %v", b, ok)
+	}
+	if b, ok := decodeBase64Text(base64.RawURLEncoding.EncodeToString([]byte("url?safe>text~ok"))); !ok || string(b) != "url?safe>text~ok" {
+		t.Errorf("url-safe base64: %q %v", b, ok)
+	}
+	if _, ok := decodeBase64Text("not base64 at all!!!!!!!!"); ok {
+		t.Error("invalid base64 must fail")
+	}
+}
+
+func TestTextShapeHelpers(t *testing.T) {
+	// mostlyText: short, invalid UTF-8, too many control bytes, a few control bytes.
+	if mostlyText([]byte("short")) || mostlyText([]byte("abcdefg\xff")) {
+		t.Error("short or non-UTF-8 text is not mostly text")
+	}
+	if mostlyText(append(bytes.Repeat([]byte("a"), 70), bytes.Repeat([]byte{1}, 30)...)) {
+		t.Error("30% control bytes is not text")
+	}
+	if !mostlyText(append(bytes.Repeat([]byte("a"), 100), 1, 1, 1, 1)) {
+		t.Error("a few control bytes are tolerated")
+	}
+	if !mostlyText([]byte("line one\r\n\tline two\n")) {
+		t.Error("tabs and line breaks are not control bytes")
+	}
+	// isPrintableText is stricter: no control bytes at all.
+	if isPrintableText([]byte("abc")) || isPrintableText(append(bytes.Repeat([]byte("a"), 10), 1)) || isPrintableText(bytes.Repeat([]byte{0xff}, 10)) {
+		t.Error("isPrintableText accepted bad input")
+	}
+	if !isPrintableText([]byte("plain text\n\t")) {
+		t.Error("plain text must be printable")
+	}
+
+	for in, want := range map[string]bool{
+		strings.Repeat("a", 23):                  false,
+		strings.Repeat("a", 30):                  false, // lower case only
+		strings.Repeat("A", 30):                  false, // upper case only
+		strings.Repeat("1", 30):                  false, // digits only
+		strings.Repeat("a", 20) + "BBBB":          true,  // lower + upper
+		strings.Repeat("a", 20) + "1234":         true,  // lower + digit
+		strings.Repeat("A", 20) + "1234":         true,  // upper + digit
+		strings.Repeat("a", 16) + "-" + "bBcC9xyz": true,
+	} {
+		if got := isBase64Like(in); got != want {
+			t.Errorf("isBase64Like(%q) = %v, want %v", in, got, want)
+		}
+	}
+
+	for in, want := range map[string]bool{
+		strings.Repeat("a", 19):                  false,
+		strings.Repeat("a", 20):                  true,
+		strings.Repeat("a", 10) + "-" + strings.Repeat("b", 10): false,
+		"x" + strings.Repeat("9", 20) + "!":      true,
+		"":                                       false,
+	} {
+		if got := hasEncodedRun(in); got != want {
+			t.Errorf("hasEncodedRun(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestScrubJSONSecretArraysSkips(t *testing.T) {
+	s, err := NewScrubber()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	in := `{"password":["","[REDACTED_TOKEN#abc]","Sup3rS3cretValue"]}`
+	out := s.scrubJSONSecretArrays(in, &n)
+	if n != 1 || strings.Contains(out, "Sup3rS3cretValue") || !strings.Contains(out, `"","[REDACTED_TOKEN#abc]",`) {
+		t.Errorf("n=%d out=%q", n, out)
+	}
+	// Under a bare "key" a short or path-like value is not a secret.
+	n = 0
+	in = `{"key":["short","path/like/value/here","Sup3rS3cretValueZZ"]}`
+	out = s.scrubJSONSecretArrays(in, &n)
+	if n != 1 || !strings.Contains(out, `"short"`) || !strings.Contains(out, `"path/like/value/here"`) || strings.Contains(out, "Sup3rS3cretValueZZ") {
+		t.Errorf("bare key: n=%d out=%q", n, out)
+	}
+}
+
+func TestXMLOpenLocalName(t *testing.T) {
+	for in, want := range map[string]string{
+		`<wsse:Password Type="x">`: "Password",
+		`<Password>`:               "Password",
+		"<a\tb>":                   "a",
+		"<a\nb>":                   "a",
+		`<ns:a:b>`:                 "b",
+		`Plain`:                    "Plain",
+		`<>`:                       "",
+	} {
+		if got := xmlOpenLocalName(in); got != want {
+			t.Errorf("xmlOpenLocalName(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
