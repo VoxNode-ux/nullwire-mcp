@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/VoxNode-ux/nullwire-mcp/internal/scan"
 )
@@ -17,6 +21,17 @@ import (
 // NULLWIRE_PROTECT_HELPER is set, the binary prints the arguments it was
 // started with and exits with the code in NULLWIRE_PROTECT_EXIT.
 func TestMain(m *testing.M) {
+	if os.Getenv("NULLWIRE_PROTECT_HELPER") == "wait" {
+		// Signal-forwarding helper: announce readiness through a file, then
+		// wait for SIGTERM/SIGINT and exit with code 7.
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGTERM, os.Interrupt)
+		if f := os.Getenv("NULLWIRE_PROTECT_READY"); f != "" {
+			_ = os.WriteFile(f, []byte("ready"), 0o600)
+		}
+		<-ch
+		os.Exit(7)
+	}
 	if os.Getenv("NULLWIRE_PROTECT_HELPER") == "1" {
 		fmt.Println("ARGS:" + strings.Join(os.Args[1:], " "))
 		code, _ := strconv.Atoi(os.Getenv("NULLWIRE_PROTECT_EXIT"))
@@ -311,5 +326,56 @@ func TestRunClientCertFlags(t *testing.T) {
 	stdout, _ := capture(t, func() { code = Run([]string{"-no-scan", "-client-cert", "c.pem", "-client-key", "k.pem"}) })
 	if code != 0 || !strings.Contains(stdout, "-client-cert c.pem -client-key k.pem") {
 		t.Fatalf("code=%d stdout=%q", code, stdout)
+	}
+}
+
+func TestRunRejectsBadFlagValue(t *testing.T) {
+	var code int
+	_, stderr := capture(t, func() { code = Run([]string{"--no-scan", "--port", "not-a-number"}) })
+	if code != 2 {
+		t.Fatalf("bad -port value returned %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "invalid value") {
+		t.Errorf("expected an invalid-value error, got:\n%s", stderr)
+	}
+}
+
+func TestReexecServeForwardsSignals(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Process.Signal(SIGTERM) is not supported on Windows")
+	}
+	ready := filepath.Join(t.TempDir(), "ready")
+	t.Setenv("NULLWIRE_PROTECT_HELPER", "wait")
+	t.Setenv("NULLWIRE_PROTECT_READY", ready)
+
+	done := make(chan int, 1)
+	go func() { done <- reexecServe([]string{"-port", "1"}) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the child never became ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond) // let reexecServe finish registering its handler
+
+	self, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := self.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-done:
+		if code != 7 {
+			t.Errorf("reexecServe returned %d, want 7 (the child got the forwarded SIGTERM)", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the signal was not forwarded to the child")
 	}
 }
