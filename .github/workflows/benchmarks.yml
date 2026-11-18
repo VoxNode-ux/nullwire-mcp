@@ -1,0 +1,292 @@
+name: Benchmarks (speed, load and DLP accuracy)
+
+# Workflow 2. Measures the proxy; it never gates a merge.
+#   hey (HTTP/1.1 load) + h2load (HTTP/2 cleartext load) + k6 (SSE streaming)
+#   + hyperfine (CLI/scan speed) + Samsung CredData & SecretBench (DLP accuracy).
+# Everything is installed on the runner. Nothing changes the repository.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 3"   # Wednesdays 05:17 UTC, on the default branch
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmarks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.27.2"
+  HEY_VERSION: "v0.1.5"
+  K6_VERSION: "v2.4.0"
+  K6_SHA256: "5a5ecf23529ccf93135bc7e5b0c1cd5126ecf5f2672e22eed1556a0ab74abb87"
+  HYPERFINE_VERSION: "v2.0.0"
+  HYPERFINE_SHA256: "604018c83e1de8bd23148ea0479617b7a201669b0c05a3c78bbb518ccc7cf5ef"
+
+jobs:
+  # ------------------------------------------------------------------ 1
+  speed:
+    name: Speed and load (hey, h2load, k6, hyperfine)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+
+      - name: Install hey (pinned Go module, go.sum verified)
+        run: |
+          set -e
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/rakyll/hey@${HEY_VERSION}
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install h2load (nghttp2-client from Ubuntu 24.04)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nghttp2-client
+      - name: Install k6 and hyperfine (SHA-256 verified)
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o k6.tgz "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-amd64.tar.gz"
+          echo "${K6_SHA256}  k6.tgz" | sha256sum -c -
+          tar -xzf k6.tgz --strip-components=1 -C bin "k6-${K6_VERSION}-linux-amd64/k6"
+          curl -fsSL -o hf.tgz "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${HYPERFINE_SHA256}  hf.tgz" | sha256sum -c -
+          tar -xzf hf.tgz --strip-components=1 -C bin "hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu/hyperfine"
+          k6 version; hyperfine --version; hey -n 1 http://127.0.0.1:1/ 2>&1 | head -1 || true
+
+      - name: Build NullWire and a local HTTP/1.1 + h2c + SSE upstream
+        run: |
+          set -e
+          go build -trimpath -o nullwire-mcp .
+          mkdir -p "$RUNNER_TEMP/up" && cd "$RUNNER_TEMP/up"
+          cat > main.go <<'GO'
+          package main
+
+          import (
+          	"fmt"
+          	"net/http"
+          	"time"
+          )
+
+          func main() {
+          	mux := http.NewServeMux()
+          	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
+          	mux.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
+          		w.Header().Set("Content-Type", "text/event-stream")
+          		f := w.(http.Flusher)
+          		for i := 0; i < 20; i++ {
+          			fmt.Fprintf(w, "data: {\"n\":%d}\n\n", i)
+          			f.Flush()
+          			time.Sleep(10 * time.Millisecond)
+          		}
+          	})
+          	var p http.Protocols
+          	p.SetHTTP1(true)
+          	p.SetUnencryptedHTTP2(true)
+          	s := &http.Server{Addr: "127.0.0.1:18081", Handler: mux, Protocols: &p}
+          	panic(s.ListenAndServe())
+          }
+          GO
+          go mod init upstream >/dev/null 2>&1
+          go build -o "$GITHUB_WORKSPACE/upstream" .
+      - name: Start upstream and NullWire
+        run: |
+          ./upstream > upstream.log 2>&1 &
+          ./nullwire-mcp -port 18080 -target http://127.0.0.1:18081 < <(sleep 3000) > nw.out 2> nw.err &
+          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:18080/ && break; sleep 1; done
+          curl -sf http://127.0.0.1:18080/ >/dev/null
+
+      - name: hey (HTTP/1.1), direct vs through NullWire
+        id: hey
+        run: |
+          hey -z 10s -c 50 http://127.0.0.1:18081/ > hey-direct.txt
+          hey -z 10s -c 50 http://127.0.0.1:18080/ > hey-proxy.txt
+      - name: h2load (HTTP/2 cleartext), direct vs through NullWire
+        id: h2load
+        run: |
+          h2load -n 50000 -c 20 -m 10 http://127.0.0.1:18081/ > h2-direct.txt
+          h2load -n 50000 -c 20 -m 10 http://127.0.0.1:18080/ > h2-proxy.txt
+      - name: k6 (SSE streaming through NullWire)
+        id: k6
+        run: |
+          cat > sse.js <<'JS'
+          import http from 'k6/http';
+          import { check } from 'k6';
+          export const options = {
+            vus: 20, duration: '15s',
+            thresholds: { checks: ['rate>0.99'] },
+          };
+          export default function () {
+            const r = http.get('http://127.0.0.1:18080/sse');
+            check(r, {
+              'status 200': (x) => x.status === 200,
+              'all 20 events arrived': (x) => (x.body.match(/^data:/gm) || []).length === 20,
+            });
+          }
+          JS
+          k6 run --summary-export=k6-sse.json sse.js 2>&1 | tee k6-sse.txt
+      - name: hyperfine (startup, tools/list and scan)
+        id: hyperfine
+        run: |
+          printf 'API_KEY=ghp_abcdefghijklmnopqrstuvwxyz0123456789\nHOST=198.51.100.7\n' > sample.env
+          hyperfine --warmup 3 --runs 30 --export-markdown hyperfine.md \
+            --input <(echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}') \
+            './nullwire-mcp -port 0' \
+            './nullwire-mcp scan sample.env'
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## Speed and load"
+            for f in hey-direct hey-proxy; do
+              echo "### $f"; grep -E "Requests/sec|Average:|99% in|\[200\]" $f.txt 2>/dev/null | sed 's/^/    /'
+            done
+            for f in h2-direct h2-proxy; do
+              echo "### $f"; grep -E "^finished in|^requests:|^status codes|^time for request" $f.txt 2>/dev/null | sed 's/^/    /'
+            done
+            echo "### k6 SSE"; grep -E "checks|http_req_duration|iterations" k6-sse.txt 2>/dev/null | sed 's/^/    /'
+            echo "### hyperfine"; cat hyperfine.md 2>/dev/null
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Review (step results)
+        if: always()
+        run: |
+          {
+            echo "## Review: speed and load"
+            echo "| Section | Result |"
+            echo "|---|---|"
+            echo "| hey (HTTP/1.1) | ${{ steps.hey.outcome }} |"
+            echo "| h2load (HTTP/2) | ${{ steps.h2load.outcome }} |"
+            echo "| k6 (SSE) | ${{ steps.k6.outcome }} |"
+            echo "| hyperfine | ${{ steps.hyperfine.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Stop background processes
+        if: always()
+        run: pkill -f nullwire-mcp || true; pkill -f ./upstream || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: speed-results
+          path: |
+            hey-*.txt
+            h2-*.txt
+            k6-sse.*
+            hyperfine.md
+            nw.err
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------ 2
+  dlp-accuracy:
+    name: DLP accuracy (Samsung CredData and SecretBench)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Build NullWire
+        run: go build -trimpath -o nullwire-mcp .
+      - name: Clone the datasets (shallow)
+        run: |
+          git clone --depth 1 https://github.com/Samsung/CredData.git creddata
+          git clone --depth 1 https://github.com/setu1421/SecretBench.git secretbench
+          git -C creddata rev-parse HEAD
+          git -C secretbench rev-parse HEAD
+      - name: Fetch CredData sample files
+        id: fetch
+        # CredData ships its metadata in git but downloads the source files
+        # from upstream repositories through its own script.
+        run: |
+          cd creddata
+          python3 -m pip install --user -r requirements.txt >/dev/null 2>&1 || true
+          python3 download_data.py --data_dir data --jobs 4 2>&1 | tail -5 || echo "download step failed; scoring uses whatever is present"
+      - name: Score recall and false positives with nullwire-mcp scan
+        id: score
+        run: |
+          cat > score.py <<'PY'
+          import csv, glob, os, re, subprocess, sys, json
+          os.makedirs("work", exist_ok=True)
+          tp = fp = 0
+          hit_tp = hit_fp = 0
+          rows = []
+          for m in glob.glob("creddata/meta/*.csv"):
+              with open(m, newline="", encoding="utf-8", errors="replace") as f:
+                  for r in csv.DictReader(f):
+                      label = r.get("GroundTruth") or r.get("Label")
+                      line = (r.get("LineStart:LineEnd") or r.get("LineStart") or "").split(":")[0]
+                      path = os.path.join("creddata", r.get("FilePath", ""))
+                      if label not in ("T", "F") or not line.isdigit() or not os.path.isfile(path):
+                          continue
+                      try:
+                          text = open(path, encoding="utf-8", errors="replace").read().splitlines()
+                          src = text[int(line) - 1]
+                      except Exception:
+                          continue
+                      s, e = r.get("ValueStart"), r.get("ValueEnd")
+                      val = src[int(s):int(e)] if (s or "").isdigit() and (e or "").isdigit() else src
+                      if val and "\n" not in val and len(val) < 2000:
+                          rows.append((label, val))
+              if len(rows) > 20000: break
+          rows = rows[:20000]
+          with open("work/cred.env", "w") as f:
+              for i, (_, v) in enumerate(rows):
+                  f.write("CRED_%d=%s\n" % (i, v.replace("\r", "")))
+          out = subprocess.run(["./nullwire-mcp", "scan", "work/cred.env"], capture_output=True, text=True).stdout
+          flagged = {int(m.group(1)) for m in re.finditer(r"^\s+line\s+(\d+)\s", out, re.M)}
+          for i, (label, _) in enumerate(rows, 1):
+              if label == "T":
+                  tp += 1; hit_tp += i in flagged
+              else:
+                  fp += 1; hit_fp += i in flagged
+          res = {"true_samples": tp, "recall": round(hit_tp / tp, 4) if tp else None,
+                 "false_samples": fp, "false_positive_rate": round(hit_fp / fp, 4) if fp else None}
+          json.dump(res, open("creddata-result.json", "w"), indent=2)
+          print(res)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write("## DLP accuracy (CredData, value-level, indicative)\n```json\n%s\n```\n" % json.dumps(res, indent=2))
+              if not rows:
+                  s.write("_No labelled CredData samples were available on the runner._\n")
+          PY
+          python3 score.py
+      - name: SecretBench inventory
+        id: sb
+        run: |
+          {
+            echo "## SecretBench"
+            echo "- Commit: \`$(git -C secretbench rev-parse --short HEAD)\`"
+            echo "- Data files found: $(find secretbench -type f \( -name '*.csv' -o -name '*.json' -o -name '*.parquet' \) | wc -l)"
+            echo "_The labelled corpus is distributed separately by the authors; this run scores it only when the files are in the clone._"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Review (step results)
+        if: always()
+        run: |
+          {
+            echo "## Review: DLP accuracy"
+            echo "| Section | Result |"
+            echo "|---|---|"
+            echo "| CredData download | ${{ steps.fetch.outcome }} |"
+            echo "| CredData scoring | ${{ steps.score.outcome }} |"
+            echo "| SecretBench inventory | ${{ steps.sb.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: dlp-accuracy
+          path: creddata-result.json
+          if-no-files-found: ignore
