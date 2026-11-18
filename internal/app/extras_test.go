@@ -1053,3 +1053,125 @@ func TestMostlyTextBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func wsCovFlow() rawFlow {
+	return rawFlow{started: time.Now(), method: "GET", url: "http://h/ws", status: 101,
+		reqHeaders: http.Header{}, respHeaders: http.Header{}}
+}
+
+// A panic while storing (no ring) is recovered and reported as "not ok".
+func TestCovPushLiveRecoversFromPanic(t *testing.T) {
+	app := fxApp(t)
+	app.ring = nil
+	if id, ok := app.pushLive(wsCovFlow()); ok || id != 0 {
+		t.Fatalf("pushLive = %d, %v; want 0, false", id, ok)
+	}
+}
+
+// An ignored URL is not built, so pushLive stores nothing.
+func TestCovPushLiveIgnoredURL(t *testing.T) {
+	app := fxApp(t)
+	app.ignoreURLSubstrings = []string{"/ws"}
+	if id, ok := app.pushLive(wsCovFlow()); ok || id != 0 || app.ring.Len() != 0 {
+		t.Fatalf("pushLive = %d, %v, len %d; want 0, false, 0", id, ok, app.ring.Len())
+	}
+}
+
+// finishLive leaves the live entry alone when the final flow is ignored.
+func TestCovFinishLiveIgnoredURL(t *testing.T) {
+	app := fxApp(t)
+	flow := wsCovFlow()
+	flow.note = "live"
+	id, ok := app.pushLive(flow)
+	if !ok {
+		t.Fatal("pushLive failed")
+	}
+	app.ignoreURLSubstrings = []string{"/ws"}
+	final := flow
+	final.note = "final"
+	app.finishLive(id, final)
+	if e, _ := app.ring.GetByID(id); e.Note != "live" || app.ring.Len() != 1 {
+		t.Errorf("ignored final capture changed the ring: note=%q len=%d", e.Note, app.ring.Len())
+	}
+}
+
+// One idle tick (nothing written) refreshes nothing; a later write still does.
+func TestCovWSLiveLoopIdleTick(t *testing.T) {
+	app := fxApp(t)
+	up, down := newWSCollector(1<<16), newWSCollector(1<<16)
+	flow := wsCovFlow()
+	flow.note = "live"
+	id, ok := app.pushLive(flow)
+	if !ok {
+		t.Fatal("pushLive failed")
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	go app.wsLiveLoop(id, flow, "websocket", up, down, stop, done)
+
+	time.Sleep(wsLiveEvery + 250*time.Millisecond) // one tick, v == seen
+	if e, _ := app.ring.GetByID(id); e.Note != "live" {
+		t.Errorf("an idle tick must not refresh the entry: note=%q", e.Note)
+	}
+	select {
+	case <-done:
+		t.Fatal("the loop ended on an idle tick")
+	default:
+	}
+
+	down.add(wsMessage{opcode: wsOpText, data: []byte("hello")})
+	var e FlowEntry
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if e, _ = app.ring.GetByID(id); strings.Contains(e.ResponseBody, "hello") {
+			break
+		}
+	}
+	if !strings.Contains(e.ResponseBody, "hello") {
+		t.Errorf("the write after an idle tick was not refreshed: %q", e.ResponseBody)
+	}
+	close(stop)
+	<-done
+}
+
+// The live entry is pushed out by 50+ newer ones: the refresh fails to update.
+func TestCovWSLiveLoopEvictedEntry(t *testing.T) {
+	app := fxApp(t)
+	up, down := newWSCollector(1<<16), newWSCollector(1<<16)
+	flow := wsCovFlow()
+	id, ok := app.pushLive(flow)
+	if !ok {
+		t.Fatal("pushLive failed")
+	}
+	for i := 0; i < ringCapacity+50; i++ {
+		app.ring.Push(FlowEntry{})
+	}
+	up.add(wsMessage{opcode: wsOpText, data: []byte("x")})
+	stop, done := make(chan struct{}), make(chan struct{})
+	go app.wsLiveLoop(id, flow, "websocket", up, down, stop, done)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		close(stop)
+		t.Fatal("the loop kept running after its entry was evicted")
+	}
+}
+
+// A refresh the builder refuses (URL now ignored) ends the loop.
+func TestCovWSLiveLoopFlowRefused(t *testing.T) {
+	app := fxApp(t)
+	up, down := newWSCollector(1<<16), newWSCollector(1<<16)
+	flow := wsCovFlow()
+	id, ok := app.pushLive(flow)
+	if !ok {
+		t.Fatal("pushLive failed")
+	}
+	app.ignoreURLSubstrings = []string{"/ws"}
+	down.add(wsMessage{opcode: wsOpText, data: []byte("x")})
+	stop, done := make(chan struct{}), make(chan struct{})
+	go app.wsLiveLoop(id, flow, "websocket", up, down, stop, done)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		close(stop)
+		t.Fatal("the loop kept running although its URL is ignored")
+	}
+}

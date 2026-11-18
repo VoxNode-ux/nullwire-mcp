@@ -251,3 +251,43 @@ func TestIBANSpansMalformedEdges(t *testing.T) {
 		}
 	}
 }
+
+func TestCovIBANValidRejects(t *testing.T) {
+	for name, in := range map[string]string{
+		"under 15 chars":     "GB82WEST123456",
+		"over 34 chars":      "GB82" + strings.Repeat("W", 31),
+		"non-digit check":    "GBAAWEST12345698765432",
+		"bad char in body":   "GB82WEST1234569876543!",
+		"bad char mid body":  "GB82WE-T12345698765432",
+		"lower case in body": "GB82WEST1234569876543a",
+	} {
+		if ibanValid(in) {
+			t.Errorf("%s: ibanValid(%q) = true", name, in)
+		}
+	}
+}
+
+func TestCovIBANSpansRejects(t *testing.T) {
+	for name, in := range map[string]string{
+		"shorter than 15":     "GB82WEST12345",
+		"5-char middle group": "iban GB82 12345 1234 5678 9012",
+	} {
+		if got := ibanSpans(in); len(got) != 0 {
+			t.Errorf("%s: ibanSpans(%q) = %v, want none", name, in, spanTexts(in, got))
+		}
+	}
+}
+
+// PCI's track rule and the IBAN rule claim the same digits; only one redaction.
+func TestCovScrubPresetsOverlapSkipped(t *testing.T) {
+	s := presetScrubber(t, "pci-dss", "gdpr")
+	const iban = "GB82WEST12345698765432"
+	in := "x track1=" + iban + " y"
+	if len(s.presetSpans(in)) < 2 {
+		t.Fatalf("expected overlapping spans, got %v", s.presetSpans(in))
+	}
+	out, n := s.scrubPresets(in)
+	if n != 1 || strings.Contains(out, iban) || strings.Count(out, "[REDACTED_TOKEN#") != 1 {
+		t.Errorf("overlap must be redacted once: n=%d out=%q", n, out)
+	}
+}
