@@ -3,10 +3,12 @@ package scan
 import (
 	"archive/zip"
 	"bytes"
+	"compress/flate"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -704,5 +706,125 @@ func TestRunToDeepSkipsDuplicatesAndPlainJSON(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "notmcp.json") || strings.Contains(out.String(), "broken.json") || strings.Contains(out.String(), "empty.json") {
 		t.Errorf("non-MCP json must not be scanned in --deep:\n%s", out.String())
+	}
+}
+
+func rcovNeedsChmod(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a non-root POSIX user (permission bits)")
+	}
+}
+
+// rcovLock sets mode on path and restores 0o700 at cleanup so TempDir can be removed.
+func rcovLock(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o700) }) // #nosec G302 -- so the temp dir can be removed
+}
+
+// A header that declares a small size but holds far more data is never read
+// past the limit: the entry is skipped and the scan carries on.
+func TestRcovScanZipFileLyingHeader(t *testing.T) {
+	var comp bytes.Buffer
+	fw, err := flate.NewWriter(&comp, flate.BestSpeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(bytes.Repeat([]byte("a"), zipMaxEntry+4096)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.CreateRaw(&zip.FileHeader{
+		Name: "liar.txt", Method: zip.Deflate,
+		CompressedSize64: uint64(comp.Len()), UncompressedSize64: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(comp.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if w, err = zw.Create("good.txt"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w.Write([]byte("k=" + marker))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "liar.zip")
+	if err := os.WriteFile(p, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var rep strings.Builder
+	ok, hits, tokens := ScanZipFile(&fakeScrub{}, p, &rep)
+	if !ok || hits != 1 || tokens != 1 || strings.Contains(rep.String(), marker) {
+		t.Errorf("got ok=%v hits=%d tokens=%d\n%s", ok, hits, tokens, rep.String())
+	}
+}
+
+func TestRcovScanZipFileTruncatedEmptyAndDirsOnly(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "g.zip")
+	writeZip(t, good, []zipEntry{{"a.txt", []byte("k=" + marker)}})
+	raw, err := os.ReadFile(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := writeFile(t, dir, "cut.zip", string(raw[:len(raw)/2]))
+	empty := writeFile(t, dir, "empty.zip", "")
+	for _, p := range []string{cut, empty} {
+		var rep strings.Builder
+		if ok, _, _ := ScanZipFile(&fakeScrub{}, p, &rep); ok || !strings.Contains(rep.String(), "not a valid ZIP") {
+			t.Errorf("%s: ok=%v %q", filepath.Base(p), ok, rep.String())
+		}
+	}
+	dirs := filepath.Join(dir, "d.zip")
+	writeZip(t, dirs, []zipEntry{{"x/", nil}, {"x/y/", nil}})
+	var rep strings.Builder
+	if ok, hits, _ := ScanZipFile(&fakeScrub{}, dirs, &rep); !ok || hits != 0 || !strings.Contains(rep.String(), "(no secrets found)") {
+		t.Errorf("directories only: ok=%v hits=%d %q", ok, hits, rep.String())
+	}
+}
+
+func TestRcovScanUnreadableFiles(t *testing.T) {
+	rcovNeedsChmod(t)
+	useFakeScrubber(t)
+	dir := t.TempDir()
+	zp := writeFile(t, dir, "locked.zip", "PK")
+	jp := writeFile(t, dir, "locked.json", `{"a":"x"}`)
+	rcovLock(t, zp, 0)
+	rcovLock(t, jp, 0)
+
+	var rep strings.Builder
+	if ok, _, _ := ScanZipFile(&fakeScrub{}, zp, &rep); ok || !strings.Contains(rep.String(), "✗") {
+		t.Errorf("unreadable zip: ok=%v %q", ok, rep.String())
+	}
+	rep.Reset()
+	if ok, _, _, _ := ScanFile(&fakeScrub{}, jp, &rep); ok || !strings.Contains(rep.String(), "✗") {
+		t.Errorf("unreadable json: ok=%v %q", ok, rep.String())
+	}
+	var out, errw bytes.Buffer
+	if code := RunTo(&out, &errw, []string{jp}); code != 1 {
+		t.Errorf("RunTo with an unreadable file: exit %d, want 1\n%s", code, out.String())
+	}
+}
+
+func TestRcovWalkTreeUnreadableDir(t *testing.T) {
+	rcovNeedsChmod(t)
+	root := t.TempDir()
+	writeFile(t, root, "ok/a.txt", "x")
+	writeFile(t, root, "locked/b.txt", "y")
+	rcovLock(t, filepath.Join(root, "locked"), 0)
+	var seen []string
+	walkTree(root, func(p string, _ fs.DirEntry) { seen = append(seen, filepath.Base(p)) })
+	if len(seen) != 1 || seen[0] != "a.txt" {
+		t.Errorf("walkTree saw %v, want only a.txt (the locked folder is skipped)", seen)
 	}
 }
