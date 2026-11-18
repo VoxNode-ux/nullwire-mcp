@@ -247,3 +247,85 @@ func TestScanTOMLFileNestedInlineAndMultilineInArray(t *testing.T) {
 		}
 	}
 }
+
+func TestTOMLInlineBlocksEdgeCases(t *testing.T) {
+	// An escaped quote inside a multi-line string, both inside a block and outside one.
+	bodies, rest := tomlInlineBlocks(`{ a = """x \" } y""" }`)
+	if len(bodies) != 1 || !strings.Contains(bodies[0], `\" } y`) || strings.TrimSpace(rest) != "" {
+		t.Errorf("escape in multiline inside block: bodies=%q rest=%q", bodies, rest)
+	}
+	bodies, rest = tomlInlineBlocks(`"""x \" y""" { a = 1 }`)
+	if len(bodies) != 1 || !strings.Contains(rest, `x \" y`) {
+		t.Errorf("escape in multiline outside block: bodies=%q rest=%q", bodies, rest)
+	}
+	// An escaped quote inside a basic string inside a block.
+	if bodies, _ = tomlInlineBlocks(`{ a = "x\"y" }`); len(bodies) != 1 {
+		t.Errorf("escape in string inside block: %q", bodies)
+	}
+	// Unclosed block: nothing is reported. A stray } at depth 0 is plain text.
+	if bodies, rest = tomlInlineBlocks(`{ a = 1`); len(bodies) != 0 || rest != "" {
+		t.Errorf("unclosed block: bodies=%q rest=%q", bodies, rest)
+	}
+	if bodies, rest = tomlInlineBlocks(`a } b`); len(bodies) != 0 || rest != "a } b" {
+		t.Errorf("stray brace: bodies=%q rest=%q", bodies, rest)
+	}
+}
+
+func TestTOMLHelpersUnterminated(t *testing.T) {
+	// Unclosed multi-line strings: tomlStrings stops, the state helpers report them still open.
+	if got := tomlStrings(`"""never closed`); len(got) != 0 {
+		t.Errorf("tomlStrings = %q", got)
+	}
+	if got := tomlStrings(`'''never closed`); len(got) != 0 {
+		t.Errorf("tomlStrings = %q", got)
+	}
+	if _, ml := stripTOMLCommentState(`'''open`, 0); ml != '\'' {
+		t.Errorf("ml = %q", ml)
+	}
+	// A backslash escapes the quote in a basic multi-line string but not in a literal one.
+	if _, ml := stripTOMLCommentState(`\"""`, '"'); ml != '"' {
+		t.Errorf("escaped delimiter must not close the string: ml = %q", ml)
+	}
+	if _, ml := stripTOMLCommentState(`\'''`, '\''); ml != 0 {
+		t.Errorf("literal string ignores backslash: ml = %q", ml)
+	}
+	if d, ml := tomlDepthState(`\"""`, '"'); d != 0 || ml != '"' {
+		t.Errorf("depth=%d ml=%q", d, ml)
+	}
+	if got := splitTOMLTop(`a = '''x\\''', b = 1`); len(got) != 2 {
+		t.Errorf("splitTOMLTop = %q", got)
+	}
+	if got := splitTOMLTop(`a = "x\"", b = 1`); len(got) != 2 {
+		t.Errorf("escaped quote in splitTOMLTop = %q", got)
+	}
+}
+
+func TestScanTOMLFileMalformedAndUnclosed(t *testing.T) {
+	p := writeFile(t, t.TempDir(), "c.toml", strings.Join([]string{
+		`[bad`,
+		`x = "plain"`,
+		`[tbl] # comment`,
+		`token = "` + marker + `"`,
+		`empty = ""`,
+		`bare = 5`,
+		`noeq`,
+		`inl = { a = { b = "` + marker + `" }, nokv, c = { token = "` + marker + `" } }`,
+		`open = { z = "` + marker + `"`,
+		`half = { y = { z = "` + marker + `" }`,
+		`ml = """`,
+		marker,
+	}, "\n"))
+	var rep strings.Builder
+	ok, hits, tokens := scanTOMLFile(&fakeScrub{}, p, &rep)
+	if !ok || hits != 4 || tokens != 4 {
+		t.Errorf("got ok=%v hits=%d tokens=%d\n%s", ok, hits, tokens, rep.String())
+	}
+	for _, want := range []string{"tbl.token", "tbl.inl.a.b", "tbl.inl.c.token", "tbl.ml"} {
+		if !strings.Contains(rep.String(), want) {
+			t.Errorf("report is missing %q:\n%s", want, rep.String())
+		}
+	}
+	if strings.Contains(rep.String(), marker) {
+		t.Errorf("report leaked a secret:\n%s", rep.String())
+	}
+}

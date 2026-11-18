@@ -605,3 +605,104 @@ func TestRunToHistory(t *testing.T) {
 		t.Errorf("history: code=%d\n%s", code, out.String())
 	}
 }
+
+func TestScanZipFileBrokenEntries(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	raw := func(name string, method uint16, data []byte) {
+		t.Helper()
+		w, err := zw.CreateRaw(&zip.FileHeader{
+			Name: name, Method: method,
+			CompressedSize64: uint64(len(data)), UncompressedSize64: uint64(len(data)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw("unknown-method.txt", 99, []byte(marker))                       // f.Open fails: no such decompressor
+	raw("corrupt.txt", zip.Deflate, []byte{0xff, 0xff, 0xff, 0xff})     // ReadAll fails: invalid deflate stream
+	w, err := zw.Create("good.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w.Write([]byte("k=" + marker))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "broken.zip")
+	if err := os.WriteFile(p, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var rep strings.Builder
+	ok, hits, tokens := ScanZipFile(&fakeScrub{}, p, &rep)
+	if !ok || hits != 1 || tokens != 1 {
+		t.Errorf("got ok=%v hits=%d tokens=%d\n%s", ok, hits, tokens, rep.String())
+	}
+	if r := rep.String(); strings.Contains(r, "unknown-method") || strings.Contains(r, "corrupt.txt") || !strings.Contains(r, `"good.txt"`) {
+		t.Errorf("broken entries must be skipped silently:\n%s", r)
+	}
+}
+
+func TestHistoryPathsSkipsDirectories(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	if err := os.Mkdir(filepath.Join(home, ".bash_history"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, home, ".zsh_history", "ls\n")
+	got := historyPaths()
+	if len(got) != 1 || filepath.Base(got[0]) != ".zsh_history" {
+		t.Errorf("historyPaths() = %v, want only .zsh_history", got)
+	}
+}
+
+func TestRunToDiscoverAndHistoryOnly(t *testing.T) {
+	useFakeScrubber(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "cfg"))
+	writeFile(t, home, ".mcp.json", `{"mcpServers":{"x":{"env":{"A_TOKEN":"`+marker+`"}}}}`)
+	writeFile(t, home, ".zsh_history", "export TOKEN="+marker+"\n")
+
+	var out, errw bytes.Buffer
+	if code := RunTo(&out, &errw, []string{"--discover", "--history", "--fail"}); code != 3 || !strings.Contains(out.String(), ".mcp.json") || !strings.Contains(out.String(), ".zsh_history") {
+		t.Errorf("discover+history: code=%d\n%s", code, out.String())
+	}
+	// --history alone is enough to run (no paths, no --deep).
+	out.Reset()
+	if code := RunTo(&out, &errw, []string{"--history"}); code != 0 || !strings.Contains(out.String(), "1 files scanned") {
+		t.Errorf("history only: code=%d\n%s", code, out.String())
+	}
+	// A history file already given as a plain path is not scanned a second time
+	// (as a plain path it is not JSON, so that one scan fails and the exit code is 1).
+	out.Reset()
+	if code := RunTo(&out, &errw, []string{"--history", filepath.Join(home, ".zsh_history")}); code != 1 || !strings.Contains(out.String(), "1 files scanned") {
+		t.Errorf("history dedup: code=%d\n%s", code, out.String())
+	}
+}
+
+func TestRunToDeepSkipsDuplicatesAndPlainJSON(t *testing.T) {
+	useFakeScrubber(t)
+	dir := t.TempDir()
+	writeFile(t, dir, ".mcp.json", `{"mcpServers":{"x":{"command":"`+marker+`"}}}`)
+	writeFile(t, dir, "notmcp.json", `{"a":"`+marker+`"}`)
+	writeFile(t, dir, "broken.json", `{"mcpServers":`)
+	writeFile(t, dir, "empty.json", `{"mcpServers":{}}`)
+	writeFile(t, dir, "sub/c.toml", `k = "`+marker+`"`)
+	writeFile(t, dir, "sub/c.yaml", "k: "+marker)
+	var out, errw bytes.Buffer
+	// The directory is given as a path and as --deep: every file is scanned once
+	// (.mcp.json, sub/c.toml and sub/c.yaml).
+	code := RunTo(&out, &errw, []string{"--deep", dir, "--toml", "--yaml", dir})
+	if code != 0 || !strings.Contains(out.String(), "3 files scanned") {
+		t.Errorf("code=%d\n%s", code, out.String())
+	}
+	if strings.Contains(out.String(), "notmcp.json") || strings.Contains(out.String(), "broken.json") || strings.Contains(out.String(), "empty.json") {
+		t.Errorf("non-MCP json must not be scanned in --deep:\n%s", out.String())
+	}
+}
