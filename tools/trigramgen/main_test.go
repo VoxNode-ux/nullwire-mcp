@@ -103,3 +103,34 @@ func TestCorporaAreDeterministicAndDisjointSeeds(t *testing.T) {
 		}
 	}
 }
+
+func TestRcovTrainNeedsBothClassesAndAbs(t *testing.T) {
+	benign, secret := newCounts(), newCounts()
+	if got := train(benign, secret); got != nil {
+		t.Errorf("empty classes: %v, want nil", got)
+	}
+	benign[int('a')<<14|int('b')<<7|int('c')] = 100
+	if got := train(benign, secret); got != nil {
+		t.Errorf("no secret class: %v, want nil", got)
+	}
+	if abs(-3) != 3 || abs(4) != 4 || abs(0) != 0 {
+		t.Error("abs is wrong")
+	}
+}
+
+func TestRcovAddTokenIgnoresNonASCII(t *testing.T) {
+	c := newCounts()
+	addToken(c, "ab\xc3\xa9cd") // every triple touching the non-ASCII byte is skipped
+	var total uint32
+	for _, v := range c {
+		total += v
+	}
+	if total != 0 {
+		t.Errorf("counted %d triples, want 0", total)
+	}
+	addToken(c, "ab") // too short for any triple
+	addToken(c, "abc")
+	if c[int('a')<<14|int('b')<<7|int('c')] != 1 {
+		t.Error("abc was not counted")
+	}
+}
