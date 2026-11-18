@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -99,5 +100,71 @@ func TestRunHelp(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "-holdout-mod") {
 		t.Errorf("usage not written to stderr: %q", stderr.String())
+	}
+}
+
+func rcovNeedsChmod(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a non-root POSIX user (permission bits)")
+	}
+}
+
+// rcovLock sets mode on path and restores 0o700 at cleanup so TempDir can be removed.
+func rcovLock(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o700) }) // #nosec G302 -- so the temp dir can be removed
+}
+
+func TestRcovRunUnreadableBenignInputs(t *testing.T) {
+	rcovNeedsChmod(t)
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "locked"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "locked"), "a.go", benignSrc)
+	rcovLock(t, filepath.Join(dir, "locked"), 0)
+	file := writeFile(t, dir, "b.go", benignSrc)
+	rcovLock(t, file, 0)
+
+	for name, benign := range map[string]string{"unreadable folder": dir, "unreadable file": file} {
+		var stdout, stderr bytes.Buffer
+		err := run([]string{"-benign", benign, "-out", filepath.Join(dir, "o.go")}, &stdout, &stderr)
+		if err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("%s: err = %v, want permission denied", name, err)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("%s: stdout should be empty, got %q", name, stdout.String())
+		}
+	}
+}
+
+func TestRcovRunPathProblems(t *testing.T) {
+	dir := t.TempDir()
+	benignFile := writeFile(t, dir, "a.go", strings.Repeat(benignSrc, 40))
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"-secrets is a folder", []string{"-benign", benignFile, "-secrets", dir}, "-secrets"},
+		{"-out is a folder", []string{"-benign", benignFile, "-synthetic", "2000", "-synthetic-benign", "2000", "-out", dir}, "is a directory"},
+		{"bad -holdout-mod", []string{"-holdout-mod", "x"}, "invalid value"},
+		{"bad -synthetic-benign", []string{"-synthetic-benign", "x"}, "invalid value"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := run(tc.args, &stdout, &stderr)
+			if err == nil || !strings.Contains(err.Error()+stderr.String(), tc.want) {
+				t.Fatalf("err = %v / stderr %q, want %q", err, stderr.String(), tc.want)
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout should be empty on error, got %q", stdout.String())
+			}
+		})
 	}
 }
