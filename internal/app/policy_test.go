@@ -129,7 +129,10 @@ func TestPolicyPubKeyForms(t *testing.T) {
 		t.Errorf("DER hex: %v", err)
 	}
 	// hex of the raw uncompressed point
-	raw := append([]byte{4}, append(key.PublicKey.X.FillBytes(make([]byte, 32)), key.PublicKey.Y.FillBytes(make([]byte, 32))...)...)
+	raw, err := key.PublicKey.Bytes() // uncompressed point, 04||X||Y
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, err := parsePolicyPubKey(hex.EncodeToString(raw))
 	if err != nil || pubKeyHex(got) != pubKeyHex(&key.PublicKey) {
 		t.Errorf("raw point hex: %v", err)

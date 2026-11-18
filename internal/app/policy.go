@@ -70,8 +70,8 @@ func parsePolicyPubKey(spec string) (*ecdsa.PublicKey, error) {
 		return nil, errors.New("empty public key")
 	}
 	data := []byte(spec)
-	if fi, err := os.Stat(spec); err == nil && fi.Mode().IsRegular() {
-		b, err := os.ReadFile(spec) // #nosec G304 -- the path is the -policy-pubkey file the user passed
+	if fi, err := os.Stat(spec); err == nil && fi.Mode().IsRegular() { // #nosec G703 -- the path is the -policy-pubkey value the admin passed
+		b, err := os.ReadFile(spec) // #nosec G304 G703 -- the path is the -policy-pubkey file the user passed
 		if err != nil {
 			return nil, err
 		}
@@ -107,7 +107,7 @@ func parseP256PrivateKey(data []byte) (*ecdsa.PrivateKey, error) {
 }
 
 func loadP256PrivateKeyFile(path string) (*ecdsa.PrivateKey, error) {
-	b, err := os.ReadFile(path) // #nosec G304 -- the path is a key file the user passed
+	b, err := os.ReadFile(path) // #nosec G304 G703 -- the path is a key file the user passed
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +190,7 @@ func policyLockError(pubkeySet, allowUninspectable bool) error {
 }
 
 func writeNewFile(path string, data []byte, perm os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm) // #nosec G304 -- output path chosen by the admin
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm) // #nosec G304 G703 -- output path chosen by the admin
 	if err != nil {
 		return err
 	}
@@ -254,7 +254,7 @@ func RunPolicy(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(err)
 		}
-		data, err := os.ReadFile(fs.Arg(0)) // #nosec G304 -- the file the admin asked to sign
+		data, err := os.ReadFile(fs.Arg(0)) // #nosec G304 G703 -- the file the admin asked to sign
 		if err != nil {
 			return fail(err)
 		}
@@ -262,7 +262,7 @@ func RunPolicy(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(err)
 		}
-		if err := os.WriteFile(fs.Arg(0)+policySigSuffix, []byte(sig+"\n"), 0o644); err != nil { // #nosec G306 -- a signature is public
+		if err := os.WriteFile(fs.Arg(0)+policySigSuffix, []byte(sig+"\n"), 0o644); err != nil { // #nosec G306 G703 -- a signature is public; the path is the file the admin signed plus .sig
 			return fail(err)
 		}
 		fmt.Fprintf(stdout, "wrote %s%s\n", fs.Arg(0), policySigSuffix)
@@ -276,11 +276,11 @@ func RunPolicy(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(err)
 		}
-		data, err := os.ReadFile(fs.Arg(0)) // #nosec G304 -- the file the admin asked to check
+		data, err := os.ReadFile(fs.Arg(0)) // #nosec G304 G703 -- the file the admin asked to check
 		if err != nil {
 			return fail(err)
 		}
-		sig, err := os.ReadFile(fs.Arg(0) + policySigSuffix) // #nosec G304 -- next to the policy file
+		sig, err := os.ReadFile(fs.Arg(0) + policySigSuffix) // #nosec G304 G703 -- next to the policy file
 		if err != nil {
 			return fail(err)
 		}
@@ -294,7 +294,7 @@ func RunPolicy(args []string, stdout, stderr io.Writer) int {
 		if fs.Parse(args[1:]) != nil || fs.NArg() != 1 {
 			return usage()
 		}
-		data, err := os.ReadFile(fs.Arg(0)) // #nosec G304 -- the report the admin asked to check
+		data, err := os.ReadFile(fs.Arg(0)) // #nosec G304 G703 -- the report the admin asked to check
 		if err != nil {
 			return fail(err)
 		}
