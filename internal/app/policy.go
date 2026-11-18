@@ -70,7 +70,8 @@ func parsePolicyPubKey(spec string) (*ecdsa.PublicKey, error) {
 		return nil, errors.New("empty public key")
 	}
 	data := []byte(spec)
-	if fi, err := os.Stat(spec); err == nil && fi.Mode().IsRegular() { // #nosec G703 -- the path is the -policy-pubkey value the admin passed
+	fi, statErr := os.Stat(spec) // #nosec G703 -- the path is the -policy-pubkey value the admin passed
+	if statErr == nil && fi.Mode().IsRegular() {
 		b, err := os.ReadFile(spec) // #nosec G304 G703 -- the path is the -policy-pubkey file the user passed
 		if err != nil {
 			return nil, err
