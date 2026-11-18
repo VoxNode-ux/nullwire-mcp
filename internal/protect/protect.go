@@ -25,6 +25,11 @@ func Run(args []string) int {
 	allowUninspectable := pf.Bool("allow-uninspectable", false, "forward request bodies that cannot be inspected (br, zstd)")
 	maxBody := pf.String("max-body", "", "stored body size per request/response, e.g. 1m (default 32 KiB / 256 KiB, at most 2m)")
 	wsDeflate := pf.Bool("ws-deflate", false, "keep WebSocket permessage-deflate and decode it for capture")
+	policyPubkey := pf.String("policy-pubkey", "", "enterprise mode: public key (PEM file, hex file or hex) that must verify <secrets-config>.sig")
+	attestOut := pf.String("attest-out", "", "write the signed attestation report to this file when the server exits")
+	attestKey := pf.String("attest-key", "", "PEM ECDSA P-256 key that signs attestation reports (default: a fresh key per run)")
+	proxyToken := pf.String("proxy-token", "", "require a token on every proxy request; \"auto\" makes one and prints the proxy URL. A literal token is passed through the environment, not the command line")
+	listen := pf.String("listen", "", "opt-in: listen on a unix socket, as unix:///absolute/path.sock (mode 0600; Linux and macOS)")
 	pf.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: nullwire-mcp protect [--port N] [--target URL] [--deep DIR] [--history] [--no-scan]\n")
 		pf.PrintDefaults()
@@ -84,5 +89,23 @@ func Run(args []string) int {
 	if *wsDeflate {
 		serveArgs = append(serveArgs, "-ws-deflate")
 	}
-	return reexecServe(serveArgs)
+	if *policyPubkey != "" {
+		serveArgs = append(serveArgs, "-policy-pubkey", *policyPubkey)
+	}
+	if *attestOut != "" {
+		serveArgs = append(serveArgs, "-attest-out", *attestOut)
+	}
+	if *attestKey != "" {
+		serveArgs = append(serveArgs, "-attest-key", *attestKey)
+	}
+	if *listen != "" {
+		serveArgs = append(serveArgs, "-listen", *listen)
+	}
+	// The token travels in the server's environment, so it never shows in a
+	// process listing. "auto" lets the server make one and print the URL.
+	var env []string
+	if *proxyToken != "" {
+		env = append(env, "NULLWIRE_PROXY_TOKEN="+*proxyToken)
+	}
+	return reexecServeEnv(serveArgs, env)
 }
