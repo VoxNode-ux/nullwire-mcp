@@ -34,6 +34,7 @@ func TestMain(m *testing.M) {
 	}
 	if os.Getenv("NULLWIRE_PROTECT_HELPER") == "1" {
 		fmt.Println("ARGS:" + strings.Join(os.Args[1:], " "))
+		fmt.Println("TOKEN:" + os.Getenv("NULLWIRE_PROXY_TOKEN"))
 		code, _ := strconv.Atoi(os.Getenv("NULLWIRE_PROTECT_EXIT"))
 		os.Exit(code)
 	}
@@ -119,6 +120,18 @@ func childArgs(t *testing.T, stdout string) string {
 	return ""
 }
 
+// childToken returns the NULLWIRE_PROXY_TOKEN the helper child received.
+func childToken(t *testing.T, stdout string) string {
+	t.Helper()
+	for _, line := range strings.Split(stdout, "\n") {
+		if rest, ok := strings.CutPrefix(line, "TOKEN:"); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	t.Fatalf("the server child printed no TOKEN line; stdout was %q", stdout)
+	return ""
+}
+
 func TestRunHelpExitsZero(t *testing.T) {
 	var code int
 	_, stderr := capture(t, func() { code = Run([]string{"-h"}) })
@@ -172,6 +185,34 @@ func TestRunPassesEveryOptionToTheServer(t *testing.T) {
 		"-secrets-config /tmp/secrets.json -scrub-headers X-Foo -allow-uninspectable"
 	if got := childArgs(t, stdout); got != want {
 		t.Errorf("server arguments:\n got  %s\n want %s", got, want)
+	}
+}
+
+func TestRunPassesTheRemainingOptionsToTheServer(t *testing.T) {
+	asServerChild(t, 0)
+	var code int
+	stdout, _ := capture(t, func() {
+		code = Run([]string{
+			"--no-scan", "--target-map", "api=http://a.test", "--max-body", "1m",
+			"--ws-deflate", "--policy-pubkey", "/tmp/pub.pem",
+			"--attest-out", "/tmp/att.json", "--attest-key", "/tmp/att.key",
+			"--listen", "unix:///tmp/nw.sock", "--proxy-token", "s3cret",
+		})
+	})
+	if code != 0 {
+		t.Fatalf("Run returned %d, want 0", code)
+	}
+	want := "-port 8080 -dns auto -target-map api=http://a.test -max-body 1m -ws-deflate " +
+		"-policy-pubkey /tmp/pub.pem -attest-out /tmp/att.json -attest-key /tmp/att.key " +
+		"-listen unix:///tmp/nw.sock"
+	if got := childArgs(t, stdout); got != want {
+		t.Errorf("server arguments:\n got  %s\n want %s", got, want)
+	}
+	if got := childToken(t, stdout); got != "s3cret" {
+		t.Errorf("NULLWIRE_PROXY_TOKEN = %q, want s3cret", got)
+	}
+	if strings.Contains(childArgs(t, stdout), "s3cret") {
+		t.Error("the proxy token must not appear on the command line")
 	}
 }
 
