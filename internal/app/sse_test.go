@@ -372,3 +372,30 @@ func TestFinishLiveRepushesWhenEvicted(t *testing.T) {
 		t.Errorf("finishLive(0) pushed %d entries, want 1", app2.ring.Len())
 	}
 }
+
+func TestCovSSELiveNote(t *testing.T) {
+	if n := sseLiveNote(); !strings.Contains(n, "Server-Sent Events") || !strings.Contains(n, "500 ms") {
+		t.Errorf("sseLiveNote() = %q", n)
+	}
+}
+
+// A refresh that buildEntryWith refuses (the URL became ignored) ends the loop.
+func TestCovSSELiveLoopExitsWhenFlowIgnored(t *testing.T) {
+	app := fxApp(t)
+	flow := sseTestFlow()
+	id, ok := app.pushLive(flow)
+	if !ok {
+		t.Fatal("pushLive failed")
+	}
+	app.ignoreURLSubstrings = []string{"/stream"}
+	col := newSSECollector(1 << 10)
+	_, _ = col.Write([]byte("data: hello\n\n"))
+	stop, done := make(chan struct{}), make(chan struct{})
+	go app.sseLiveLoop(id, flow, col, stop, done)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		close(stop)
+		t.Fatal("the refresher kept running although its URL is ignored")
+	}
+}

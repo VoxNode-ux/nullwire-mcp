@@ -133,6 +133,9 @@ func (r *RingBuffer) Update(id uint64, fn func(*FlowEntry)) bool {
 }
 
 func (r *RingBuffer) Len() int {
+	if r == nil {
+		return 0
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.size

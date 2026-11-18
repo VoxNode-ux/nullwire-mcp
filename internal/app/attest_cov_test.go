@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mutatedEnvelope builds a valid envelope, lets edit change it, and re-encodes it.
@@ -108,5 +109,44 @@ func TestToolAttestationSignerError(t *testing.T) {
 	}
 	if txt := attestText(t, res); !strings.Contains(txt, "cannot build the attestation") || !strings.Contains(txt, "no entropy") {
 		t.Errorf("error text: %q", txt)
+	}
+}
+
+func TestMarshalCompactError(t *testing.T) {
+	if _, err := marshalCompact(make(chan int)); err == nil {
+		t.Error("a value JSON cannot encode must be reported")
+	}
+}
+
+func TestUtcStampAndListenerKind(t *testing.T) {
+	if got := utcStamp(time.Time{}); got != "" {
+		t.Errorf("zero time = %q, want empty", got)
+	}
+	if got := utcStamp(time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("x", 3600))); got != "2026-01-02T02:04:05Z" {
+		t.Errorf("utcStamp = %q", got)
+	}
+	app := newTestApp(t)
+	if got := app.listenerKind(); got != "tcp-loopback" {
+		t.Errorf("default listener = %q", got)
+	}
+	app.listener = "unix"
+	if got := app.listenerKind(); got != "unix" {
+		t.Errorf("unix listener = %q", got)
+	}
+}
+
+func TestAttestReportDisabledToolsSorted(t *testing.T) {
+	app := newTestApp(t)
+	app.listener = "unix"
+	app.disabledTools = map[string]bool{"b_tool": true, "a_tool": true, "c_tool": false}
+	r := app.attestReport(time.Now())
+	if got := strings.Join(r.Controls.DisabledTools, ","); got != "a_tool,b_tool" {
+		t.Errorf("disabled tools = %q, want only the disabled ones, sorted", got)
+	}
+	if r.Controls.Listener != "unix" {
+		t.Errorf("listener = %q", r.Controls.Listener)
+	}
+	if r.StartedAt != "" {
+		t.Errorf("an unset start time must be empty: %q", r.StartedAt)
 	}
 }

@@ -532,3 +532,50 @@ func TestGQLPathLooksGraphQLUnparsable(t *testing.T) {
 		}
 	}
 }
+
+func TestCovIsGraphQLContentType(t *testing.T) {
+	for in, want := range map[string]bool{
+		"application/graphql":                       true,
+		" Application/GraphQL ; charset=utf-8":      true,
+		"application/json":                          false,
+		"application/graphql-response+json":         false,
+		"":                                          false,
+	} {
+		if got := isGraphQLContentType(in); got != want {
+			t.Errorf("isGraphQLContentType(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestCovGQLValidName(t *testing.T) {
+	for in, want := range map[string]bool{
+		"":                                false,
+		"9a":                              false,
+		"a-b":                             false,
+		"a b":                             false,
+		"_a1":                             true,
+		"Query":                           true,
+		strings.Repeat("a", gqlMaxName):   true,
+		strings.Repeat("a", gqlMaxName+1): false,
+	} {
+		if got := gqlValidName(in); got != want {
+			t.Errorf("gqlValidName(len %d) = %v, want %v", len(in), got, want)
+		}
+	}
+}
+
+func TestCovGQLSkip(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want int
+	}{
+		{"   ", 3},
+		{" ,\t# c\nx", 7},
+		{"# only a comment", 16},
+		{"x", 0},
+	} {
+		if got := gqlSkip(c.in, 0); got != c.want {
+			t.Errorf("gqlSkip(%q, 0) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}

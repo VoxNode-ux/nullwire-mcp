@@ -413,3 +413,28 @@ func TestCBORChunkAndTagEdgeCases(t *testing.T) {
 		t.Errorf("array over the limit: (%q, %v)", out, complete)
 	}
 }
+
+func TestCovHalfToFloat(t *testing.T) {
+	for _, c := range []struct {
+		h    uint16
+		want float64
+	}{
+		{0x0000, 0},
+		{0x3c00, 1},
+		{0xc000, -2},
+		{0x7bff, 65504},
+		{0x0001, math.Ldexp(1, -24)},
+		{0x7c00, math.Inf(1)},
+		{0xfc00, math.Inf(-1)},
+	} {
+		if got := halfToFloat(c.h); got != c.want {
+			t.Errorf("halfToFloat(%#04x) = %v, want %v", c.h, got, c.want)
+		}
+	}
+	if got := halfToFloat(0x8000); got != 0 || !math.Signbit(got) {
+		t.Errorf("halfToFloat(0x8000) = %v, want -0", got)
+	}
+	if got := halfToFloat(0x7e00); !math.IsNaN(got) {
+		t.Errorf("halfToFloat(0x7e00) = %v, want NaN", got)
+	}
+}

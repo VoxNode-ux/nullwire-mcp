@@ -194,3 +194,60 @@ func TestScrubPresetsOverlappingSpans(t *testing.T) {
 		t.Error("presetSpans must be nil with no preset")
 	}
 }
+
+func TestCardKeyBoundaryCases(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		i    int
+		want bool
+	}{
+		{"cvv", 0, true},
+		{"_cvv", 1, true},
+		{"xcvv", 1, false},
+		{"Xcvv", 1, false},
+		{"XCvv", 1, false},
+		{"1cvv", 1, false},
+		{"xCvv", 1, true}, // camel case: cardCvv
+	} {
+		if got := cardKeyBoundary(c.in, c.i); got != c.want {
+			t.Errorf("cardKeyBoundary(%q, %d) = %v, want %v", c.in, c.i, got, c.want)
+		}
+	}
+}
+
+func TestIBANValidEdgeCases(t *testing.T) {
+	for in, want := range map[string]bool{
+		"GB82WEST12345698765432":  true,
+		"DE89370400440532013000":  true,
+		"GB82WEST":                false, // too short
+		"GB83WEST12345698765432":  false, // bad checksum
+		"XX82WEST12345698765432":  false, // unknown country
+		"GB82WEST1234569876543":   false, // wrong length for GB
+		"GBA2WEST12345698765432":  false, // check digits not digits
+		"GB82west12345698765432":  false, // not normalised
+		"GB82WEST1234569876543!":  false, // stray symbol
+		"GB82" + strings.Repeat("W", 40): false, // too long
+	} {
+		if got := ibanValid(in); got != want {
+			t.Errorf("ibanValid(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestIBANSpansMalformedEdges(t *testing.T) {
+	for _, c := range []struct {
+		name, in string
+		want     []string
+	}{
+		{"compact", "GB82WEST12345698765432", []string{"GB82WEST12345698765432"}},
+		{"grouped lower case", "iban: gb82 west 1234 5698 7654 32 ok", []string{"gb82 west 1234 5698 7654 32"}},
+		{"preceded by hyphen", "x-GB82WEST12345698765432", nil},
+		{"glued to a trailing letter", "GB82WEST12345698765432X", nil},
+		{"bad checksum", "GB83WEST12345698765432", nil},
+		{"too short to scan", "GB82WEST", nil},
+	} {
+		if got := spanTexts(c.in, ibanSpans(c.in)); strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Errorf("%s: %q gave %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}

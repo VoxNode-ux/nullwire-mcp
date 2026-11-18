@@ -160,3 +160,62 @@ func TestListenUnix(t *testing.T) {
 		t.Error("a regular file must be refused")
 	}
 }
+
+func TestProxyTokenFromForms(t *testing.T) {
+	basic := func(s string) string { return "Basic " + base64.StdEncoding.EncodeToString([]byte(s)) }
+	for _, c := range []struct {
+		name         string
+		token, proxy string
+		want         string
+	}{
+		{"nothing", "", "", ""},
+		{"token header, trimmed", "  " + testToken + "  ", "", testToken},
+		{"basic with any user", "", basic("anyone:" + testToken), testToken},
+		{"token header wins over basic", "from-header", basic("nw:from-basic"), "from-header"},
+		{"blank token header falls back to basic", "   ", basic("nw:" + testToken), testToken},
+		{"bearer scheme is not read", "", "Bearer " + testToken, ""},
+		{"basic with bad base64", "", "Basic !!!not-base64!!!", ""},
+		{"basic without a colon", "", basic("nocolon"), ""},
+		{"basic with an empty password", "", basic("nw:"), ""},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "http://example.com/x", nil)
+		if c.token != "" {
+			req.Header.Set(tokenHeader, c.token)
+		}
+		if c.proxy != "" {
+			req.Header.Set("Proxy-Authorization", c.proxy)
+		}
+		if got := proxyTokenFrom(req); got != c.want {
+			t.Errorf("%s: proxyTokenFrom = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestAuthorizeRefusesEmptyAndAcceptsPaddedToken(t *testing.T) {
+	app := guardedApp(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/x", nil)
+	req.Header.Set("Proxy-Authorization", proxyAuth("")) // "nw:" carries an empty password
+	if app.authorize(rec, req) || rec.Code != http.StatusProxyAuthRequired {
+		t.Errorf("an empty password: %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodConnect, "example.com:443", nil)
+	if app.authorize(rec, req) || rec.Code != http.StatusProxyAuthRequired || rec.Header().Get("Proxy-Authenticate") == "" {
+		t.Errorf("CONNECT without credentials: %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/_gw/x/", nil)
+	if app.authorize(rec, req) || rec.Code != http.StatusUnauthorized || rec.Header().Get("Proxy-Authenticate") != "" {
+		t.Errorf("a gateway request without credentials must be 401 without Proxy-Authenticate: %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/_gw/x/", nil)
+	req.Header.Set(tokenHeader, " "+testToken+" ")
+	if !app.authorize(httptest.NewRecorder(), req) {
+		t.Error("a token with surrounding spaces must pass")
+	}
+}

@@ -200,3 +200,149 @@ func TestDecodeP256PublicKeyForms(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifyBytesHexEdges(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("policy bytes")
+	sig, err := signBytesHex(key, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyBytesHex(&key.PublicKey, data, "  "+sig+"\n"); err != nil {
+		t.Fatalf("whitespace around a valid signature: %v", err)
+	}
+	for _, c := range []struct {
+		name, sig string
+		data      []byte
+		want      string
+	}{
+		{"not hex", "zz", data, "not hex"},
+		{"odd length hex", "abc", data, "not hex"},
+		{"truncated signature", sig[:len(sig)-8], data, "does not match"},
+		{"empty signature", "", data, "does not match"},
+		{"other data", sig, []byte("other bytes"), "does not match"},
+	} {
+		if err := verifyBytesHex(&key.PublicKey, c.data, c.sig); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: got %v, want an error containing %q", c.name, err, c.want)
+		}
+	}
+}
+
+func TestLoadPolicyMoreErrors(t *testing.T) {
+	dir, policy, pub := signedPack(t)
+	if _, _, _, err := loadPolicy(filepath.Join(dir, "none.json"), pub); err == nil || !strings.Contains(err.Error(), "-secrets-config") {
+		t.Errorf("missing policy file: %v", err)
+	}
+	if _, _, _, err := loadPolicy(policy, "zz-not-a-key"); err == nil || !strings.Contains(err.Error(), "-policy-pubkey:") {
+		t.Errorf("unparseable -policy-pubkey: %v", err)
+	}
+	// A correctly signed file that is not valid JSON is still refused.
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(bad, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, e := runPolicyCmd(t, "sign", "-key", filepath.Join(dir, "k.key"), bad); code != 0 {
+		t.Fatalf("sign: %d %s", code, e)
+	}
+	if _, _, _, err := loadPolicy(bad, pub); err == nil || !strings.Contains(err.Error(), "invalid JSON") {
+		t.Errorf("signed but invalid JSON: %v", err)
+	}
+}
+
+func TestParsePolicyPubKeyFileForms(t *testing.T) {
+	dir, _, pubPEM := signedPack(t)
+	want, err := parsePolicyPubKey(pubPEM)
+	if err != nil {
+		t.Fatalf("PEM file: %v", err)
+	}
+	b, err := os.ReadFile(pubPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(b)
+	hexFile := filepath.Join(dir, "k.hex")
+	if err := os.WriteFile(hexFile, []byte(hex.EncodeToString(block.Bytes)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := parsePolicyPubKey(hexFile)
+	if err != nil || !got.Equal(want) {
+		t.Errorf("hex file: %v", err)
+	}
+	// A directory is not a key file; it is read as hex text and fails.
+	if _, err := parsePolicyPubKey(dir); err == nil {
+		t.Error("a directory must not be accepted as a public key")
+	}
+}
+
+func TestWriteNewFileEdges(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f")
+	if err := writeNewFile(p, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeNewFile(p, []byte("y"), 0o600); err == nil {
+		t.Error("an existing file must not be overwritten")
+	}
+	if b, _ := os.ReadFile(p); string(b) != "x" {
+		t.Errorf("existing file changed: %q", b)
+	}
+	if err := writeNewFile(filepath.Join(t.TempDir(), "no", "dir", "f"), []byte("x"), 0o600); err == nil {
+		t.Error("a missing directory must fail")
+	}
+}
+
+func TestPolicyVerifyAndSignSignatureFileEdges(t *testing.T) {
+	dir, policy, pub := signedPack(t)
+	sigPath := policy + policySigSuffix
+	if err := os.WriteFile(sigPath, []byte("zz\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, e := runPolicyCmd(t, "verify", "-pubkey", pub, policy); code != 1 || !strings.Contains(e, "not hex") {
+		t.Errorf("a .sig that is not hex = %d %q", code, e)
+	}
+	if err := os.Remove(sigPath); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := runPolicyCmd(t, "verify", "-pubkey", pub, policy); code != 1 {
+		t.Errorf("a missing .sig = %d, want 1", code)
+	}
+	// The signature cannot be written when its path is already a directory.
+	if err := os.Mkdir(sigPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := runPolicyCmd(t, "sign", "-key", filepath.Join(dir, "k.key"), policy); code != 1 {
+		t.Errorf("sign with an unwritable .sig path = %d, want 1", code)
+	}
+}
+
+func TestPolicyAttestPinnedKey(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := newTestApp(t)
+	app.att.key = key
+	env, err := app.buildAttestation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := filepath.Join(t.TempDir(), "rep.json")
+	if err := os.WriteFile(rep, env, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, e := runPolicyCmd(t, "attest", "-pubkey", pubKeyHex(&key.PublicKey), rep); code != 0 || !strings.Contains(out, "expected key") {
+		t.Errorf("pinned to the signer = %d %q %q", code, out, e)
+	}
+	if code, _, e := runPolicyCmd(t, "attest", "-pubkey", pubKeyHex(&other.PublicKey), rep); code != 1 || !strings.Contains(e, "different key") {
+		t.Errorf("pinned to another key = %d %q", code, e)
+	}
+	if code, out, _ := runPolicyCmd(t, "attest", rep); code != 0 || !strings.Contains(out, "provided") {
+		t.Errorf("unpinned report from a provided key = %d %q", code, out)
+	}
+}
