@@ -43,6 +43,31 @@ jobs:
         run: |
           set -o pipefail
           go test -race -shuffle=on -count=1 ./... 2>&1 | tee race.txt
+      - name: Summarize race test results
+        if: always()
+        run: |
+          {
+            echo "## Race Detector + Shuffled Order"
+            if [ ! -f race.txt ]; then
+              echo "_No log generated._"
+              exit 0
+            fi
+            seed=$(grep -m1 '^-test.shuffle' race.txt || true)
+            [ -n "$seed" ] && echo "- **Shuffle seed:** \`$seed\`"
+            races=$(grep -c 'WARNING: DATA RACE' race.txt || true)
+            echo "- **Data races detected:** $races"
+            echo ""
+            echo "### Package Summary"
+            echo '```text'
+            grep -E '^(ok|FAIL|\?)\s+' race.txt || tail -n 30 race.txt
+            echo '```'
+            if grep -qE 'WARNING: DATA RACE|--- FAIL:' race.txt; then
+              echo "### Failure / Race Details"
+              echo '```text'
+              grep -n -C 8 -E 'WARNING: DATA RACE|--- FAIL:' race.txt | head -n 120
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Save the log
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -82,6 +107,29 @@ jobs:
         run: |
           set -o pipefail
           go test -count=1 -shuffle=on ./... 2>&1 | tee leak.txt
+      - name: Summarize goleak results
+        if: always()
+        run: |
+          {
+            echo "## Goroutine Leak Guard (goleak)"
+            if [ ! -f leak.txt ]; then
+              echo "_No log generated._"
+              exit 0
+            fi
+            leaks=$(grep -c 'found unexpected goroutines:' leak.txt || true)
+            echo "- **Packages with leaked goroutines:** $leaks"
+            echo ""
+            echo "### Package Summary"
+            echo '```text'
+            grep -E '^(ok|FAIL|\?)\s+' leak.txt || tail -n 30 leak.txt
+            echo '```'
+            if grep -qE 'found unexpected goroutines:|--- FAIL:' leak.txt; then
+              echo "### Leak / Failure Details"
+              echo '```text'
+              grep -n -A 25 -E 'found unexpected goroutines:|--- FAIL:' leak.txt | head -n 120
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Save the log
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -110,6 +158,21 @@ jobs:
         run: |
           set -o pipefail
           "$(go env GOPATH)/bin/nilaway" -include-pkgs="github.com/VoxNode-ux/nullwire-mcp" ./... 2>&1 | tee nilaway.txt
+      - name: Summarize nilaway findings
+        if: always()
+        run: |
+          {
+            echo "## Nil-Pointer Analysis (nilaway)"
+            if [ ! -s nilaway.txt ]; then
+              echo "✅ **0 nilability findings reported.**"
+            else
+              findings=$(grep -cE '^[^#].*:[0-9]+:[0-9]+:' nilaway.txt || true)
+              echo "⚠️ **Findings reported:** $findings"
+              echo '```text'
+              head -n 120 nilaway.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Save the report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -143,6 +206,25 @@ jobs:
             echo "=== $pkg ==="
             "$(go env GOPATH)/bin/gremlins" unleash --threshold-efficacy 70 "$pkg" 2>&1
           done | tee gremlins.txt
+      - name: Summarize gremlins mutation scores
+        if: always()
+        run: |
+          {
+            echo "## Mutation Testing Scores (gremlins — threshold 70%)"
+            if [ ! -s gremlins.txt ]; then
+              echo "_No gremlins report generated._"
+              exit 0
+            fi
+            echo '```text'
+            grep -E '^(=== |Mutation testing|Killed:|Lived:|Timed out:|Not covered:|Test efficacy:|Mutator coverage:)' gremlins.txt || tail -n 40 gremlins.txt
+            echo '```'
+            if grep -q 'LIVED' gremlins.txt; then
+              echo "### Surviving Mutants (LIVED)"
+              echo '```text'
+              grep -E 'LIVED' gremlins.txt | head -n 80
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Save the report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -194,6 +276,19 @@ jobs:
             echo "== binary =="
             ./grype file:./nullwire-mcp --fail-on high
           } 2>&1 | tee grype.txt
+      - name: Summarize grype CVE results
+        if: always()
+        run: |
+          {
+            echo "## CVE Scan (Grype — SBOM & Binary)"
+            if [ ! -s grype.txt ]; then
+              echo "_No grype output generated._"
+              exit 0
+            fi
+            echo '```text'
+            cat grype.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Save the reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -238,6 +333,32 @@ jobs:
           set -o pipefail
           npx --yes @modelcontextprotocol/inspector@2.16.0 --cli "$PWD/nw-stdio.sh" \
             --method tools/call --tool-name inspect_traffic --tool-arg limit=5 | tee inspector-call.json
+      - name: Summarize MCP Inspector output
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+
+          print("## MCP Inspector 2.16.0 Check")
+          if os.path.exists("inspector-tools.json"):
+              try:
+                  data = json.load(open("inspector-tools.json"))
+                  tools = [t.get("name", "?") for t in data.get("tools", [])]
+                  print(f"- **Exposed tools ({len(tools)}):** `{', '.join(tools)}`")
+              except Exception as e:
+                  print(f"- **tools/list parse error:** `{e}`")
+          else:
+              print("- **tools/list:** _not generated_")
+
+          if os.path.exists("inspector-call.json"):
+              raw = open("inspector-call.json").read().strip()
+              print("\n### `tools/call` (`inspect_traffic`)")
+              print("```json")
+              print(raw[:2000])
+              print("```")
+          else:
+              print("- **tools/call:** _not generated_")
+          PY
       - name: Save the output
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -283,6 +404,26 @@ jobs:
       - name: Scan for tool poisoning and prompt injection (needs the SNYK_TOKEN secret)
         if: env.SNYK_TOKEN != ''
         run: ./agent-scan scan mcp-config.json 2>&1 | tee agent-scan.txt
+      - name: Summarize agent-scan results
+        if: always()
+        run: |
+          {
+            echo "## MCP Security Scan (snyk agent-scan v0.6.11)"
+            if [ -f agent-scan-inspect.txt ]; then
+              echo "### Tool Inspection"
+              echo '```text'
+              cat agent-scan-inspect.txt
+              echo '```'
+            fi
+            if [ -f agent-scan.txt ]; then
+              echo "### Security / Poisoning Scan"
+              echo '```text'
+              cat agent-scan.txt
+              echo '```'
+            elif [ -z "$SNYK_TOKEN" ]; then
+              echo "_Full poisoning scan skipped (`SNYK_TOKEN` not configured)._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Save the reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -346,21 +487,48 @@ jobs:
             crossbario/autobahn-testsuite@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074 \
             wstest -m fuzzingclient -s /config/fuzzingclient.json
       - name: Fail on any FAILED case
+        id: check
         run: |
           python3 - <<'PY'
           import json, sys
+          from collections import Counter
+
           data = json.load(open("autobahn/reports/index.json"))
           bad, total = [], 0
+          counts = Counter()
           for agent, cases in data.items():
               for case, r in cases.items():
                   total += 1
-                  if r["behavior"] == "FAILED" or r["behaviorClose"] == "FAILED":
-                      bad.append(case)
+                  b, bc = r["behavior"], r["behaviorClose"]
+                  counts[b] += 1
+                  if b == "FAILED" or bc == "FAILED":
+                      bad.append((case, b, bc))
+
           print(f"{total} cases run, {len(bad)} failed")
-          for c in sorted(bad):
+          for c, _, _ in sorted(bad):
               print("FAILED:", c)
+
+          with open("autobahn-summary.md", "w") as out:
+              out.write("## WebSocket Conformance (Autobahn 25.10.1)\n")
+              out.write(f"- **Total cases run:** {total}\n")
+              out.write(f"- **Failed:** {len(bad)}\n")
+              for k, v in sorted(counts.items()):
+                  out.write(f"  - `{k}`: {v}\n")
+              if bad:
+                  out.write("\n### Failed Cases\n| Case | Behavior | Close Behavior |\n|---|---|---|\n")
+                  for c, b, bc in sorted(bad):
+                      out.write(f"| `{c}` | `{b}` | `{bc}` |\n")
+
           sys.exit(1 if bad else 0)
           PY
+      - name: Summarize Autobahn results
+        if: always()
+        run: |
+          if [ -f autobahn-summary.md ]; then
+            cat autobahn-summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo -e "## WebSocket Conformance (Autobahn 25.10.1)\n_Test suite did not produce `index.json`._" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Save the reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
