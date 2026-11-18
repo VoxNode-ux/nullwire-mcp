@@ -581,8 +581,8 @@ func TestMCPToolsList(t *testing.T) {
 		t.Errorf("list metadata = %v", res)
 	}
 	tools, _ := res["tools"].([]any)
-	if len(tools) != 4 {
-		t.Fatalf("got %d tools, want 4", len(tools))
+	if len(tools) != 5 {
+		t.Fatalf("got %d tools, want 5", len(tools))
 	}
 	names := map[string]map[string]any{}
 	for _, raw := range tools {
@@ -593,7 +593,7 @@ func TestMCPToolsList(t *testing.T) {
 			t.Errorf("tool %v has bad inputSchema", tool["name"])
 		}
 	}
-	for _, n := range []string{"inspect_traffic", "export_har", "export_sanitized_curl", "clear_ram_buffer"} {
+	for _, n := range []string{"inspect_traffic", "export_har", "export_sanitized_curl", "clear_ram_buffer", "export_attestation"} {
 		if names[n] == nil {
 			t.Errorf("tool %s missing", n)
 		}

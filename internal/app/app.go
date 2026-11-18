@@ -9,6 +9,7 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
+	"crypto/ecdsa"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -219,6 +220,12 @@ func loadSecretsConfig(path string) (*SecretsConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("-secrets-config %s: %v", path, err)
 	}
+	return parseSecretsConfig(path, raw)
+}
+
+// parseSecretsConfig validates the bytes of a -secrets-config file. A signed
+// policy pack is verified on these same bytes before they get here.
+func parseSecretsConfig(path string, raw []byte) (*SecretsConfig, error) {
 	var c SecretsConfig
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil, fmt.Errorf("-secrets-config %s: invalid JSON: %v", path, err)
@@ -1363,13 +1370,22 @@ type App struct {
 	allowUninspectable  bool // forward request bodies whose Content-Encoding cannot be decoded
 	maxBody             int  // -max-body: stored body size in bytes; 0 means the defaults
 	wsDeflate           bool // -ws-deflate: keep permessage-deflate and decode it for capture
+	listener            string // "" for the TCP loopback listener, "unix" for -listen
+	sockPath            string // the -listen socket path, for the status bar
+	tokenOn             bool   // -proxy-token: every request must carry the token
+	tokenSum            [sha256.Size]byte
+	att                 attestInfo // facts export_attestation reports
 	barMu               sync.Mutex
 	stdoutMu            sync.Mutex
 }
 
 func (a *App) drawBar() {
-	fmt.Fprintf(os.Stderr, "\r\033[K⚡ [NullWire-MCP] Proxy 127.0.0.1:%d | RAM Ring: %d/%d | Scrubbed: %d Tokens, %d Cookies, %d IPs | Disk: 0B",
-		a.port, a.ring.Len(), ringCapacity, a.scrub.Tokens.Load(), a.scrub.Cookies.Load(), a.scrub.IPs.Load())
+	where := fmt.Sprintf("127.0.0.1:%d", a.port)
+	if a.listener == "unix" {
+		where = "unix socket"
+	}
+	fmt.Fprintf(os.Stderr, "\r\033[K⚡ [NullWire-MCP] Proxy %s | RAM Ring: %d/%d | Scrubbed: %d Tokens, %d Cookies, %d IPs | Disk: 0B",
+		where, a.ring.Len(), ringCapacity, a.scrub.Tokens.Load(), a.scrub.Cookies.Load(), a.scrub.IPs.Load())
 }
 func (a *App) Bar() { a.barMu.Lock(); defer a.barMu.Unlock(); a.drawBar() }
 func (a *App) Logf(format string, args ...any) { a.barMu.Lock(); defer a.barMu.Unlock(); fmt.Fprintf(os.Stderr, "\r\033[K"+format+"\n", args...); a.drawBar() }
@@ -1656,6 +1672,9 @@ func (a *App) upgradeTransport() *http.Transport {
 
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	if !a.authorize(w, r) {
+		return
+	}
 	if r.Method == http.MethodConnect {
 		a.handleConnect(w, r, start)
 		return
@@ -2598,6 +2617,10 @@ func toolDefinitions() []any {
 			"name": "clear_ram_buffer", "description": "Wipes all 50 slots and resets counters.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		},
+		map[string]any{
+			"name": "export_attestation", "description": "Returns a signed local attestation (ECDSA P-256): counts, policy SHA-256, active presets and a control summary. It holds no URLs, bodies or redaction tags.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		},
 	}
 }
 
@@ -2811,6 +2834,8 @@ func (a *App) dispatchTo(req rpcRequest) *rpcResponse {
 			result = a.toolExportCurl(p.Arguments)
 		case "clear_ram_buffer":
 			result = a.toolClear()
+		case "export_attestation":
+			result = a.toolAttestation()
 		default:
 			return &rpcResponse{ID: id, Error: &rpcError{Code: -32602, Message: "unknown tool"}}
 		}
@@ -2913,6 +2938,9 @@ func Main() {
 	if len(os.Args) > 1 && os.Args[1] == "install" {
 		os.Exit(install.Run(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "policy" {
+		os.Exit(RunPolicy(os.Args[2:], os.Stdout, os.Stderr))
+	}
 
 	port := flag.Int("port", 8080, "TCP port for the diagnostic proxy (always bound to 127.0.0.1)")
 	target := flag.String("target", "", "upstream base URL(s)")
@@ -2928,6 +2956,11 @@ func Main() {
 	allowUninspectable := flag.Bool("allow-uninspectable", false, "forward request bodies whose Content-Encoding (br, zstd, ...) cannot be inspected; by default they are refused with 415")
 	maxBodySpec := flag.String("max-body", "", "stored body size per request/response, e.g. 1m (default 32 KiB request / 256 KiB response; at most 2m). Secrets are scrubbed before the cut")
 	wsDeflate := flag.Bool("ws-deflate", false, "keep WebSocket permessage-deflate and decode it for capture (default: drop the offer so frames stay readable)")
+	policyPubkey := flag.String("policy-pubkey", "", "enterprise mode: ECDSA P-256 public key (PEM file, hex file or hex text) that must verify <secrets-config>.sig; also refuses -allow-uninspectable")
+	attestOut := flag.String("attest-out", "", "write the signed attestation report to this file when the server exits")
+	attestKey := flag.String("attest-key", "", "PEM ECDSA P-256 key that signs attestation reports (default: a fresh key per run)")
+	proxyToken := flag.String("proxy-token", "", "require this token on every proxy request (Proxy-Authorization password, or "+tokenHeader+"); \"auto\" makes one and prints it; also read from "+tokenEnv)
+	listen := flag.String("listen", "", "opt-in: listen on a unix socket instead of TCP, as unix:///absolute/path.sock (mode 0600; Linux and macOS)")
 	flag.Parse()
 
 	if *port < 0 || *port > 65535 {
@@ -2937,7 +2970,10 @@ func Main() {
 	if err != nil {
 		fatalf("nullwire-mcp: %v", err)
 	}
-	cfg, err := loadSecretsConfig(*secretsConfig)
+	if err := policyLockError(*policyPubkey != "", *allowUninspectable); err != nil {
+		fatalf("nullwire-mcp: %v", err)
+	}
+	cfg, polSHA, polSigned, err := loadPolicy(*secretsConfig, *policyPubkey)
 	if err != nil {
 		fatalf("nullwire-mcp: %v", err)
 	}
@@ -2947,7 +2983,8 @@ func Main() {
 		}
 	}
 	cfg.Presets = append(cfg.Presets, splitPresetFlag(*presetSpec)...)
-	if _, err := normalizePresets(cfg.Presets); err != nil {
+	activePresets, err := normalizePresets(cfg.Presets)
+	if err != nil {
 		fatalf("nullwire-mcp: -preset: %v", err)
 	}
 	egress, err := newEgressPolicy(cfg.AllowedUpstreamHosts, cfg.BlockedUpstreamHosts)
@@ -2957,6 +2994,29 @@ func Main() {
 	disabled, err := disabledToolSet(*disableTools)
 	if err != nil {
 		fatalf("nullwire-mcp: %v", err)
+	}
+	tok, tokGenerated := *proxyToken, false
+	envTok := os.Getenv(tokenEnv)
+	_ = os.Unsetenv(tokenEnv) // keep it out of any process this one starts
+	if tok == "" {
+		tok = envTok
+	}
+	switch {
+	case tok == "auto":
+		if tok, err = newProxyToken(); err != nil {
+			fatalf("nullwire-mcp: cannot make a proxy token: %v", err)
+		}
+		tokGenerated = true
+	case tok != "":
+		if err := validProxyToken(tok); err != nil {
+			fatalf("nullwire-mcp: %v", err)
+		}
+	}
+	var attestSigningKey *ecdsa.PrivateKey
+	if *attestKey != "" {
+		if attestSigningKey, err = loadP256PrivateKeyFile(*attestKey); err != nil {
+			fatalf("nullwire-mcp: -attest-key: %v", err)
+		}
 	}
 	scrub, err := NewScrubberWithConfig(cfg)
 	if err != nil {
@@ -2994,6 +3054,12 @@ func Main() {
 		ring: NewRingBuffer(), scrub: scrub, egress: egress, disabledTools: disabled, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable, maxBody: maxBody, wsDeflate: *wsDeflate,
 		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 32, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true},
 	}
+	app.setProxyToken(tok)
+	app.att = attestInfo{
+		started: time.Now().UTC(), policySHA: polSHA, policySigned: polSigned, presets: activePresets,
+		egressAllow: len(cfg.AllowedUpstreamHosts), egressBlock: len(cfg.BlockedUpstreamHosts),
+		out: *attestOut, key: attestSigningKey,
+	}
 	if *target != "" {
 		def, named, err := parseTargets(*target)
 		if err != nil {
@@ -3015,16 +3081,37 @@ func Main() {
 		app.gwMap = gw
 	}
 
-	ln, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", *port))
-	if err != nil {
-		fatalf("nullwire-mcp: cannot listen: %v", err)
+	var ln net.Listener
+	sockPath := ""
+	if *listen != "" {
+		if sockPath, err = parseListen(*listen); err != nil {
+			fatalf("nullwire-mcp: %v", err)
+		}
+		if ln, err = listenUnix(sockPath); err != nil {
+			fatalf("nullwire-mcp: %v", err)
+		}
+		app.listener = "unix"
+		app.sockPath = sockPath
+	} else {
+		if ln, err = net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", *port)); err != nil {
+			fatalf("nullwire-mcp: cannot listen: %v", err)
+		}
+		tcpAddr, ok := ln.Addr().(*net.TCPAddr)
+		if !ok || !tcpAddr.IP.IsLoopback() {
+			ln.Close()
+			fatalf("nullwire-mcp: refusing to run on non-loopback")
+		}
+		app.port = tcpAddr.Port
 	}
-	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
-	if !ok || !tcpAddr.IP.IsLoopback() {
-		ln.Close()
-		fatalf("nullwire-mcp: refusing to run on non-loopback")
+	// finish writes the -attest-out report and removes the unix socket file.
+	finish := func() {
+		if err := app.writeAttestFile(); err != nil {
+			app.Logf("cannot write -attest-out: %v", err)
+		}
+		if sockPath != "" {
+			_ = os.Remove(sockPath)
+		}
 	}
-	app.port = tcpAddr.Port
 
 	srv := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, Protocols: serverProtocols()}
 	go func() {
@@ -3038,6 +3125,7 @@ func Main() {
 	go func() {
 		<-sigs
 		app.Logf("signal received; wiping RAM")
+		finish()
 		app.ring.Clear()
 		app.scrub.taint.clear()
 		_ = srv.Close()
@@ -3051,7 +3139,19 @@ func Main() {
 	if caSource != "" {
 		app.Logf("TLS roots: %s", caSource)
 	}
-	app.Logf("MCP stdio server ready; proxy listening on 127.0.0.1:%d", app.port)
+	if sockPath != "" {
+		app.Logf("MCP stdio server ready; proxy listening on unix socket %s (mode 600)", sockPath)
+	} else {
+		app.Logf("MCP stdio server ready; proxy listening on 127.0.0.1:%d", app.port)
+	}
+	switch {
+	case tok != "" && tokGenerated && sockPath == "":
+		app.Logf("proxy token required. Use HTTP_PROXY=http://nw:%s@127.0.0.1:%d (or send the header %s: %s)", tok, app.port, tokenHeader, tok)
+	case tok != "" && tokGenerated:
+		app.Logf("proxy token required. Send Proxy-Authorization (any user, password %s) or the header %s: %s", tok, tokenHeader, tok)
+	case tok != "":
+		app.Logf("proxy token required (Proxy-Authorization password, or the header %s)", tokenHeader)
+	}
 	for _, n := range app.gatewayNames() {
 		if u := app.gwMap[n]; u != nil {
 			app.Logf("gateway route %s/%s/ -> %s", gwBase, n, u.Host)
@@ -3071,6 +3171,7 @@ func Main() {
 		app.Logf("stdin error: %v", err)
 	}
 	app.Logf("stdin closed; wiping RAM")
+	finish()
 	app.ring.Clear()
 	app.scrub.taint.clear()
 	_ = srv.Close()
