@@ -1377,6 +1377,21 @@ type App struct {
 	att                 attestInfo // facts export_attestation reports
 	barMu               sync.Mutex
 	stdoutMu            sync.Mutex
+	stdout, stderr      io.Writer // nil means os.Stdout / os.Stderr (run() injects its own)
+}
+
+func (a *App) outW() io.Writer {
+	if a.stdout != nil {
+		return a.stdout
+	}
+	return os.Stdout
+}
+
+func (a *App) errW() io.Writer {
+	if a.stderr != nil {
+		return a.stderr
+	}
+	return os.Stderr
 }
 
 func (a *App) drawBar() {
@@ -1384,11 +1399,11 @@ func (a *App) drawBar() {
 	if a.listener == "unix" {
 		where = "unix socket"
 	}
-	fmt.Fprintf(os.Stderr, "\r\033[K⚡ [NullWire-MCP] Proxy %s | RAM Ring: %d/%d | Scrubbed: %d Tokens, %d Cookies, %d IPs | Disk: 0B",
+	fmt.Fprintf(a.errW(), "\r\033[K⚡ [NullWire-MCP] Proxy %s | RAM Ring: %d/%d | Scrubbed: %d Tokens, %d Cookies, %d IPs | Disk: 0B",
 		where, a.ring.Len(), ringCapacity, a.scrub.Tokens.Load(), a.scrub.Cookies.Load(), a.scrub.IPs.Load())
 }
 func (a *App) Bar() { a.barMu.Lock(); defer a.barMu.Unlock(); a.drawBar() }
-func (a *App) Logf(format string, args ...any) { a.barMu.Lock(); defer a.barMu.Unlock(); fmt.Fprintf(os.Stderr, "\r\033[K"+format+"\n", args...); a.drawBar() }
+func (a *App) Logf(format string, args ...any) { a.barMu.Lock(); defer a.barMu.Unlock(); fmt.Fprintf(a.errW(), "\r\033[K"+format+"\n", args...); a.drawBar() }
 
 type capBuffer struct {
 	mu  sync.Mutex
@@ -2550,7 +2565,7 @@ func (a *App) writeFrame(resp rpcResponse) {
 	}
 	a.stdoutMu.Lock()
 	defer a.stdoutMu.Unlock()
-	_, _ = os.Stdout.Write([]byte(line + "\n"))
+	_, _ = a.outW().Write([]byte(line + "\n"))
 }
 
 func (a *App) writeBatch(resps []rpcResponse) {
@@ -2563,7 +2578,7 @@ func (a *App) writeBatch(resps []rpcResponse) {
 	}
 	a.stdoutMu.Lock()
 	defer a.stdoutMu.Unlock()
-	_, _ = os.Stdout.Write([]byte(line + "\n"))
+	_, _ = a.outW().Write([]byte(line + "\n"))
 }
 
 func (a *App) writeError(id json.RawMessage, code int, msg string) {
@@ -2922,11 +2937,6 @@ func (a *App) handleBatch(line []byte) {
 	a.writeBatch(responses)
 }
 
-func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "\r\033[K"+format+"\n", args...)
-	os.Exit(1)
-}
-
 // Main runs the nullwire-mcp command line and returns when it is done.
 func Main() {
 	if len(os.Args) > 1 && os.Args[1] == "scan" {
@@ -2942,40 +2952,64 @@ func Main() {
 		os.Exit(RunPolicy(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
-	port := flag.Int("port", 8080, "TCP port for the diagnostic proxy (always bound to 127.0.0.1)")
-	target := flag.String("target", "", "upstream base URL(s)")
-	targetMap := flag.String("target-map", "", "fixed routes name=URL,... reached as /_gw/<name>/ (an explicit allowlist, for clients that cannot send X-Target-URL)")
-	cacert := flag.String("cacert", "", "extra CA certificates")
-	dnsSpec := flag.String("dns", "auto", "upstream DNS")
-	secretsConfig := flag.String("secrets-config", "", "path to -secrets-config JSON")
-	clientCert := flag.String("client-cert", "", "PEM client certificate presented to upstream servers (mTLS); needs -client-key")
-	clientKey := flag.String("client-key", "", "PEM private key for -client-cert")
-	scrubHeaders := flag.String("scrub-headers", "", "extra sensitive headers")
-	disableTools := flag.String("disable-tools", "", "comma-separated MCP tools to turn off, e.g. export_sanitized_curl,export_har (they are hidden from tools/list and refused by tools/call)")
-	presetSpec := flag.String("preset", "", "comma-separated compliance redaction presets: pci-dss, hipaa, gdpr, all (off by default)")
-	allowUninspectable := flag.Bool("allow-uninspectable", false, "forward request bodies whose Content-Encoding (br, zstd, ...) cannot be inspected; by default they are refused with 415")
-	maxBodySpec := flag.String("max-body", "", "stored body size per request/response, e.g. 1m (default 32 KiB request / 256 KiB response; at most 2m). Secrets are scrubbed before the cut")
-	wsDeflate := flag.Bool("ws-deflate", false, "keep WebSocket permessage-deflate and decode it for capture (default: drop the offer so frames stay readable)")
-	policyPubkey := flag.String("policy-pubkey", "", "enterprise mode: ECDSA P-256 public key (PEM file, hex file or hex text) that must verify <secrets-config>.sig; also refuses -allow-uninspectable")
-	attestOut := flag.String("attest-out", "", "write the signed attestation report to this file when the server exits")
-	attestKey := flag.String("attest-key", "", "PEM ECDSA P-256 key that signs attestation reports (default: a fresh key per run)")
-	proxyToken := flag.String("proxy-token", "", "require this token on every proxy request (Proxy-Authorization password, or "+tokenHeader+"); \"auto\" makes one and prints it; also read from "+tokenEnv)
-	listen := flag.String("listen", "", "opt-in: listen on a unix socket instead of TCP, as unix:///absolute/path.sock (mode 0600; Linux and macOS)")
-	flag.Parse()
+	err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+	switch {
+	case err == nil:
+	case errors.Is(err, flag.ErrHelp):
+	case errors.As(err, new(flagParseError)):
+		os.Exit(2) // the flag set already printed the message
+	default:
+		fmt.Fprintf(os.Stderr, "\r\033[K%v\n", err)
+		os.Exit(1)
+	}
+}
+
+// flagParseError marks a command-line parse failure (already reported by the flag set).
+type flagParseError struct{ error }
+
+func (e flagParseError) Unwrap() error { return e.error }
+
+// run is the proxy + MCP stdio server behind Main. It returns when stdin
+// reaches EOF (nil) or when startup validation fails (a non-nil error).
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("nullwire-mcp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	port := fs.Int("port", 8080, "TCP port for the diagnostic proxy (always bound to 127.0.0.1)")
+	target := fs.String("target", "", "upstream base URL(s)")
+	targetMap := fs.String("target-map", "", "fixed routes name=URL,... reached as /_gw/<name>/ (an explicit allowlist, for clients that cannot send X-Target-URL)")
+	cacert := fs.String("cacert", "", "extra CA certificates")
+	dnsSpec := fs.String("dns", "auto", "upstream DNS")
+	secretsConfig := fs.String("secrets-config", "", "path to -secrets-config JSON")
+	clientCert := fs.String("client-cert", "", "PEM client certificate presented to upstream servers (mTLS); needs -client-key")
+	clientKey := fs.String("client-key", "", "PEM private key for -client-cert")
+	scrubHeaders := fs.String("scrub-headers", "", "extra sensitive headers")
+	disableTools := fs.String("disable-tools", "", "comma-separated MCP tools to turn off, e.g. export_sanitized_curl,export_har (they are hidden from tools/list and refused by tools/call)")
+	presetSpec := fs.String("preset", "", "comma-separated compliance redaction presets: pci-dss, hipaa, gdpr, all (off by default)")
+	allowUninspectable := fs.Bool("allow-uninspectable", false, "forward request bodies whose Content-Encoding (br, zstd, ...) cannot be inspected; by default they are refused with 415")
+	maxBodySpec := fs.String("max-body", "", "stored body size per request/response, e.g. 1m (default 32 KiB request / 256 KiB response; at most 2m). Secrets are scrubbed before the cut")
+	wsDeflate := fs.Bool("ws-deflate", false, "keep WebSocket permessage-deflate and decode it for capture (default: drop the offer so frames stay readable)")
+	policyPubkey := fs.String("policy-pubkey", "", "enterprise mode: ECDSA P-256 public key (PEM file, hex file or hex text) that must verify <secrets-config>.sig; also refuses -allow-uninspectable")
+	attestOut := fs.String("attest-out", "", "write the signed attestation report to this file when the server exits")
+	attestKey := fs.String("attest-key", "", "PEM ECDSA P-256 key that signs attestation reports (default: a fresh key per run)")
+	proxyToken := fs.String("proxy-token", "", "require this token on every proxy request (Proxy-Authorization password, or "+tokenHeader+"); \"auto\" makes one and prints it; also read from "+tokenEnv)
+	listen := fs.String("listen", "", "opt-in: listen on a unix socket instead of TCP, as unix:///absolute/path.sock (mode 0600; Linux and macOS)")
+	if err := fs.Parse(args); err != nil {
+		return flagParseError{err}
+	}
 
 	if *port < 0 || *port > 65535 {
-		fatalf("nullwire-mcp: -port must be between 0 and 65535")
+		return errors.New("nullwire-mcp: -port must be between 0 and 65535")
 	}
 	maxBody, err := parseMaxBody(*maxBodySpec)
 	if err != nil {
-		fatalf("nullwire-mcp: %v", err)
+		return fmt.Errorf("nullwire-mcp: %v", err)
 	}
 	if err := policyLockError(*policyPubkey != "", *allowUninspectable); err != nil {
-		fatalf("nullwire-mcp: %v", err)
+		return fmt.Errorf("nullwire-mcp: %v", err)
 	}
 	cfg, polSHA, polSigned, err := loadPolicy(*secretsConfig, *policyPubkey)
 	if err != nil {
-		fatalf("nullwire-mcp: %v", err)
+		return fmt.Errorf("nullwire-mcp: %v", err)
 	}
 	for _, h := range strings.Split(*scrubHeaders, ",") {
 		if h = strings.TrimSpace(h); h != "" {
@@ -2985,15 +3019,15 @@ func Main() {
 	cfg.Presets = append(cfg.Presets, splitPresetFlag(*presetSpec)...)
 	activePresets, err := normalizePresets(cfg.Presets)
 	if err != nil {
-		fatalf("nullwire-mcp: -preset: %v", err)
+		return fmt.Errorf("nullwire-mcp: -preset: %v", err)
 	}
 	egress, err := newEgressPolicy(cfg.AllowedUpstreamHosts, cfg.BlockedUpstreamHosts)
 	if err != nil {
-		fatalf("nullwire-mcp: %v", err)
+		return fmt.Errorf("nullwire-mcp: %v", err)
 	}
 	disabled, err := disabledToolSet(*disableTools)
 	if err != nil {
-		fatalf("nullwire-mcp: %v", err)
+		return fmt.Errorf("nullwire-mcp: %v", err)
 	}
 	tok, tokGenerated := *proxyToken, false
 	envTok := os.Getenv(tokenEnv)
@@ -3004,23 +3038,23 @@ func Main() {
 	switch {
 	case tok == "auto":
 		if tok, err = newProxyToken(); err != nil {
-			fatalf("nullwire-mcp: cannot make a proxy token: %v", err)
+			return fmt.Errorf("nullwire-mcp: cannot make a proxy token: %v", err)
 		}
 		tokGenerated = true
 	case tok != "":
 		if err := validProxyToken(tok); err != nil {
-			fatalf("nullwire-mcp: %v", err)
+			return fmt.Errorf("nullwire-mcp: %v", err)
 		}
 	}
 	var attestSigningKey *ecdsa.PrivateKey
 	if *attestKey != "" {
 		if attestSigningKey, err = loadP256PrivateKeyFile(*attestKey); err != nil {
-			fatalf("nullwire-mcp: -attest-key: %v", err)
+			return fmt.Errorf("nullwire-mcp: -attest-key: %v", err)
 		}
 	}
 	scrub, err := NewScrubberWithConfig(cfg)
 	if err != nil {
-		fatalf("nullwire-mcp: %v", err)
+		return fmt.Errorf("nullwire-mcp: %v", err)
 	}
 
 	var dnsServers []string
@@ -3035,18 +3069,18 @@ func Main() {
 	default:
 		dnsServers, err = parseDNSServers(*dnsSpec)
 		if err != nil {
-			fatalf("nullwire-mcp: %v", err)
+			return fmt.Errorf("nullwire-mcp: %v", err)
 		}
 	}
 	dialer := newDialer(dnsServers, egress)
 
 	rootCAs, caSource, err := buildRootCAs(*cacert, onTermux())
 	if err != nil {
-		fatalf("nullwire-mcp: %v", err)
+		return fmt.Errorf("nullwire-mcp: %v", err)
 	}
 	clientCrt, err := buildClientCert(*clientCert, *clientKey)
 	if err != nil {
-		fatalf("nullwire-mcp: %v", err)
+		return fmt.Errorf("nullwire-mcp: %v", err)
 	}
 	tlsCfg := buildTLSConfig(rootCAs, clientCrt)
 
@@ -3054,6 +3088,7 @@ func Main() {
 		ring: NewRingBuffer(), scrub: scrub, egress: egress, disabledTools: disabled, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable, maxBody: maxBody, wsDeflate: *wsDeflate,
 		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 32, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true},
 	}
+	app.stdout, app.stderr = stdout, stderr
 	app.setProxyToken(tok)
 	app.att = attestInfo{
 		started: time.Now().UTC(), policySHA: polSHA, policySigned: polSigned, presets: activePresets,
@@ -3063,7 +3098,7 @@ func Main() {
 	if *target != "" {
 		def, named, err := parseTargets(*target)
 		if err != nil {
-			fatalf("nullwire-mcp: -target: %v", err)
+			return fmt.Errorf("nullwire-mcp: -target: %v", err)
 		}
 		app.target = def
 		app.upstreams = named
@@ -3071,11 +3106,11 @@ func Main() {
 	if *targetMap != "" {
 		gw, err := parseTargetMap(*targetMap)
 		if err != nil {
-			fatalf("nullwire-mcp: -target-map: %v", err)
+			return fmt.Errorf("nullwire-mcp: -target-map: %v", err)
 		}
 		for n := range gw {
 			if _, dup := app.upstreams[n]; dup {
-				fatalf("nullwire-mcp: -target-map: name %q is also used in -target", n)
+				return fmt.Errorf("nullwire-mcp: -target-map: name %q is also used in -target", n)
 			}
 		}
 		app.gwMap = gw
@@ -3085,21 +3120,21 @@ func Main() {
 	sockPath := ""
 	if *listen != "" {
 		if sockPath, err = parseListen(*listen); err != nil {
-			fatalf("nullwire-mcp: %v", err)
+			return fmt.Errorf("nullwire-mcp: %v", err)
 		}
 		if ln, err = listenUnix(sockPath); err != nil {
-			fatalf("nullwire-mcp: %v", err)
+			return fmt.Errorf("nullwire-mcp: %v", err)
 		}
 		app.listener = "unix"
 		app.sockPath = sockPath
 	} else {
 		if ln, err = net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", *port)); err != nil {
-			fatalf("nullwire-mcp: cannot listen: %v", err)
+			return fmt.Errorf("nullwire-mcp: cannot listen: %v", err)
 		}
 		tcpAddr, ok := ln.Addr().(*net.TCPAddr)
 		if !ok || !tcpAddr.IP.IsLoopback() {
 			ln.Close()
-			fatalf("nullwire-mcp: refusing to run on non-loopback")
+			return errors.New("nullwire-mcp: refusing to run on non-loopback")
 		}
 		app.port = tcpAddr.Port
 	}
@@ -3122,8 +3157,15 @@ func Main() {
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	done := make(chan struct{})
+	defer signal.Stop(sigs)
+	defer close(done)
 	go func() {
-		<-sigs
+		select {
+		case <-sigs:
+		case <-done:
+			return
+		}
 		app.Logf("signal received; wiping RAM")
 		finish()
 		app.ring.Clear()
@@ -3158,7 +3200,7 @@ func Main() {
 		}
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
+	scanner := bufio.NewScanner(stdin)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -3175,4 +3217,5 @@ func Main() {
 	app.ring.Clear()
 	app.scrub.taint.clear()
 	_ = srv.Close()
+	return nil
 }
