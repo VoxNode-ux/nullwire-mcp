@@ -1,14 +1,20 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // runCLIApp drives the whole command line in-process: flags are parsed,
@@ -203,5 +209,222 @@ func TestRunWithSignedPolicy(t *testing.T) {
 	}
 	if _, _, err := runCLIApp(t, "", "-port=0", "-secrets-config="+policy, "-policy-pubkey="+pub); err == nil {
 		t.Fatal("a tampered policy must be refused at startup")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// run(): remaining startup paths
+// ---------------------------------------------------------------------------
+
+func TestRcovRunDNSModes(t *testing.T) {
+	if _, _, err := runCLIApp(t, "", "-port=0", "-dns=system"); err != nil {
+		t.Fatalf("-dns system: %v", err)
+	}
+	if _, _, err := runCLIApp(t, "", "-port=0", "-dns=1.1.1.1:53"); err != nil {
+		t.Fatalf("-dns 1.1.1.1:53: %v", err)
+	}
+	// auto on Termux logs the notice and switches to the Android resolvers.
+	t.Setenv("TERMUX_VERSION", "1")
+	_, errOut, err := runCLIApp(t, "", "-port=0", "-dns=auto")
+	if err != nil || !strings.Contains(errOut, "Termux/Android detected") {
+		t.Fatalf("-dns auto on Termux: err=%v\n%s", err, errOut)
+	}
+}
+
+func TestRcovRunTargetMapNameCollidesWithNamedTarget(t *testing.T) {
+	_, _, err := runCLIApp(t, "", "-port=0",
+		"-target=upstream=http://example.com", "-target-map=upstream=http://example.org")
+	if err == nil || !strings.Contains(err.Error(), `name "upstream" is also used in -target`) {
+		t.Fatalf("err = %v, want the name collision", err)
+	}
+}
+
+func TestRcovRunProxyTokenSources(t *testing.T) {
+	// "auto" taken from the environment makes a fresh token and prints it.
+	t.Setenv(tokenEnv, "auto")
+	var out, errb bytes.Buffer
+	if err := run([]string{"-port=0"}, strings.NewReader(""), &out, &errb); err != nil {
+		t.Fatalf("env auto: %v", err)
+	}
+	if !strings.Contains(errb.String(), "HTTP_PROXY=http://nw:") {
+		t.Errorf("a generated token must be printed:\n%s", errb.String())
+	}
+	if os.Getenv(tokenEnv) != "" {
+		t.Errorf("%s must be unset after startup", tokenEnv)
+	}
+
+	// A bad literal on the command line is refused before anything starts.
+	_, _, err := runCLIApp(t, "", "-port=0", "-proxy-token=bad token with spaces!")
+	if err == nil || !strings.Contains(err.Error(), "may only hold") {
+		t.Fatalf("bad literal token: %v", err)
+	}
+
+	// auto + unix socket prints the socket form of the hint.
+	if runtime.GOOS == "windows" {
+		return
+	}
+	dir, derr := os.MkdirTemp("", "nw")
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	_, errOut, err := runCLIApp(t, "", "-listen=unix://"+filepath.Join(dir, "a.sock"), "-proxy-token=auto")
+	if err != nil || !strings.Contains(errOut, "Send Proxy-Authorization (any user, password ") {
+		t.Fatalf("auto + unix: err=%v\n%s", err, errOut)
+	}
+}
+
+func TestRcovRunAttestOutIsADirectory(t *testing.T) {
+	base := t.TempDir()
+	outDir := filepath.Join(base, "report")
+	if err := os.Mkdir(outDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut, err := runCLIApp(t, "", "-port=0", "-attest-out="+outDir)
+	if err != nil {
+		t.Fatalf("a failed report write must not fail the run: %v", err)
+	}
+	if !strings.Contains(errOut, "cannot write -attest-out") {
+		t.Errorf("the write failure must be logged:\n%s", errOut)
+	}
+}
+
+func TestRcovRunCACertAndClientCertFailures(t *testing.T) {
+	dir := t.TempDir()
+	junkDir := filepath.Join(dir, "cas")
+	if err := os.Mkdir(junkDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(junkDir, "junk.txt"), []byte("not pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runCLIApp(t, "", "-port=0", "-cacert="+junkDir); err == nil || !strings.Contains(err.Error(), "no PEM certificates") {
+		t.Fatalf("-cacert dir with only junk: %v", err)
+	}
+	crt := filepath.Join(dir, "c.pem")
+	key := filepath.Join(dir, "k.pem")
+	for _, p := range []string{crt, key} {
+		if err := os.WriteFile(p, []byte("junk"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := runCLIApp(t, "", "-port=0", "-client-cert="+crt, "-client-key="+key); err == nil || !strings.Contains(err.Error(), "client certificate") {
+		t.Fatalf("junk client cert/key: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// safeDispatch panic recovery, batch edges, marshalJSON
+// ---------------------------------------------------------------------------
+
+func TestRcovSafeDispatchRecoversPanic(t *testing.T) {
+	var errb, out bytes.Buffer
+	app := newTestApp(t)
+	app.stderr, app.stdout = &errb, &out
+	app.ring = nil // clear_ram_buffer now dereferences nil and panics
+
+	req := rpcRequest{ID: json.RawMessage(`9`), Method: "tools/call", Params: json.RawMessage(`{"name":"clear_ram_buffer"}`)}
+	resp := app.safeDispatch(req)
+	if resp == nil || resp.Error == nil || resp.Error.Code != -32603 || string(resp.ID) != "9" {
+		t.Fatalf("recovered response = %+v", resp)
+	}
+	if !strings.Contains(errb.String(), "panic:") {
+		t.Errorf("the panic must be logged:\n%s", errb.String())
+	}
+
+	// Through the line handler the client still gets a JSON-RPC error frame.
+	app.handleLine([]byte(`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"clear_ram_buffer"}}`))
+	if !strings.Contains(out.String(), `"id":10`) || !strings.Contains(out.String(), "-32603") {
+		t.Errorf("frame = %q", out.String())
+	}
+}
+
+func TestRcovHandleBatchEdges(t *testing.T) {
+	var out bytes.Buffer
+	app := newTestApp(t)
+	app.stdout = &out
+
+	app.handleBatch([]byte(`{"not":"an array"}`)) // non-array
+	if !strings.Contains(out.String(), "-32700") {
+		t.Errorf("non-array batch: %q", out.String())
+	}
+	out.Reset()
+	app.handleBatch([]byte(`["x", 1]`)) // entries that are not objects
+	if n := strings.Count(out.String(), "-32600"); n != 2 {
+		t.Errorf("want two invalid-request entries, got %d: %q", n, out.String())
+	}
+}
+
+func TestRcovMarshalJSON(t *testing.T) {
+	s, err := marshalJSON(map[string]any{"k": "<&>"}, true)
+	if err != nil || s != "{\n  \"k\": \"<&>\"\n}" {
+		t.Errorf("indented, unescaped = %q, %v", s, err)
+	}
+	if s, err = marshalJSON(make(chan int), false); err == nil || s != "" {
+		t.Errorf("an unencodable value must error: %q, %v", s, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ServeHTTP / handleConnect / handleUpgrade failure branches
+// ---------------------------------------------------------------------------
+
+func TestRcovServeHTTPInvalidXTargetURL(t *testing.T) {
+	app := newTestApp(t)
+	for _, bad := range []string{"ftp://example.test", "http://"} {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, covReq("GET", "/x", "127.0.0.1:8080", "X-Target-URL", bad))
+		if rec.Code < 400 || rec.Code >= 500 {
+			t.Errorf("X-Target-URL %q: status %d, want a 4xx", bad, rec.Code)
+		}
+	}
+}
+
+// rcovHijackRec hands out one end of a pipe as the hijacked client connection.
+type rcovHijackRec struct {
+	*httptest.ResponseRecorder
+	conn net.Conn
+}
+
+func (h rcovHijackRec) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return h.conn, bufio.NewReadWriter(bufio.NewReader(h.conn), bufio.NewWriter(h.conn)), nil
+}
+
+// rcovDeadClient returns a client connection whose peer is already gone, so
+// the first write to it fails.
+func rcovDeadClient(t *testing.T) net.Conn {
+	t.Helper()
+	c1, c2 := net.Pipe()
+	_ = c2.Close()
+	t.Cleanup(func() { _ = c1.Close() })
+	return c1
+}
+
+func TestRcovConnectClientWriteFails(t *testing.T) {
+	app := newTestApp(t)
+	addr := startEchoTCP(t)
+	app.handleConnect(rcovHijackRec{httptest.NewRecorder(), rcovDeadClient(t)}, covConnect(addr), time.Now())
+	if n := app.tunnels.Load(); n != 0 {
+		t.Errorf("tunnel slot leaked after a failed 200 write: %d", n)
+	}
+}
+
+func TestRcovUpgradeClientWriteFails(t *testing.T) {
+	app := newTestApp(t)
+	u1, u2 := net.Pipe()
+	t.Cleanup(func() { _ = u1.Close(); _ = u2.Close() })
+	resp := &http.Response{
+		StatusCode: http.StatusSwitchingProtocols,
+		Header: http.Header{
+			"Upgrade":        []string{"foo"},
+			"Connection":     []string{"Upgrade"},
+			"Content-Length": []string{"0"}, // skipped when the 101 head is built
+		},
+		Body: u1,
+	}
+	flow := rawFlow{started: time.Now(), method: "GET", url: "http://x.test/up", reqHeaders: http.Header{}}
+	app.handleUpgrade(rcovHijackRec{httptest.NewRecorder(), rcovDeadClient(t)}, resp, flow, false)
+	if n := app.tunnels.Load(); n != 0 {
+		t.Errorf("tunnel slot leaked after a failed 101 write: %d", n)
 	}
 }

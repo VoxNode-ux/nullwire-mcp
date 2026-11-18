@@ -536,3 +536,45 @@ func TestUnwrapEscapedQuotePatterns(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// coverage: unwrap edge paths
+// ---------------------------------------------------------------------------
+
+// Malformed or non-ASCII escapes are kept as written, and idx always has one
+// more entry than dec.
+func TestRcovUnwrapEscapesKeepsMalformedEscapes(t *testing.T) {
+	for _, in := range []string{`a\uZZZZb`, `\ud83d\ude00`, `x\u00`, `100%2`, `\u00e9`} {
+		dec, idx := unwrapEscapes(in)
+		if len(idx) != len(dec)+1 {
+			t.Errorf("%q: idx has %d entries for %d bytes", in, len(idx), len(dec))
+		}
+		if dec != in {
+			t.Errorf("unwrapEscapes(%q) = %q, want it unchanged", in, dec)
+		}
+	}
+	if dec, _ := unwrapEscapes(`\u0041%41`); dec != "AA" {
+		t.Errorf(`unwrapEscapes(\u0041%%41) = %q, want "AA"`, dec)
+	}
+}
+
+// The extra passes keep the false-positive guards: placeholders and short
+// "key" values are left alone, a real secret next to a placeholder is not.
+func TestRcovUnwrapExtraSpansSkipGuards(t *testing.T) {
+	s := newCtxScrubber(t)
+	for _, in := range []string{
+		"client_secret%3Dxxxxxxxxxxxxxxxxxxxx",
+		"Server=db;Password=xxxxxxxx;Port=1%3B",
+		"%7B%22password%22%3A%5B%22xxxxxxxxxxxx%22%5D%7D",
+		"%7B%22key%22%3A%5B%22short%22%5D%7D",
+	} {
+		if out, n := s.scrubUnwrapped(in, ContextBody); out != in || n != 0 {
+			t.Errorf("scrubUnwrapped(%q) = %q (%d), want it unchanged", in, out, n)
+		}
+	}
+	in := "%7B%22password%22%3A%5B%22xxxxxxxxxxxx%22%2C%22Sup3rS3cretValue%22%5D%7D"
+	out, n := s.scrubUnwrapped(in, ContextBody)
+	if n < 1 || strings.Contains(out, "Sup3rS3cretValue") || !strings.Contains(out, "xxxxxxxxxxxx") {
+		t.Errorf("mixed array: %q (%d)", out, n)
+	}
+}
