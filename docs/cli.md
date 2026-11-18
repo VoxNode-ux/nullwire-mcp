@@ -83,6 +83,7 @@ NullWire exposes four tools over stdio. It speaks MCP protocol versions `2026-07
 | `export_har` | Returns recent scrubbed flows as a HAR 1.2 document, built in memory. Nothing is written to disk. | `limit` (1 to 50, default 10), `method`, `url_contains`, `include_bodies` (default `false`) |
 | `export_sanitized_curl` | Rebuilds a captured request as a `curl` command. Redacted values become environment variables you fill in yourself. | `flow_id` (required) |
 | `clear_ram_buffer` | Clears all 50 slots and resets the counters. | none |
+| `export_attestation` | Returns a signed local attestation (ECDSA P-256): counts, policy SHA-256, active presets and a control summary. It holds no URLs, bodies, headers or redaction tags. | none |
 
 A flow looks like this (illustrative):
 
@@ -230,4 +231,32 @@ It accepts the server options (`--port`, `--target`, `--target-map`, `--cacert`,
 
 ## `-disable-tools`
 
-`-disable-tools export_sanitized_curl,export_har` hides the listed MCP tools from `tools/list` and refuses `tools/call` for them. Unknown names fail startup. Tools: `inspect_traffic`, `export_har`, `export_sanitized_curl`, `clear_ram_buffer`.
+`-disable-tools export_sanitized_curl,export_har` hides the listed MCP tools from `tools/list` and refuses `tools/call` for them. Unknown names fail startup. Tools: `inspect_traffic`, `export_har`, `export_sanitized_curl`, `clear_ram_buffer`, `export_attestation`.
+
+## `-policy-pubkey` and signed policy packs
+
+By default `-secrets-config` works as before and needs no signature. With `-policy-pubkey <PEM file | hex file | hex>` the server refuses to start unless `<secrets-config>.sig` (ECDSA P-256 over SHA-256, ASN.1, hex) verifies against the exact bytes it then reads. The option also refuses `-allow-uninspectable`, so the command line cannot weaken a signed policy. Presets can only be added on the command line, never removed.
+
+No OpenSSL is needed:
+
+```
+nullwire-mcp policy keygen -out corp            # corp.key (0600, keep offline) + corp.pub
+nullwire-mcp policy sign -key corp.key secrets.json   # writes secrets.json.sig
+nullwire-mcp policy verify -pubkey corp.pub secrets.json
+nullwire-mcp -secrets-config secrets.json -policy-pubkey corp.pub
+```
+
+## Attestation: `export_attestation`, `-attest-out`, `-attest-key`
+
+`export_attestation` returns one line of JSON: `{"report": {...}, "signature": {...}}`. The report has the tool version, UTC start and generation times, flow and redaction counts, the SHA-256 of the policy file, whether it was signed, the active presets, egress rule counts, and the main controls (listener kind, token required, `-allow-uninspectable`, `-ws-deflate`, disabled tools). It never holds URLs, bodies, headers or redaction tags.
+
+- Without `-attest-key` a fresh ECDSA P-256 key signs each run and its public half is in the envelope: a tamper-evident session receipt. It proves the report was not changed after signing, not who signed it.
+- With `-attest-key <PEM>` your org or host key signs. Check it with `nullwire-mcp policy attest -pubkey corp.pub report.json`.
+- `-attest-out <path>` also writes the report (mode 0600) when the server exits.
+
+## `-proxy-token` and `-listen`
+
+The proxy stays on `127.0.0.1` and adds no CA. To keep other local users and processes out:
+
+- `-proxy-token <token>` (16+ characters of `A-Za-z0-9-._~`) or `-proxy-token auto` (makes one and prints the proxy URL). It can also come from `NULLWIRE_PROXY_TOKEN`, which is cleared from the environment at start. Every request must carry it, as the password of `Proxy-Authorization` (`HTTP_PROXY=http://nw:<token>@127.0.0.1:8080` works in curl, Python and Node) or as `X-Nullwire-Token` in gateway mode. The credentials are removed before anything is forwarded or captured. `nullwire-mcp protect -proxy-token ...` passes the token to the server through its environment, not the command line.
+- `-listen unix:///absolute/path.sock` (Linux and macOS, opt-in, never the default) listens on a socket with mode 0600 instead of TCP. The file is removed at exit.
