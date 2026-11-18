@@ -739,3 +739,159 @@ func TestEditJSONServersEdges(t *testing.T) {
 		t.Errorf("typed entry: %v", typed)
 	}
 }
+
+func rcovNeedsChmod(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a non-root POSIX user (permission bits)")
+	}
+}
+
+// rcovLock sets mode on path and restores 0o700 at cleanup so TempDir can be removed.
+func rcovLock(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o700) }) // #nosec G302 -- so the temp dir can be removed
+}
+
+func TestRcovWriteFileAtomicReadOnlyDir(t *testing.T) {
+	rcovNeedsChmod(t)
+	dir := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "mcp.json")
+	if err := os.WriteFile(cfg, []byte(`{"keep":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rcovLock(t, dir, 0o555)
+
+	// Existing file: the backup copy and the temporary file cannot be created.
+	if bak, err := writeFileAtomic(cfg, []byte("new")); err == nil || bak != "" {
+		t.Fatalf("existing file in a read-only folder: (%q, %v)", bak, err)
+	}
+	if b, _ := os.ReadFile(cfg); string(b) != `{"keep":true}` {
+		t.Errorf("the config was changed: %q", b)
+	}
+	if _, err := os.Stat(cfg + ".nullwire-bak"); !os.IsNotExist(err) {
+		t.Errorf("no backup can exist in a read-only folder: %v", err)
+	}
+	// A folder that has to be created below it: MkdirAll fails.
+	if _, err := writeFileAtomic(filepath.Join(dir, "sub", "x.json"), []byte("y")); err == nil {
+		t.Error("MkdirAll below a read-only folder must fail")
+	}
+}
+
+func TestRcovApplyFileWriteAndReadFailures(t *testing.T) {
+	rcovNeedsChmod(t)
+	o := installOptions{name: "nw", cmd: serverCmd{command: "/bin/nw"}}
+	mk := func(cfg string) clientSpec {
+		return clientSpec{id: "x", label: "X", kind: "json", key: "mcpServers", path: func() (string, error) { return cfg, nil }}
+	}
+
+	// The write fails: the config sits in a read-only folder.
+	dir := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "mcp.json")
+	if err := os.WriteFile(cfg, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rcovLock(t, dir, 0o555)
+	if status, p, err := applyFile(mk(cfg), o); err == nil || status != "" || p != cfg {
+		t.Errorf("write failure: (%q, %q, %v)", status, p, err)
+	}
+
+	// The read fails: the config itself is not readable.
+	unreadable := filepath.Join(t.TempDir(), "mcp.json")
+	if err := os.WriteFile(unreadable, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rcovLock(t, unreadable, 0)
+	if status, p, err := applyFile(mk(unreadable), o); err == nil || status != "" || p != unreadable {
+		t.Errorf("read failure: (%q, %q, %v)", status, p, err)
+	}
+}
+
+func TestRcovApplyFileCorruptConfigs(t *testing.T) {
+	dir := t.TempDir()
+	o := installOptions{name: "nw", cmd: serverCmd{command: "/bin/nw"}}
+	for i, c := range []struct{ name, body, want string }{
+		{"servers is an array", `{"mcpServers":[1]}`, "is not an object"},
+		{"top level array", `[1,2]`, "not plain JSON"},
+		{"truncated", `{"mcpServers":{"nw":`, "not plain JSON"},
+		{"junk", "}{", "not plain JSON"},
+	} {
+		cfg := filepath.Join(dir, "c"+string(rune('a'+i))+".json")
+		if err := os.WriteFile(cfg, []byte(c.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		spec := clientSpec{id: "x", label: "X", kind: "json", key: "mcpServers", path: func() (string, error) { return cfg, nil }}
+		status, p, err := applyFile(spec, o)
+		if err == nil || !strings.Contains(err.Error(), c.want) || status != "" || p != cfg {
+			t.Errorf("%s: (%q, %q, %v), want an error containing %q", c.name, status, p, err, c.want)
+		}
+		if b, _ := os.ReadFile(cfg); string(b) != c.body {
+			t.Errorf("%s: the refused file was changed: %q", c.name, b)
+		}
+	}
+
+	// A server name that cannot be a TOML key is refused for the TOML client.
+	toml := filepath.Join(dir, "config.toml")
+	tspec := clientSpec{id: "codex", label: "Codex", kind: "toml", path: func() (string, error) { return toml, nil }}
+	bad := o
+	bad.name = "bad name"
+	if _, _, err := applyFile(tspec, bad); err == nil || !strings.Contains(err.Error(), "not usable in TOML") {
+		t.Errorf("bad TOML name: %v", err)
+	}
+	if _, err := os.Stat(toml); !os.IsNotExist(err) {
+		t.Errorf("nothing may be written for a refused name: %v", err)
+	}
+}
+
+func TestRcovEditCodexTOMLMultilineAndUnterminatedArgs(t *testing.T) {
+	cmd := serverCmd{command: "/b"}
+	raw := "[mcp_servers.nw]\ncommand = \"/old\"\nargs = [\n  \"a\",\n  \"b\"\n]\nenv = \"keep\"\n\n[other]\nx = 1\n"
+	out, action, err := editCodexTOML(raw, "nw", cmd, false)
+	if err != nil || action != "updated" {
+		t.Fatalf("multi-line args: (%q, %q, %v)", out, action, err)
+	}
+	for _, gone := range []string{`"a"`, `"b"`, "/old"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("%s is still in:\n%s", gone, out)
+		}
+	}
+	for _, kept := range []string{"args = []", `env = "keep"`, "[other]"} {
+		if !strings.Contains(out, kept) {
+			t.Errorf("%s is missing from:\n%s", kept, out)
+		}
+	}
+	// An args array that never closes must not run past the table or panic.
+	if _, action, err := editCodexTOML("[mcp_servers.nw]\nargs = [\n\"a\"\n", "nw", cmd, false); err != nil || action != "updated" {
+		t.Errorf("unterminated args: (%q, %v)", action, err)
+	}
+	if _, _, err := editCodexTOML("", "bad name", cmd, false); err == nil || !strings.Contains(err.Error(), "not usable in TOML") {
+		t.Errorf("bad name: %v", err)
+	}
+}
+
+func TestRcovInstallRunUsageErrors(t *testing.T) {
+	installEnv(t)
+	bin := fakeBinary(t)
+	for _, c := range []struct {
+		name string
+		args []string
+	}{
+		{"positional argument", []string{"stray"}},
+		{"bad name", []string{"--name", "bad name"}},
+		{"unknown client", []string{"--client", "nope", "--binary", bin}},
+	} {
+		var out, errw bytes.Buffer
+		if code := runInstallTo(&out, &errw, c.args); code != 2 {
+			t.Errorf("%s: exit %d, want 2\n%s%s", c.name, code, out.String(), errw.String())
+		}
+	}
+}
