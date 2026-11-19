@@ -18,6 +18,13 @@ var tailBenchInputs = map[string]string{
 	"Digits": strings.Repeat("order 4111 1111 1111 1111 shipped to 10.0.0.1 via fe80::1 ", 800),
 }
 
+// The two shapes the fast gates could find hardest: many dots with no digit
+// beside them, and many short digit chains that never reach 13.
+func init() {
+	tailBenchInputs["Dots"] = strings.Repeat("a.b.c.d.e.f.g.h. ", 2500)
+	tailBenchInputs["ShortChains"] = strings.Repeat("1234  5678  ", 3500)
+}
+
 func BenchmarkScrubTailOld(b *testing.B) {
 	for name, in := range tailBenchInputs {
 		b.Run(name, func(b *testing.B) {
@@ -41,6 +48,43 @@ func BenchmarkScrubTailNew(b *testing.B) {
 				_ = strings.Count(in, ":") >= 2
 				_ = strings.IndexByte(in, '.') >= 0 && maybeIPv4(in)
 				_ = hasPANChain(in)
+			}
+		})
+	}
+}
+
+// BenchmarkScrubPANChain and BenchmarkScrubIPv4Gate run the old byte loop
+// (Ref) and the current gate (New) on every input, so a regression on any
+// shape shows up here.
+func BenchmarkScrubPANChain(b *testing.B) {
+	for name, in := range tailBenchInputs {
+		b.Run(name+"/Ref", func(b *testing.B) {
+			b.SetBytes(int64(len(in)))
+			for i := 0; i < b.N; i++ {
+				_ = refPANChain(in)
+			}
+		})
+		b.Run(name+"/New", func(b *testing.B) {
+			b.SetBytes(int64(len(in)))
+			for i := 0; i < b.N; i++ {
+				_ = hasPANChain(in)
+			}
+		})
+	}
+}
+
+func BenchmarkScrubIPv4Gate(b *testing.B) {
+	for name, in := range tailBenchInputs {
+		b.Run(name+"/Ref", func(b *testing.B) {
+			b.SetBytes(int64(len(in)))
+			for i := 0; i < b.N; i++ {
+				_ = refMaybeIPv4(in)
+			}
+		})
+		b.Run(name+"/New", func(b *testing.B) {
+			b.SetBytes(int64(len(in)))
+			for i := 0; i < b.N; i++ {
+				_ = maybeIPv4(in)
 			}
 		})
 	}

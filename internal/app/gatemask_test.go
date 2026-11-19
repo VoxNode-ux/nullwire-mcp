@@ -103,3 +103,83 @@ func TestMaskGateSmallAutomaton(t *testing.T) {
 		t.Errorf("early stop: %03b", got)
 	}
 }
+
+// ASCII case is folded into the class table when the automaton is built, and
+// the transition table is 16-bit.
+func TestMaskGateTablesAreFoldedAndSixteenBit(t *testing.T) {
+	for name, groups := range map[string][]maskGroup{"scrub": scrubGate.groups, "secretKey": secretKeyGate.groups} {
+		g := newMaskGate(groups...)
+		if len(g.out) > 65535 {
+			t.Fatalf("%s: %d states do not fit in 16 bits", name, len(g.out))
+		}
+		if len(g.next) != len(g.out)*g.width {
+			t.Fatalf("%s: next has %d entries, want %d states x %d classes", name, len(g.next), len(g.out), g.width)
+		}
+		for c := byte('A'); c <= 'Z'; c++ {
+			if g.class[c] != g.class[c+'a'-'A'] {
+				t.Fatalf("%s: class[%q] = %d, class[%q] = %d", name, c, g.class[c], c+'a'-'A', g.class[c+'a'-'A'])
+			}
+		}
+	}
+}
+
+// Mixed-case texts built from pieces of the real literals: every bit must
+// match a plain lower-cased substring search.
+func TestMaskGatesAgreeWithNaiveOnMixedCase(t *testing.T) {
+	for name, groups := range map[string][]maskGroup{"scrub": scrubGate.groups, "secretKey": secretKeyGate.groups} {
+		g := newMaskGate(groups...)
+		var pool []string
+		for _, grp := range groups {
+			pool = append(pool, grp.lits...)
+		}
+		naive := func(text string) uint32 {
+			lower := strings.ToLower(text)
+			var m uint32
+			for _, grp := range groups {
+				for _, lit := range grp.lits {
+					if lit != "" && strings.Contains(lower, strings.ToLower(lit)) {
+						m |= grp.bit
+					}
+				}
+			}
+			return m
+		}
+		r := rand.New(rand.NewSource(20261120))
+		n := 20000
+		if testing.Short() {
+			n = 2000
+		}
+		for i := 0; i < n; i++ {
+			var sb strings.Builder
+			for j := r.Intn(6); j >= 0; j-- {
+				if r.Intn(3) == 0 {
+					sb.WriteString(" .-_=\"x9")
+					continue
+				}
+				lit := pool[r.Intn(len(pool))]
+				lit = lit[:1+r.Intn(len(lit))]
+				for k := 0; k < len(lit); k++ {
+					c := lit[k]
+					if r.Intn(2) == 0 && c >= 'a' && c <= 'z' {
+						c -= 'a' - 'A'
+					}
+					sb.WriteByte(c)
+				}
+			}
+			text := sb.String()
+			if got, want := g.Match(text), naive(text); got != want {
+				t.Fatalf("%s: Match(%q) = %b, want %b", name, text, got, want)
+			}
+		}
+	}
+}
+
+// BenchmarkScrubGateInit is the cost of building both mask gates (what the
+// first scan pays); B/op includes the build-time 32-bit table.
+func BenchmarkScrubGateInit(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = newMaskGate(scrubGate.groups...)
+		_ = newMaskGate(secretKeyGate.groups...)
+	}
+}

@@ -175,3 +175,179 @@ func FuzzScrubTailGates(f *testing.F) {
 		checkTail(t, s, in)
 	})
 }
+
+// refPANChain and refMaybeIPv4 are the byte-by-byte rules that hasPANChain
+// (stride-12 probe) and maybeIPv4 (IndexByte jumps) replaced. The fast
+// versions must agree with them on every input.
+func refPANChain(in string) bool {
+	chain := 0
+	prevDigit := false
+	for i := 0; i < len(in); i++ {
+		c := in[i]
+		if c >= '0' && c <= '9' {
+			if chain++; chain >= 13 {
+				return true
+			}
+			prevDigit = true
+			continue
+		}
+		if (c == ' ' || c == '-') && prevDigit {
+			prevDigit = false
+			continue
+		}
+		chain, prevDigit = 0, false
+	}
+	return false
+}
+
+func refMaybeIPv4(in string) bool {
+	for i := 1; i+1 < len(in); i++ {
+		if in[i] == '.' && in[i-1] >= '0' && in[i-1] <= '9' && in[i+1] >= '0' && in[i+1] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+// forEachString calls fn with every string over alpha of length 0..maxLen.
+func forEachString(alpha string, maxLen int, fn func(string)) {
+	buf := make([]byte, maxLen)
+	for n := 0; n <= maxLen; n++ {
+		idx := make([]int, n)
+		for {
+			for i, k := range idx {
+				buf[i] = alpha[k]
+			}
+			fn(string(buf[:n]))
+			i := n - 1
+			for i >= 0 {
+				if idx[i]++; idx[i] < len(alpha) {
+					break
+				}
+				idx[i] = 0
+				i--
+			}
+			if i < 0 {
+				break
+			}
+		}
+	}
+}
+
+// Every string over small alphabets, so no chain shape or position is skipped.
+func TestHasPANChainExhaustive(t *testing.T) {
+	check := func(in string) {
+		if got, want := hasPANChain(in), refPANChain(in); got != want {
+			t.Fatalf("hasPANChain(%q) = %v, reference says %v", in, got, want)
+		}
+	}
+	forEachString("1-", 17, check)
+	forEachString("1x", 16, check)
+	if !testing.Short() {
+		forEachString("1 -", 13, check)
+	}
+}
+
+func TestMaybeIPv4Exhaustive(t *testing.T) {
+	check := func(in string) {
+		if got, want := maybeIPv4(in), refMaybeIPv4(in); got != want {
+			t.Fatalf("maybeIPv4(%q) = %v, reference says %v", in, got, want)
+		}
+	}
+	forEachString("1.x", 10, check)
+	forEachString("1. ", 10, check)
+}
+
+// A chain of every shape slid across every offset mod 12, with and without
+// trailing text: the stride-12 probe must catch it wherever it falls.
+func TestHasPANChainEveryStrideOffset(t *testing.T) {
+	cases := []struct {
+		chain string
+		want  bool
+	}{
+		{"4111111111111", true},
+		{"4111 1111 1111 1111", true},
+		{"4111-1111-1111-1111", true},
+		{"1 2 3 4 5 6 7 8 9 0 1 2 3", true},
+		{"411111111111", false},
+		{"4111  1111 1111 1111", false},
+		{"4111 -1111 1111 1111", false},
+		{"4111.1111.1111.1111", false},
+	}
+	for _, c := range cases {
+		chain, want := c.chain, c.want
+		for pad := 0; pad <= 60; pad++ {
+			for _, tail := range []int{0, 1, 5, 13, 24} {
+				for _, lead := range []string{"x", "-", " ", "9  "} {
+					in := strings.Repeat(lead, pad) + chain + strings.Repeat("x", tail)
+					got, ref := hasPANChain(in), refPANChain(in)
+					if got != ref {
+						t.Fatalf("hasPANChain(%q) = %v, reference says %v", in, got, ref)
+					}
+					if lead == "x" && got != want {
+						t.Fatalf("hasPANChain(%q) = %v, want %v", in, got, want)
+					}
+				}
+			}
+		}
+	}
+}
+
+// Random texts shaped like card numbers: noise, 8..17 digits with random
+// single or double separators, noise. Fixed seed, so a failure repeats.
+func TestHasPANChainRandomStructured(t *testing.T) {
+	r := rand.New(rand.NewSource(20261120))
+	const noise = "x.:a "
+	n := 300000
+	if testing.Short() {
+		n = 30000
+	}
+	for i := 0; i < n; i++ {
+		var b []byte
+		for j := r.Intn(40); j > 0; j-- {
+			b = append(b, noise[r.Intn(len(noise))])
+		}
+		for d, digits := 0, 8+r.Intn(10); d < digits; d++ {
+			b = append(b, byte('0'+r.Intn(10))) // #nosec G115 -- r.Intn(10) is 0..9
+			switch r.Intn(6) {
+			case 0:
+				b = append(b, ' ')
+			case 1:
+				b = append(b, '-')
+			case 2:
+				if r.Intn(4) == 0 {
+					b = append(b, ' ', '-')
+				}
+			}
+		}
+		for j := r.Intn(40); j > 0; j-- {
+			b = append(b, noise[r.Intn(len(noise))])
+		}
+		in := string(b)
+		if got, want := hasPANChain(in), refPANChain(in); got != want {
+			t.Fatalf("hasPANChain(%q) = %v, reference says %v", in, got, want)
+		}
+	}
+}
+
+// The whole tail (IPv6, IPv4, card numbers) with each kind of match slid
+// across every offset, alone and together: nothing may be missed versus the
+// ungated rules.
+func TestScrubTailEveryStrideOffset(t *testing.T) {
+	s, err := NewScrubber()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := []string{
+		"4111 1111 1111 1111", "4111111111111111", "4111-1111-1111-1111",
+		"5500 0000 0000 0004", "10.0.0.1", "192.168.1.20", "fe80::1", "2001:db8::8a2e:370:7334",
+	}
+	for pad := 0; pad < 40; pad++ {
+		lead := strings.Repeat("x", pad)
+		for _, p := range parts {
+			checkTail(t, s, lead+p)
+			checkTail(t, s, lead+p+" tail "+p)
+		}
+		checkTail(t, s, lead+strings.Join(parts, " | "))
+	}
+}
