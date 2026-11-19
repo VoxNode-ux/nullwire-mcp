@@ -138,7 +138,7 @@ Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-Built by [VoxNode-ux](https://github.com/VoxNode-ux) · Version 1.2.0 · License: see the repository's `LICENSE` file
+Built by [VoxNode-ux](https://github.com/VoxNode-ux) · Version 1.2.0 · License: [Apache 2.0](LICENSE)
 
 
 **If NullWire saved you from pasting a secret into a chat, a ⭐ helps others find it.**
