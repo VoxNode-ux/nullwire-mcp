@@ -212,6 +212,14 @@ jobs:
           hey -z 10s -c 10 -m POST -T application/octet-stream -D bigbody.txt http://127.0.0.1:18081/ > bigbody-direct.txt
           hey -z 10s -c 10 -m POST -T application/octet-stream -D bigbody.txt http://127.0.0.1:18080/ > bigbody-proxy.txt
           echo "VmRSS after load: $(grep VmRSS /proc/$(cat nw.pid)/status)" | tee bigbody-rss.txt
+      - name: Big body CPU profile (pprof, informational)
+        id: bigbodyprof
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          go test -run='^$' -bench='BenchmarkProxyBigBody' -benchtime=300x -cpuprofile cpu-bigbody.out -mutexprofile mutex-bigbody.out -mutexprofilefraction=1 ./internal/app | tee bigbody-bench.txt
+          go tool pprof -top -cum -nodecount=25 cpu-bigbody.out 2>&1 | tee cpu-bigbody-top.txt
+          go tool pprof -top -nodecount=10 mutex-bigbody.out 2>&1 | tee mutex-bigbody-top.txt
       - name: gRPC and gRPC-Web throughput (h2load over h2c, POST)
         id: grpc
         run: |
@@ -286,6 +294,9 @@ jobs:
             heap-inuse.txt
             mcp-probe.json
             bigbody-*.txt
+            cpu-bigbody*.out
+            cpu-bigbody-top.txt
+            mutex-bigbody-top.txt
             grpc-*.txt
             nw.err
             upstream.log
