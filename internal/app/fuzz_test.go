@@ -43,10 +43,7 @@ func FuzzScrubberNoLeak(f *testing.F) {
 		if !validSecretShape(secret) {
 			t.Skip()
 		}
-		s, err := NewScrubber()
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := mustScrubber()
 		inputs := []string{
 			"Authorization: Bearer " + secret,
 			`{"access_token":"` + secret + `","ok":true}`,
@@ -70,10 +67,7 @@ func FuzzScrubberDeterministic(f *testing.F) {
 		if !validSecretShape(secret) {
 			t.Skip()
 		}
-		s, err := NewScrubber()
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := mustScrubber()
 		in := "Authorization: Bearer " + secret
 		a, _ := s.ScrubText(in)
 		b, _ := s.ScrubText(in)
@@ -88,10 +82,7 @@ func FuzzScrubberDeterministic(f *testing.F) {
 func FuzzScrubberNoPanic(f *testing.F) {
 	f.Add("GET / HTTP/1.1\r\nCookie: a=b\r\n\r\n")
 	f.Fuzz(func(t *testing.T, in string) {
-		s, err := NewScrubber()
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := mustScrubber()
 		_, _ = s.ScrubText(in)
 	})
 }

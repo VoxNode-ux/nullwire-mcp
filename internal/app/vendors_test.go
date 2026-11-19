@@ -52,10 +52,7 @@ func TestVendorPrefixListsAreSane(t *testing.T) {
 // Builds a fake key for every listed prefix at run time (so no real-looking
 // secret sits in the source) and checks that it is redacted completely.
 func TestEveryVendorPrefixRedactsItsKey(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	for _, p := range vendors.DefaultVendorPrefixes {
 		checkVendorRedacted(t, s, "strong", p, p+vendorTestBody, vendorTestBody[8:])
 	}
@@ -84,10 +81,7 @@ func checkVendorRedacted(t *testing.T, s *Scrubber, kind, prefix, key, secret st
 
 // Ordinary text that merely resembles a prefix must be left alone.
 func TestVendorPrefixesIgnoreOrdinaryText(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	for _, in := range []string{
 		"hvs.example.com is the host name",
 		"the glc_ prefix is documented",

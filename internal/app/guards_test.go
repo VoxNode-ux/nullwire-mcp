@@ -16,7 +16,7 @@ func TestPANTagInCurlExport(t *testing.T) {
 }
 
 func TestResetCountersClearsTaintRing(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	secret := "Zq8Xv3LmP0aTr9YkB2nWd6HsJ4cFe7Gu"
 	_ = s.tag("TOKEN", secret)
 	if out, n := s.scrubTainted("x=" + secret); n != 1 {
@@ -29,7 +29,7 @@ func TestResetCountersClearsTaintRing(t *testing.T) {
 }
 
 func TestTaintRingDoesNotOverrideExemptHeaders(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	val := "Zq8Xv3LmP0aTr9YkB2nWd6HsJ4cFe7Gu"
 	_ = s.tag("TOKEN", val)
 	h := http.Header{}
@@ -41,7 +41,7 @@ func TestTaintRingDoesNotOverrideExemptHeaders(t *testing.T) {
 }
 
 func TestCloudRulesKeepPlaceholders(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	for _, in := range []string{
 		"Server=db;Password=${DB_PASS};Uid=app",
 		"Server=db;Password=******;Uid=app",
@@ -54,7 +54,7 @@ func TestCloudRulesKeepPlaceholders(t *testing.T) {
 }
 
 func TestBareKeyAndProseFalsePositives(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	keep := []string{
 		`{"Key": "uploads/2026/avatar.png"}`,
 		`{"key": "submit"}`,
@@ -81,7 +81,7 @@ func TestBareKeyAndProseFalsePositives(t *testing.T) {
 }
 
 func TestResourceIDsAndVersionsSurvive(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	keep := []string{
 		"id=req_01J9XK2M8P4Q7R5T",
 		"id=cus_R7kM2pQ9vX4wY1zA",
@@ -105,7 +105,7 @@ func TestResourceIDsAndVersionsSurvive(t *testing.T) {
 }
 
 func TestBase64ImageDoesNotExhaustSecretBudget(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	// Five ~67 KB runs separated by spaces: each is under b64MaxEncoded (88 KB)
 	// so it is decoded, and together they are over b64Budget (256 KB) of
 	// binary-looking base64. The secret after them must still be found.

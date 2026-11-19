@@ -67,7 +67,7 @@ func TestCBORWalker(t *testing.T) {
 }
 
 func TestBinaryBodiesAreScrubbed(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	secret := "hunter2-correct-horse"
 	for name, c := range map[string]struct{ ct, body string }{
 		"msgpack": {"application/msgpack", "\x82\xa4user\xa3sam\xa8password\xb5" + secret},

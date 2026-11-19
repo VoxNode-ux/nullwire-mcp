@@ -6,10 +6,7 @@ import (
 )
 
 func TestTaintRingCatchesPaddedSecret(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	secret := "Zq8Xv3LmP0aTr9YkB2nWd6HsJ4cFe7GuQ1oIhN5b" // 40 chars
 	_ = s.tag("TOKEN", secret)
 	in := "value=00000000_" + secret + "_trailing"
@@ -20,7 +17,7 @@ func TestTaintRingCatchesPaddedSecret(t *testing.T) {
 }
 
 func TestTaintRingShortSecretNotSplit(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	_ = s.tag("TOKEN", "Zq8Xv3LmP0aTr9YkB2nW") // 20 chars: whole value only
 	in := "Zq8Xv3LmP0aT and Zq8Xv3LmP0aTr9Yk"
 	if out, n := s.scrubTainted(in); n != 0 || out != in {
@@ -51,17 +48,14 @@ func itoa(i int) string {
 }
 
 func TestTaintRingIgnoresPeriodicHex(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	_ = s.tag("TOKEN", strings.Repeat("abcde", 8))
 	if out, n := s.scrubTainted("id=" + strings.Repeat("abcde", 7)); n != 0 {
 		t.Fatalf("periodic hex matched the ring: %q", out)
 	}
 }
 func TestTaintRingCatchesBase64AndJWTShapes(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	// A 39-character key (below the old 40-character sub-window minimum), seen again inside a longer run.
 	aiza := "AIzaSyD4kLm9PqR2sTuV6wXy8zAbCdEfGhIjKlM"
 	_ = s.tag("TOKEN", aiza)
@@ -190,10 +184,7 @@ func TestTaintSpans(t *testing.T) {
 }
 
 func TestScrubTaintedNoOps(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	in := "some text with " + lcgString(30, lcgBase64, 5)
 	if out, n := s.scrubTainted(in); out != in || n != 0 {
 		t.Errorf("empty ring: %q, %d", out, n)

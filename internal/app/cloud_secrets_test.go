@@ -11,10 +11,7 @@ const awsExampleSecret = "wJalrXUtnFEMI/K7MDENG/bPx" + "RfiCYEXAMPLEKEY"
 
 func newCloudScrubber(t *testing.T) *Scrubber {
 	t.Helper()
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	return s
 }
 

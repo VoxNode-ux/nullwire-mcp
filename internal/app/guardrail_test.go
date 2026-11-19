@@ -8,7 +8,7 @@ import (
 )
 
 func TestGuardrail_NumericAndUnicodeSurviveFullScrub(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	keep := map[string]string{
 		"ns timestamps":     `{"created_at_ns": 1763218800123456789, "updated_at_ns": 1763218800987654321}`,
 		"non-luhn 16 digit": `{"order_id": "4532015112830367"}`, // fails Luhn on purpose
@@ -83,7 +83,7 @@ func TestGuardrail_ConcurrentStress(t *testing.T) {
 // scrubUnwrapped runs first whenever the text holds any %XX or \" escape, so it
 // must apply the same false-positive guards as the later rules.
 func TestGuardrail_UnwrapKeepsStageTwoGuards(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	keep := map[string]string{
 		"bare key":    `{"msg": "hi \"there\"", "key": "submit"}`,
 		"prose token": `{"msg": "hi \"there\"", "err": "Invalid token provided"}`,
@@ -101,7 +101,7 @@ func TestGuardrail_UnwrapKeepsStageTwoGuards(t *testing.T) {
 }
 
 func TestGuardrail_UserInfoKeepsHostAndQuery(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	in := `https://user:p%40ss@db.internal?email=admin@corp.com`
 	out, n := s.ScrubTextIn(in, ContextBody)
 	if n == 0 || strings.Contains(out, "p%40ss") {
@@ -113,7 +113,7 @@ func TestGuardrail_UserInfoKeepsHostAndQuery(t *testing.T) {
 }
 
 func TestGuardrail_PercentPrefixedSecret(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	for _, in := range []string{`password=%FOO%bar_real_secret`, `password=%mysecret1234`} {
 		if out, n := s.ScrubTextIn(in, ContextBody); n == 0 || strings.Contains(out, "real_secret") || strings.Contains(out, "mysecret1234") {
 			t.Errorf("leaked: %q -> %q", in, out)

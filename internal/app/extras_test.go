@@ -84,10 +84,7 @@ func TestMaxBodyScrubsBeforeCutting(t *testing.T) {
 // Nested XML and CDATA
 
 func TestScrubXMLTree(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	pw := "hunter2hunter2"
 	cases := []struct{ name, in, keep string }{
 		{"nested", "<Credentials><Value>" + pw + "</Value><Type>Bearer</Type></Credentials>", "<Type>Bearer</Type>"},
@@ -137,10 +134,7 @@ func b58Encode(b []byte) string {
 }
 
 func TestScrubEncodedText(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	payload := []byte(`{"password":"hunter2hunter2"}`)
 	enc := map[string]string{
 		"hex":    hex.EncodeToString(payload),
@@ -744,10 +738,7 @@ const (
 )
 
 func TestScrubBase64WasteAndTextBudgets(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	secret := base64.RawStdEncoding.EncodeToString([]byte(`{"password":"hunter2hunter2"}`))
 	n := 0
 	if out := s.scrubBase64("x "+secret+" y", &n); n != 1 || strings.Contains(out, secret) {
@@ -784,10 +775,7 @@ func TestScrubBase64WasteAndTextBudgets(t *testing.T) {
 }
 
 func TestScrubEncodedTextBudgets(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	secret := hex.EncodeToString([]byte(`{"password":"hunter2hunter2"}`))
 	n := 0
 	if out := s.scrubEncodedText("x "+secret+" y", &n); n != 1 || strings.Contains(out, secret) {
@@ -941,10 +929,7 @@ func TestTextShapeHelpers(t *testing.T) {
 }
 
 func TestScrubJSONSecretArraysSkips(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	n := 0
 	in := `{"password":["","[REDACTED_TOKEN#abc]","Sup3rS3cretValue"]}`
 	out := s.scrubJSONSecretArrays(in, &n)
@@ -979,10 +964,7 @@ func TestXMLOpenLocalName(t *testing.T) {
 // scrubXMLSecrets is the regexp pass that mops up after the tree pass, so it
 // is called directly here to reach its early returns.
 func TestScrubXMLSecretsSkipsAndRedacts(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	for name, in := range map[string]string{
 		"blank value":          "<Secret> </Secret>",
 		"blank cdata":          "<Secret><![CDATA[ ]]></Secret>",

@@ -24,10 +24,7 @@ func randomToken(n int) string {
 
 func newCtxScrubber(t *testing.T) *Scrubber {
 	t.Helper()
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	return s
 }
 

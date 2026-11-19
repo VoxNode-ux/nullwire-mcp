@@ -6,10 +6,7 @@ import (
 )
 
 func TestScrubPANs(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	redact := []string{
 		"card 4111111111111111 end",
 		"card=4111-1111-1111-1111;",
@@ -132,10 +129,7 @@ func TestPANSpansEdgeCases(t *testing.T) {
 	if sp := panSpans(in); len(sp) != 1 || in[sp[0].start:sp[0].end] != "4111-1111-1111-1111" {
 		t.Errorf("span = %v", sp)
 	}
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	if out, n := s.scrubPANs("no card here"); out != "no card here" || n != 0 {
 		t.Errorf("no card: %q, %d", out, n)
 	}

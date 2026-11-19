@@ -7,10 +7,7 @@ import (
 )
 
 func TestTraceAndCorrelationIDsSurvive(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	id := "4bf92f3577b34da6a3ce929d0e0e4736"
 	for _, name := range []string{"X-Trace-Id", "B3"} {
 		h := http.Header{}
@@ -35,10 +32,7 @@ func TestTraceAndCorrelationIDsSurvive(t *testing.T) {
 }
 
 func TestBenignXMLMetadataElementsSurvive(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	for _, in := range []string{
 		"<Auth><TokenCount>42</TokenCount></Auth>",
 		"<Auth><PasswordLength>16</PasswordLength></Auth>",
@@ -77,10 +71,7 @@ func TestXMLNameWords(t *testing.T) {
 }
 
 func TestScrubXMLTreeDepthLimit(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	pw := "hunter2hunter2"
 	secret := "<Credentials><Value>" + pw + "</Value></Credentials>"
 	nest := func(depth int) string {
@@ -106,10 +97,7 @@ func TestScrubXMLTreeDepthLimit(t *testing.T) {
 }
 
 func TestScrubXMLTreeMalformedAndEscaped(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	pw := "hunter2hunter2"
 
 	// A document that breaks off: what was read before the break is still scrubbed.
@@ -155,10 +143,7 @@ func TestScrubXMLTreeMalformedAndEscaped(t *testing.T) {
 }
 
 func TestScrubXMLTreeSkips(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	for _, in := range []string{
 		"<Password>${DB_PASS}</Password>",
 		"<Password>[REDACTED_TOKEN#1]</Password>",

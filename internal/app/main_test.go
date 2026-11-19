@@ -31,10 +31,7 @@ var (
 
 func newTestApp(t *testing.T) *App {
 	t.Helper()
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatalf("NewScrubber: %v", err)
-	}
+	s := mustScrubber()
 	app := &App{
 		ring:      NewRingBuffer(),
 		scrub:     s,
@@ -167,10 +164,7 @@ func TestScrubberCorrelationTags(t *testing.T) {
 	}
 
 	// A second scrubber has a different nonce, so the same secret hashes differently.
-	s2, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s2 := mustScrubber()
 	other, _ := s2.ScrubText(secretA)
 	if tokenTagRe.FindString(other) == tag1 {
 		t.Errorf("tags must be salted per process, but two scrubbers agreed on %s", tag1)
@@ -178,7 +172,7 @@ func TestScrubberCorrelationTags(t *testing.T) {
 }
 
 func TestScrubberIPsAndLoopback(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	in := "peer 192.168.10.20 local 127.0.0.1 any 0.0.0.0 peer2 192.168.10.20"
 	out, n := s.ScrubText(in)
 
@@ -198,7 +192,7 @@ func TestScrubberIPsAndLoopback(t *testing.T) {
 }
 
 func TestScrubberSecretShapes(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 	cases := map[string][]string{
 		"jwt":      {"token value " + jwt, jwt},
@@ -223,7 +217,7 @@ func TestScrubberSecretShapes(t *testing.T) {
 }
 
 func TestScrubHeaders(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	h := http.Header{
 		"Authorization": {"Bearer abcdefghijklmnop"},
 		"Cookie":        {"sid=abc; theme=dark"},

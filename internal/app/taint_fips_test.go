@@ -126,10 +126,7 @@ func TestTaintHMACHashKeepsNoPlaintextInPool(t *testing.T) {
 
 func TestTaintHashScrubberEndToEnd(t *testing.T) {
 	for _, fips := range []bool{false, true} {
-		s, err := NewScrubber()
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := mustScrubber()
 		s.taint = newTaintRingMode(s.nonce, fips)
 		s.taint.add(fipsTestSecret)
 		out, n := s.scrubTainted("echo " + fipsTestSecret + " done")

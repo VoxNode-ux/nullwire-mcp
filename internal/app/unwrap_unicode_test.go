@@ -31,7 +31,7 @@ func TestUnwrapDecodesJSONUnicodeAndSlashEscapes(t *testing.T) {
 }
 
 func TestScrubFindsSecretSplitByUnicodeEscapes(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	secret := "Zq8Xv3LmP0aTr9YkB2nWd6HsJ4cFe7Gu"
 	in := `GET /v?api_key\u003d` + secret + `\u0026x\u003d1`
 	out, n := s.ScrubTextIn(in, ContextBody)
