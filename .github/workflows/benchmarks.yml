@@ -72,7 +72,7 @@ jobs:
       - name: Build NullWire and a local HTTP/1.1 + h2c + SSE upstream
         run: |
           set -e
-          go build -trimpath -o nullwire-mcp .
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
           mkdir -p "$RUNNER_TEMP/up" && cd "$RUNNER_TEMP/up"
           cat > main.go <<'GO'
           package main
@@ -276,7 +276,7 @@ jobs:
           check-latest: false
           cache: false
       - name: Build NullWire
-        run: go build -trimpath -o nullwire-mcp .
+        run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
       - name: Clone the datasets (shallow)
         run: |
           git clone --depth 1 https://github.com/Samsung/CredData.git creddata
@@ -420,7 +420,7 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Build NullWire and start a tiny upstream
         run: |
-          go build -trimpath -o nullwire-mcp .
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
           python3 - <<'PY' > upstream.log 2>&1 &
           from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
           class H(BaseHTTPRequestHandler):
