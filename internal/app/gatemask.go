@@ -135,3 +135,29 @@ var scrubGate = newMaskGate(
 	maskGroup{gateCloud, cloudGate},
 	maskGroup{gateCloudPass, []string{"pass", "pwd"}},
 )
+
+// Bits reported by secretKeyGate. scrubGate's gateSecretKey bit is coarse (the
+// words "token", "secret" and "password" turn up in ordinary prose), so on
+// clean JSON that merely says "nothing secret here" it still sent the whole
+// body through the (?i) reJSONSecret / reJSONSecretArr / reQuerySecret
+// regexps, which dominate the cost of a clean scrub. These are the literals
+// those regexps cannot match without, so each regexp now runs only when its
+// own literal is present. The literals are exact necessary conditions taken
+// from the regexps' key lists: a match of reJSONSecret needs a quoted key
+// ("password" with both quotes), a match of reQuerySecret needs "<key>=".
+const (
+	jsonKeyBit  uint32 = 1 << iota // a quoted JSON key that reJSONSecret / reJSONSecretArr know
+	queryKeyBit                    // a query/form key followed by "="
+)
+
+// secretKeyGate is kept separate from scrubGate so scrubGate's bit set stays
+// the one TestScrubGateMatchesLegacyChecks pins down.
+var secretKeyGate = newMaskGate(
+	maskGroup{jsonKeyBit, []string{
+		`"access_token"`, `"refresh_token"`, `"id_token"`, `"api_key"`, `"apikey"`,
+		`"secret"`, `"client_secret"`, `"password"`, `"passwd"`, `"session_id"`,
+		`"auth_token"`, `"key"`,
+	}},
+	// api_key=, apikey= and the *_token= / *_secret= forms all end in one of these.
+	maskGroup{queryKeyBit, []string{"key=", "token=", "secret=", "password=", "passwd="}},
+)

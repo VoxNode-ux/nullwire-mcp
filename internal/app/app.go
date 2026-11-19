@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -547,33 +548,16 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	}
 
 	if preSecretKey {
-		out = s.reJSONSecret.ReplaceAllStringFunc(out, func(m string) string {
-			g := s.reJSONSecret.FindStringSubmatch(m)
-			if g == nil {
-				return m
-			}
-			// Stage 1 may already have replaced this value with its own tag. Leave
-			// that tag exactly as it is: tagging a tag corrupts it.
-			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) || benignBareKey(g[1], g[2]) {
-				return m
-			}
-			count++
-			s.Tokens.Add(1)
-			return g[1] + s.tag("TOKEN", g[2]) + g[3]
-		})
-		out = s.scrubJSONSecretArrays(out, &count)
-		out = s.reQuerySecret.ReplaceAllStringFunc(out, func(m string) string {
-			g := s.reQuerySecret.FindStringSubmatch(m)
-			if g == nil {
-				return m
-			}
-			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) || benignBareKey(g[1], g[2]) {
-				return m
-			}
-			count++
-			s.Tokens.Add(1)
-			return g[1] + s.tag("TOKEN", g[2])
-		})
+		// gateSecretKey is coarse; secretKeyGate says which of the three regexps
+		// below can match at all (see gatemask.go).
+		sk := secretKeyGate.Match(in)
+		if sk&jsonKeyBit != 0 {
+			out = s.scrubJSONSecretFields(out, &count)
+			out = s.scrubJSONSecretArrays(out, &count)
+		}
+		if sk&queryKeyBit != 0 {
+			out = s.scrubQuerySecrets(out, &count)
+		}
 	}
 	if gm&gateXML != 0 && (strings.Contains(in, "<") || strings.Contains(in, "&lt;")) {
 		// Tree pass first: it handles CDATA, nesting, benign leaves and entity-escaped markup.
@@ -704,6 +688,42 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 		count += nEntropy
 	}
 	return out, count
+}
+
+// scrubJSONSecretFields redacts the value of every "password": "..." style
+// field. Split out of scrubLayersOpts so the regexp can sit behind its own gate.
+func (s *Scrubber) scrubJSONSecretFields(out string, count *int) string {
+	return s.reJSONSecret.ReplaceAllStringFunc(out, func(m string) string {
+		g := s.reJSONSecret.FindStringSubmatch(m)
+		if g == nil {
+			return m
+		}
+		// Stage 1 may already have replaced this value with its own tag. Leave
+		// that tag exactly as it is: tagging a tag corrupts it.
+		if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) || benignBareKey(g[1], g[2]) {
+			return m
+		}
+		*count++
+		s.Tokens.Add(1)
+		return g[1] + s.tag("TOKEN", g[2]) + g[3]
+	})
+}
+
+// scrubQuerySecrets redacts the value of every ?token=... / &api_key=... style
+// parameter.
+func (s *Scrubber) scrubQuerySecrets(out string, count *int) string {
+	return s.reQuerySecret.ReplaceAllStringFunc(out, func(m string) string {
+		g := s.reQuerySecret.FindStringSubmatch(m)
+		if g == nil {
+			return m
+		}
+		if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) || benignBareKey(g[1], g[2]) {
+			return m
+		}
+		*count++
+		s.Tokens.Add(1)
+		return g[1] + s.tag("TOKEN", g[2])
+	})
 }
 
 // strictKeyHints are fragments of field names that usually hold secrets.
@@ -1107,10 +1127,13 @@ func looksLikeTokenMax(s string, maxLen int) bool {
 	if isAllDigits(s) {
 		return false
 	}
-	h := shannonEntropyBits(s)
 	if isHexLike(s) {
-		return h >= entropyHexMin
+		return shannonEntropyBits(s) >= entropyHexMin
 	}
+	// Cheap rejections first: a lower-case run with no digit or capital (and
+	// shorter than hasTokenSignalAutoLen) is prose or a path, and is dropped
+	// here before any floating-point math. The entropy is only computed for
+	// the branches that read it.
 	if !hasTokenSignal(s) {
 		return false
 	}
@@ -1120,6 +1143,7 @@ func looksLikeTokenMax(s string, maxLen int) bool {
 	if vowelRatio(s) > entropyMaxVowel {
 		return false
 	}
+	h := shannonEntropyBits(s)
 	if n >= 32 {
 		return h >= entropyLongMin
 	}
@@ -1380,6 +1404,13 @@ type App struct {
 	tokenSum            [sha256.Size]byte
 	att                 attestInfo // facts export_attestation reports
 	barMu               sync.Mutex
+	capQ                atomic.Pointer[capturePool] // nil until startCapture; see captureworker.go
+	captureDropped      atomic.Int64                // flows wiped unrecorded because the capture queue was full
+	barDirty            atomic.Bool                 // a redraw is wanted; the ticker draws it
+	barTick             atomic.Bool                 // the ticker is running, so markBar only sets barDirty
+	barStop             chan struct{}
+	barWG               sync.WaitGroup
+	barStopOnce         sync.Once
 	stdoutMu            sync.Mutex
 	stdout, stderr      io.Writer // nil means os.Stdout / os.Stderr (run() injects its own)
 }
@@ -1410,14 +1441,54 @@ func (a *App) Bar() { a.barMu.Lock(); defer a.barMu.Unlock(); a.drawBar() }
 func (a *App) Logf(format string, args ...any) { a.barMu.Lock(); defer a.barMu.Unlock(); fmt.Fprintf(a.errW(), "\r\033[K"+format+"\n", args...); a.drawBar() }
 
 type capBuffer struct {
-	mu  sync.Mutex
-	buf []byte
-	max int
+	mu   sync.Mutex
+	buf  []byte
+	max  int
+	done bool // release was called: later writes are dropped
+}
+
+// capBufPool recycles the backing arrays of capBuffer. Every array is zeroed
+// before it goes back, so one request's bytes are never visible to the next.
+var capBufPool = sync.Pool{New: func() any { b := make([]byte, 0, 8<<10); return &b }}
+
+// capBufPoolMax is the largest array kept for reuse; bigger ones are zeroed
+// and left to the garbage collector so one huge body does not pin memory.
+const capBufPoolMax = 1 << 20
+
+func newCapBuffer(max int) *capBuffer {
+	bp := capBufPool.Get().(*[]byte)
+	return &capBuffer{buf: (*bp)[:0], max: max}
+}
+
+// release zeroes the whole backing array (not just the used part) and returns
+// it to the pool. Bytes() hands out a copy, so flows already built are not
+// affected. Safe to call twice and on a capBuffer made without newCapBuffer.
+func (c *capBuffer) release() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.done {
+		return
+	}
+	c.done = true
+	buf := c.buf
+	c.buf = nil
+	if cap(buf) == 0 {
+		return
+	}
+	clear(buf[:cap(buf)])
+	runtime.KeepAlive(buf)
+	if cap(buf) <= capBufPoolMax {
+		buf = buf[:0]
+		capBufPool.Put(&buf)
+	}
 }
 
 func (c *capBuffer) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.done {
+		return len(p), nil
+	}
 	if room := c.max - len(c.buf); room > 0 {
 		if len(p) > room {
 			c.buf = append(c.buf, p[:room]...)
@@ -1714,7 +1785,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nullwire-mcp: "+err.Error(), status)
 		return
 	}
-	reqCap := &capBuffer{max: a.limits().reqCap}
+	reqCap := newCapBuffer(a.limits().reqCap)
+	defer reqCap.release()
 	var outBody io.Reader = http.NoBody
 	hasBody := r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0
 	if hasBody {
@@ -1779,7 +1851,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		flow.respHeaders = http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}}
 		flow.respBody = []byte(msg)
 		flow.latencyMs = time.Since(start).Milliseconds()
-		go a.capture(flow)
+		a.dispatchCapture(flow)
 		return
 	}
 	defer resp.Body.Close()
@@ -1793,7 +1865,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.streamSSE(w, r, resp, flow, reqCap, start)
 		return
 	}
-	respCap := &capBuffer{max: a.limits().respCap}
+	respCap := newCapBuffer(a.limits().respCap)
+	defer respCap.release()
 	dst := w.Header()
 	for k, vs := range copyHeaders(resp.Header) {
 		dst[k] = vs
@@ -1819,7 +1892,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	flow.respTrailers = resp.Trailer.Clone()
 	flow.respBody = respCap.Bytes()
 	flow.latencyMs = time.Since(start).Milliseconds()
-	go a.capture(flow)
+	a.dispatchCapture(flow)
 }
 
 // wipe zeroes the captured body copies once they are scrubbed and stored.
@@ -1956,7 +2029,7 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.T
 	if perr := a.egress.checkHost(host); perr != nil {
 		msg := "nullwire-mcp: " + perr.Error()
 		http.Error(w, msg, http.StatusForbidden)
-		go a.capture(rawFlow{started: start, method: http.MethodConnect, url: target, reqHeaders: r.Header.Clone(), respHeaders: http.Header{}, status: http.StatusForbidden, note: msg, latencyMs: time.Since(start).Milliseconds()})
+		a.dispatchCapture(rawFlow{started: start, method: http.MethodConnect, url: target, reqHeaders: r.Header.Clone(), respHeaders: http.Header{}, status: http.StatusForbidden, note: msg, latencyMs: time.Since(start).Milliseconds()})
 		return
 	}
 	if !a.acquireTunnel() {
@@ -1981,7 +2054,7 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.T
 		flow.status = code
 		flow.note = msg
 		flow.latencyMs = time.Since(start).Milliseconds()
-		go a.capture(flow)
+		a.dispatchCapture(flow)
 		return
 	}
 	client, brw, err := hj.Hijack()
@@ -2005,7 +2078,7 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.T
 	flow.status = http.StatusOK
 	flow.latencyMs = time.Since(start).Milliseconds()
 	flow.note = fmt.Sprintf("blind CONNECT tunnel: %d B client->upstream, %d B upstream->client; payload not inspected or stored", sent, recv)
-	go a.capture(flow)
+	a.dispatchCapture(flow)
 }
 
 func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow rawFlow, isWS bool) {
@@ -2018,7 +2091,7 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 		flow.respHeaders = http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}}
 		flow.respBody = []byte(msg)
 		flow.latencyMs = time.Since(flow.started).Milliseconds()
-		go a.capture(flow)
+		a.dispatchCapture(flow)
 		return
 	}
 	if !a.acquireTunnel() {
@@ -2401,7 +2474,7 @@ func (a *App) capture(f rawFlow) {
 	defer f.wipe()
 	if e, ok := a.buildEntry(f); ok {
 		a.ring.Push(e)
-		a.Bar()
+		a.markBar()
 	}
 }
 
@@ -3090,7 +3163,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 
 	app := &App{
 		ring: NewRingBuffer(), scrub: scrub, egress: egress, disabledTools: disabled, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable, maxBody: maxBody, wsDeflate: *wsDeflate,
-		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 32, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true},
+		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 256, MaxIdleConnsPerHost: 128, ReadBufferSize: 32 << 10, WriteBufferSize: 32 << 10, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true},
 	}
 	app.stdout, app.stderr = stdout, stderr
 	app.setProxyToken(tok)
@@ -3152,6 +3225,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		}
 	}
 
+	app.startCapture()
+	app.startBarTicker()
+	// drain stops the capture workers after they finish every queued flow, then
+	// stops the bar ticker with one last redraw. It runs before the ring and the
+	// taint table are wiped, so no queued flow is pushed after the wipe.
+	drain := func() {
+		app.stopCapture()
+		app.stopBarTicker()
+	}
+
 	srv := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, Protocols: serverProtocols()}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -3171,6 +3254,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			return
 		}
 		app.Logf("signal received; wiping RAM")
+		drain()
 		finish()
 		app.ring.Clear()
 		app.scrub.taint.clear()
@@ -3217,6 +3301,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		app.Logf("stdin error: %v", err)
 	}
 	app.Logf("stdin closed; wiping RAM")
+	drain()
 	finish()
 	app.ring.Clear()
 	app.scrub.taint.clear()
