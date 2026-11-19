@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"testing"
 )
@@ -58,3 +60,41 @@ func TestCapBufferSoak100MiB(t *testing.T) {
 type countWriter struct{ n int64 }
 
 func (c *countWriter) Write(p []byte) (int, error) { c.n += int64(len(p)); return len(p), nil }
+
+// BenchmarkProxyBigBody sends the CI bigbody payload (32 KiB prefix with a
+// secret at the capture edge + 1 MiB tail, application/octet-stream) through
+// the gateway. Run with -cpuprofile to split loopback io.Copy, scrubber CPU
+// and mutex time. Test-only: it changes nothing in production, and the
+// octet-stream body is still scanned.
+func BenchmarkProxyBigBody(b *testing.B) {
+	s := benchScrubber(b)
+	app := &App{
+		ring:      NewRingBuffer(),
+		scrub:     s,
+		port:      1,
+		transport: &http.Transport{Proxy: nil, DisableCompression: true},
+	}
+	defer app.transport.CloseIdleConnections()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer up.Close()
+
+	body := append(bytes.Repeat([]byte("A"), 32768-20), []byte("ghp_abcdefghijklmnopqrstuvwxyz0123456789")...)
+	body = append(body, bytes.Repeat([]byte("B"), 1<<20)...)
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req := httptest.NewRequest("POST", "/", bytes.NewReader(body))
+		req.Host = "127.0.0.1:8080"
+		req.Header.Set("X-Target-URL", up.URL)
+		req.Header.Set("Content-Type", "application/octet-stream")
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			b.Fatalf("status = %d", rec.Code)
+		}
+	}
+}
