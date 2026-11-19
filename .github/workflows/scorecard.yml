@@ -16,7 +16,8 @@ on:
   branch_protection_rule:
   workflow_dispatch:
 
-permissions: read-all
+permissions:
+  contents: read # the job below sets its own permissions, which replace these
 
 jobs:
   analysis:
