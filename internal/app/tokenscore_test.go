@@ -32,3 +32,11 @@ func TestMaxWindowEntropyNoAllocs(t *testing.T) {
 		t.Fatalf("allocs = %v", n)
 	}
 }
+
+func TestCovBgClass(t *testing.T) {
+	for c, want := range map[byte]int{'a': 0, 'z': 0, 'A': 1, 'Z': 1, '0': 2, '9': 2, '_': 3, '-': 3, '!': 4, ' ': 4} {
+		if got := bgClass(c); got != want {
+			t.Errorf("bgClass(%q) = %d, want %d", c, got, want)
+		}
+	}
+}

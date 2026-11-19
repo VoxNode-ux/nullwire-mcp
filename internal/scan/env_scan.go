@@ -8,7 +8,7 @@ import (
 
 // envSecretNames matches variable and key names that normally hold secrets.
 // AUTH only counts as a whole word or next to _ or -, so AUTHOR is not flagged.
-var envSecretNames = regexp.MustCompile(`(?i)(SECRET|TOKEN|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CREDENTIAL|BEARER|AUTHORIZATION|^AUTH$|AUTH[_-]|[_-]AUTH|SESSION[_-]?(ID|KEY|TOKEN))`)
+var envSecretNames = regexp.MustCompile(`(?i)(SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|API[_-]?KEY|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|(SIGNING|ENCRYPTION|DECRYPTION|MASTER|AUTH|LICENSE|SSH|GPG|PGP|HMAC|JWT|DEPLOY)[_-]?KEY|CREDENTIAL|BEARER|AUTHORIZATION|^AUTH$|AUTH[_-]|[_-]AUTH|(^|[_-])(PWD|PASS)($|[_-])|SESSION[_-]?(ID|KEY|TOKEN))`)
 
 const HiddenValue = "(name looks secret; value hidden)"
 
@@ -29,7 +29,7 @@ func scanEnvFile(s Scrubber, path string, report *strings.Builder) (ok bool, hit
 			continue
 		}
 		key = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(key), "export "))
-		val = strings.TrimSpace(strings.Trim(strings.TrimSpace(val), `"'`))
+		val = envValue(val)
 		if val == "" {
 			continue
 		}
@@ -50,4 +50,33 @@ func scanEnvFile(s Scrubber, path string, report *strings.Builder) (ok bool, hit
 func envFileNames(name string) bool {
 	n := strings.ToLower(name)
 	return n == ".env" || n == ".envrc" || strings.HasPrefix(n, ".env.") || strings.HasSuffix(n, ".env")
+}
+
+// envValue returns the value part of a KEY=value line. Quoted values end at the
+// closing quote (anything after it, such as a # comment, is dropped); unquoted
+// values end at the first " #" or tab-#, so the comment is removed before any
+// quote trimming.
+func envValue(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if q := v[0]; q == '"' || q == '\'' {
+		for i := 1; i < len(v); i++ {
+			if q == '"' && v[i] == '\\' {
+				i++
+				continue
+			}
+			if v[i] == q {
+				return v[1:i]
+			}
+		}
+		return strings.TrimSpace(v[1:]) // no closing quote
+	}
+	if i := strings.Index(v, " #"); i >= 0 {
+		v = v[:i]
+	} else if i := strings.Index(v, "\t#"); i >= 0 {
+		v = v[:i]
+	}
+	return strings.TrimSpace(v)
 }

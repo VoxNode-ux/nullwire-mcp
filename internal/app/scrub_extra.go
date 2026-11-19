@@ -1,7 +1,10 @@
 package app
 
 import (
+	"encoding/base32"
 	"encoding/base64"
+	"encoding/hex"
+	"math/big"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -54,14 +57,33 @@ func (s *Scrubber) scrubXMLSecrets(in string, count *int) string {
 		if g == nil {
 			return m
 		}
-		trimmed := strings.TrimSpace(g[2])
+		if xmlBenignLeaf(xmlOpenLocalName(g[1])) {
+			return m
+		}
+		inner := g[2]
+		if strings.HasPrefix(inner, "<![CDATA[") {
+			inner = strings.TrimSuffix(strings.TrimPrefix(inner, "<![CDATA["), "]]>")
+		}
+		trimmed := strings.TrimSpace(inner)
 		if trimmed == "" || strings.HasPrefix(trimmed, "[REDACTED_") || isAllowMarkOnly(trimmed) || isPlaceholderValue(trimmed) {
 			return m
 		}
 		*count++
 		s.Tokens.Add(1)
-		return g[1] + s.tag("TOKEN", g[2]) + g[3]
+		return g[1] + s.tag("TOKEN", inner) + g[3]
 	})
+}
+
+// xmlOpenLocalName returns the local element name of an opening tag such as <wsse:Password Type="x">.
+func xmlOpenLocalName(tag string) string {
+	t := strings.TrimPrefix(tag, "<")
+	if i := strings.IndexAny(t, " \t\r\n>"); i >= 0 {
+		t = t[:i]
+	}
+	if i := strings.LastIndexByte(t, ':'); i >= 0 {
+		t = t[i+1:]
+	}
+	return t
 }
 
 // isBase64Like reports whether a run looks like base64 rather than a word or
@@ -132,4 +154,151 @@ func (s *Scrubber) scrubBase64(in string, count *int) string {
 		s.Tokens.Add(1)
 		return s.tag("TOKEN", m)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Secrets hidden in hex, Base32 and Base58.
+//
+// Same idea as scrubBase64: find a run, decode it, and redact the whole run
+// when the decoded text holds a secret. These alphabets also fit ordinary
+// words, hashes and ids, so the decoded bytes must be strictly printable text
+// (valid UTF-8, no control bytes). A hash or a random id decodes to binary and
+// is left alone. Base24 is not handled; it only matters for license keys.
+
+var (
+	// an even number of hex digits, at least 12 bytes
+	reHexCandidate = regexp.MustCompile(`\b(?:[0-9A-Fa-f]{2}){12,}\b`)
+	// RFC 4648 Base32 in upper case, padded or not
+	reB32Candidate = regexp.MustCompile(`\b[A-Z2-7]{24,}={0,6}`)
+	// Bitcoin-style Base58: no 0, O, I or l
+	reB58Candidate = regexp.MustCompile(`\b[1-9A-HJ-NP-Za-km-z]{20,}\b`)
+)
+
+const (
+	hexMaxEncoded = 64 * 1024
+	b32MaxEncoded = 64 * 1024
+	b58MaxEncoded = 512 // Base58 decoding is quadratic, so runs stay short
+
+	b58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+)
+
+var b58Index = func() (t [256]int8) {
+	for i := range t {
+		t[i] = -1
+	}
+	for i := 0; i < len(b58Alphabet); i++ {
+		t[b58Alphabet[i]] = int8(i)
+	}
+	return t
+}()
+
+// isPrintableText is the strict check for decoded text: valid UTF-8, at least
+// 8 bytes, and no control bytes other than tab and line breaks.
+func isPrintableText(b []byte) bool {
+	if len(b) < 8 || !utf8.Valid(b) {
+		return false
+	}
+	for _, c := range b {
+		if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func decodeHexText(s string) ([]byte, bool) {
+	b, err := hex.DecodeString(s)
+	if err != nil || !isPrintableText(b) {
+		return nil, false
+	}
+	return b, true
+}
+
+func decodeBase32Text(s string) ([]byte, bool) {
+	b, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.TrimRight(s, "="))
+	if err != nil || !isPrintableText(b) {
+		return nil, false
+	}
+	return b, true
+}
+
+func decodeBase58Text(s string) ([]byte, bool) {
+	n, digit, base := new(big.Int), new(big.Int), big.NewInt(58)
+	for i := 0; i < len(s); i++ {
+		v := b58Index[s[i]]
+		if v < 0 {
+			return nil, false
+		}
+		n.Mul(n, base)
+		n.Add(n, digit.SetInt64(int64(v)))
+	}
+	zeros := 0 // each leading "1" stands for a 0x00 byte
+	for zeros < len(s) && s[zeros] == '1' {
+		zeros++
+	}
+	out := append(make([]byte, zeros), n.Bytes()...)
+	if !isPrintableText(out) {
+		return nil, false
+	}
+	return out, true
+}
+
+type encodedTextDecoder struct {
+	re     *regexp.Regexp
+	maxLen int
+	decode func(string) ([]byte, bool)
+}
+
+var encodedTextDecoders = []encodedTextDecoder{
+	{reHexCandidate, hexMaxEncoded, decodeHexText},
+	{reB32Candidate, b32MaxEncoded, decodeBase32Text},
+	{reB58Candidate, b58MaxEncoded, decodeBase58Text},
+}
+
+// hasEncodedRun reports whether in holds 20 letters or digits in a row, the
+// least any of the three decoders looks at, so the passes are skipped (and
+// nothing is copied) for text without one.
+func hasEncodedRun(in string) bool {
+	run := 0
+	for i := 0; i < len(in); i++ {
+		c := in[i]
+		if (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+			if run++; run >= 20 {
+				return true
+			}
+			continue
+		}
+		run = 0
+	}
+	return false
+}
+
+// scrubEncodedText decodes hex, Base32 and Base58 runs and redacts the whole
+// run when the decoded text holds a secret. Runs that decode to nothing
+// readable, or to text with no secret, are left as they were. Like
+// scrubBase64 it has a budget, so a body full of candidates costs a bounded
+// amount.
+func (s *Scrubber) scrubEncodedText(in string, count *int) string {
+	budget := b64Budget
+	waste := b64Waste // runs that do not decode to text are charged here instead
+	for _, d := range encodedTextDecoders {
+		in = d.re.ReplaceAllStringFunc(in, func(m string) string {
+			if budget <= 0 || waste <= 0 || len(m) > d.maxLen {
+				return m
+			}
+			decoded, ok := d.decode(m)
+			if !ok {
+				waste -= len(m)
+				return m
+			}
+			budget -= len(m)
+			if _, n := s.scrubLayers(string(decoded), false); n == 0 {
+				return m
+			}
+			*count++
+			s.Tokens.Add(1)
+			return s.tag("TOKEN", m)
+		})
+	}
+	return in
 }

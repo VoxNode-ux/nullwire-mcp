@@ -62,6 +62,13 @@ var entropyExemptHeaders = map[string]bool{
 	"x-amz-cf-id":      true,
 	"x-amz-request-id": true,
 	"cf-ray":           true,
+	// Trace and span ids are 16 or 32 hex digits by design.
+	"x-b3-traceid":      true,
+	"x-b3-spanid":       true,
+	"x-b3-parentspanid": true,
+	"b3":                true,
+	"sentry-trace":      true,
+	"x-trace-id":        true,
 }
 
 // scrubHeaderValue scrubs one header value (lname is the lower-cased name).
@@ -163,6 +170,23 @@ func idx32(i int) int32 {
 	return int32(i) // #nosec G115 -- callers keep len(in) at or below unwrapMaxLen
 }
 
+// quoteFollows reports whether a quote character, raw, escaped (\\") or
+// URL-encoded (%22), starts at in[i:].
+func quoteFollows(in string, i int) bool {
+	if i >= len(in) {
+		return false
+	}
+	switch in[i] {
+	case '"':
+		return true
+	case '\\':
+		return i+1 < len(in) && in[i+1] == '"'
+	case '%':
+		return i+2 < len(in) && in[i+1] == '2' && in[i+2] == '2'
+	}
+	return false
+}
+
 func unwrapEscapes(in string) (string, []int32) {
 	dec := make([]byte, 0, len(in))
 	idx := make([]int32, 0, len(in)+1)
@@ -173,6 +197,12 @@ func unwrapEscapes(in string) (string, []int32) {
 			dec = append(dec, byte(unwrapHexVal(in[i+1])<<4|unwrapHexVal(in[i+2]))) // #nosec G115 -- both nibbles were checked to be 0..15 above
 			idx = append(idx, idx32(i))
 			i += 3
+		case c == '\\' && i+1 < len(in) && in[i+1] == '\\' && quoteFollows(in, i+2):
+			// An escaped backslash right before a closing quote ("abc\\\\" in
+			// JSON). Decoded it would read as an escaped quote and swallow the
+			// fields after it, so it is left out of dec; it stays in the text
+			// outside any span.
+			i += 2
 		case c == '\\' && i+1 < len(in) && (in[i+1] == '"' || in[i+1] == '\\' || in[i+1] == '/'):
 			dec = append(dec, in[i+1])
 			idx = append(idx, idx32(i))
@@ -294,6 +324,10 @@ func (s *Scrubber) scrubUnwrapped(in string, ctx ScrubContext) (string, int) {
 	for _, sp := range panSpans(dec) {
 		addKind(sp.start, sp.end, "PAN")
 	}
+	for _, sp := range s.presetSpans(dec) {
+		addKind(sp.start, sp.end, "TOKEN")
+	}
+	s.unwrappedExtraSpans(in, dec, idx, ctx, addKind)
 	if len(spans) == 0 {
 		return in, 0
 	}
@@ -329,6 +363,70 @@ func (s *Scrubber) scrubUnwrapped(in string, ctx ScrubContext) (string, int) {
 	}
 	b.WriteString(in[last:])
 	return b.String(), count
+}
+
+// unwrappedExtraSpans adds the spans of the passes that scrubLayersOpts runs
+// after the first rules: cloud secrets, strict fields, JSON secret arrays and
+// the user's own patterns. They run on the decoded text; each span is in dec
+// offsets and has the same false-positive guards as the plain passes.
+func (s *Scrubber) unwrappedExtraSpans(in, dec string, idx []int32, ctx ScrubContext, addKind func(a, b int, kind string)) {
+	skipValue := func(a, b int) bool {
+		v, orig := dec[a:b], in[idx[a]:idx[b]]
+		return strings.HasPrefix(v, "[REDACTED_") || isAllowMarkOnly(v) || isPlaceholderValue(v) || isPlaceholderValue(orig)
+	}
+
+	// Cloud secrets (cloud_secrets.go).
+	gm := scrubGate.Match(dec)
+	if gm&gateCloud != 0 {
+		for _, m := range reCloudNamedSecret.FindAllStringSubmatchIndex(dec, -1) {
+			if len(m) >= 6 && m[4] >= 0 && !skipValue(m[4], m[5]) {
+				addKind(m[4], m[5], "KEY")
+			}
+		}
+		if gm&gateCloudPass != 0 {
+			for _, m := range reCloudConnPassword.FindAllStringSubmatchIndex(dec, -1) {
+				if len(m) >= 6 && m[4] >= 0 && !skipValue(m[4], m[5]) {
+					addKind(m[4], m[5], "")
+				}
+			}
+		}
+	}
+	if strings.Contains(dec, "8Q~") {
+		for _, m := range reAzureADSecret.FindAllStringIndex(dec, -1) {
+			addKind(m[0], m[1], "KEY")
+		}
+	}
+
+	// Secret-looking fields whose value matches no known key shape.
+	for _, r := range strictFieldRanges(dec, scrubOpts{ctx: ctx}.strictMax()) {
+		if !isPlaceholderValue(in[idx[r[0]]:idx[r[1]]]) {
+			addKind(r[0], r[1], "")
+		}
+	}
+
+	// "password": ["a", "b"]
+	if gm&gateSecretKey != 0 {
+		for _, m := range s.reJSONSecretArr.FindAllStringSubmatchIndex(dec, -1) {
+			if len(m) < 8 || m[2] < 0 || m[4] < 0 {
+				continue
+			}
+			key := dec[m[2]:m[3]]
+			for _, q := range reQuotedString.FindAllStringIndex(dec[m[4]:m[5]], -1) {
+				a, b := m[4]+q[0]+1, m[4]+q[1]-1
+				if b <= a || skipValue(a, b) || benignBareKey(key, dec[a:b]) {
+					continue
+				}
+				addKind(a, b, "")
+			}
+		}
+	}
+
+	// The user's own patterns.
+	for _, re := range s.extraPatterns {
+		for _, m := range re.FindAllStringIndex(dec, -1) {
+			addKind(m[0], m[1], "")
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +496,7 @@ func (s *Scrubber) scrubHexSecrets(in string) (string, int) {
 		if n := j - i; n == 32 || n == 40 || n == 64 {
 			beforeOK := i == 0 || !isWordByte(in[i-1])
 			afterOK := j == len(in) || !isWordByte(in[j])
-			if beforeOK && afterOK && shannonEntropyBits(in[i:j]) >= entropyHexWebhookMin {
+			if beforeOK && afterOK && !hexValueKeyIsIdentifier(in, i) && shannonEntropyBits(in[i:j]) >= entropyHexWebhookMin {
 				b.WriteString(in[last:i])
 				b.WriteString(s.tag("TOKEN", in[i:j]))
 				s.Tokens.Add(1)

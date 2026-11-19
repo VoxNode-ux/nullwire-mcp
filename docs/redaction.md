@@ -24,7 +24,7 @@ Known shapes and names. These rules are exact, so they run before any guesswork.
 |---|---|---|---|
 | 1 | **Private keys** | PEM blocks: RSA, EC, OpenSSH, encrypted, PGP; JSON-escaped ones; blocks cut off by a size limit | `-----BEGIN PRIVATE KEY-----…` |
 | 2 | **Secret fields** | JSON string values and **arrays**, and query parameters, for names like `password`, `api_key`, `access_token`, `secret`, `session_id` | `"password": ["a","b"]`, `?api_key=…` |
-| 3 | **XML elements** | Element text for secret-looking names, with namespaces and CDATA; the tags themselves stay intact | `<wsse:Password>…</wsse:Password>` |
+| 3 | **XML elements** | Element text for secret-looking names, with namespaces and CDATA; the tags themselves stay intact. A second pass reads the document with `encoding/xml` and also covers markup nested inside a secret element, CDATA blocks (scrubbed as documents of their own) and XML escaped as text (`&lt;Password&gt;…`). Metadata inside a secret element (`Type`, `Expires`, …) is kept. | `<wsse:Password>…</wsse:Password>`, `<Credentials><Value>…</Value></Credentials>` |
 | 4 | **URL credentials** | `user:password@host` in any URL or connection string, including a password that is URL-encoded (`p%40ss`) | `postgres://app:pw@db/prod` |
 | 5 | **Auth schemes** | `Bearer`, `Basic` and `Token` credentials. In a body, a short all-lowercase word after `Basic` or `Token` is read as ordinary English (`invalid token provided`); in a header or a query string the value is always a credential, so `Authorization: Token mysecretkey` is redacted. | `Authorization: Bearer …` |
 | 6 | **JWTs** | Three-part `eyJ…` tokens | |
@@ -32,7 +32,7 @@ Known shapes and names. These rules are exact, so they run before any guesswork.
 | 8 | **Secret-named fields** | `key: value` or `key=value` pairs where the *name* says secret and the value is 12 to 256 characters. A `;` ends the value (connection strings), and the rule also reads inside escaped JSON. Placeholders such as `${VAR}`, `{{var}}`, `%VAR%` and `******` are kept; a value that merely starts with `%` (`password=%mysecret1234`) is still redacted. | `x-custom-auth: …`, `session=…`, `{\"custom_key\":\"…\"}` |
 | 9 | **Your patterns** | Regexes from the [config file](cli.md#configuration) | |
 | 10 | **IP addresses** | IPv4 (strictly validated) and IPv6, except loopback and unspecified. A version number after a product name (`Chrome/120.0.6099.109`) is kept; an address in a URL path is redacted. | `203.0.113.9`, `/nodes/10.1.2.3/status` |
-| 11 | **Base64** | Base64 or URL-safe base64 whose *decoded* text contains a secret. Images and other binary data are left alone. | `eyJhcGlfa2V5…` |
+| 11 | **Base64, hex, Base32, Base58** | Runs in these encodings whose *decoded* text contains a secret. The decoded bytes must be strictly printable text, so images, hashes and random ids are left alone. Hex needs an even run of at least 24 digits, Base32 is upper case, Base58 uses the Bitcoin alphabet. Base24 is not handled. | `eyJhcGlfa2V5…` |
 
 ### Stage 3: Match and guess (layer 12)
 
@@ -66,6 +66,8 @@ Prefixes are matched case-sensitively, so `asiapacific_region` is left alone.
 
 **Bodies are decoded before scrubbing.** `gzip` and `deflate` (up to 1 MiB expanded, a decompression-bomb guard). `multipart/form-data` forms are split into fields; file parts keep only the field name, file name and size.
 
+**MessagePack and CBOR bodies are read, not stored as bytes.** Bodies of type `application/msgpack` and `application/cbor` (and `+msgpack`, `+cbor`) are walked read-only into JSON before scrubbing, so the rules above see `{"password":"…"}` as they would in a JSON body. Map keys and UTF-8 strings are copied. Binary strings and extension values are replaced by a byte-count placeholder such as `"[binary 32 bytes]"` and are never stored. CBOR items wrapped in tag 24 are read too. The type is taken from `Content-Type` only.
+
 ## Recent changes
 
 These are the redaction changes since 1.2.0. They are not yet in a tagged release.
@@ -87,3 +89,13 @@ These are the redaction changes since 1.2.0. They are not yet in a tagged releas
 **Tooling**
 - New `go generate` step to train the randomness detector's character-pair table (see [Development](architecture.md#development)).
 - New regression tests: `guardrail_test.go` (false positives, leaks, concurrency) and `unwrap_unicode_test.go`.
+
+## Compliance presets (`-preset`, `"presets"` in `-secrets-config`)
+
+Off by default. `-preset pci-dss,hipaa,gdpr` or `-preset all`; unknown names fail startup. All hits are tagged `[REDACTED_TOKEN#...]`.
+
+| Preset | Detects | Guard against false positives |
+|---|---|---|
+| `pci-dss` | CVV/CVC/CID values (3-4 digits) and track 1/2 data | only after a `cvv`/`cvc`/`cid`/`csc`/`cvn`/`track1`/`track2` field name and `:` or `=`. (Card numbers are always redacted by the Luhn rule.) |
+| `hipaa` | US SSN `AAA-GG-SSSS` | SSA rules (area not 000/666/9xx, group not 00, serial not 0000) and a nearby `ssn`, `social security`, `tin` or `taxpayer` |
+| `gdpr` | IBAN, compact or in groups of four, any case | known country, exact length for that country, ISO 7064 mod 97-10 |

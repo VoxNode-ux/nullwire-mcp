@@ -117,3 +117,109 @@ func TestBase64ImageDoesNotExhaustSecretBudget(t *testing.T) {
 		t.Errorf("secret after binary base64 images was not redacted (n=%d)", n)
 	}
 }
+
+func TestProseAfterSchemeContexts(t *testing.T) {
+	for _, c := range []struct {
+		scheme, tok string
+		ctx         ScrubContext
+		want        bool
+	}{
+		{"Basic", "invalid", ContextBody, true},
+		{"token", "expired", ContextBody, true},
+		{"Basic", "Invalid", ContextBody, false},
+		{"Basic", "abc1", ContextBody, false},
+		{"Basic", "a_b", ContextBody, false},
+		{"Bearer", "invalid", ContextBody, false},
+		{"BEARER", "invalid", ContextBody, false},
+		{"Basic", "invalid", ContextHeader, false},
+		{"Basic", "invalid", ContextQuery, false},
+	} {
+		if got := proseAfterScheme(c.scheme, c.tok, c.ctx); got != c.want {
+			t.Errorf("proseAfterScheme(%q, %q, %v) = %v, want %v", c.scheme, c.tok, c.ctx, got, c.want)
+		}
+	}
+}
+
+func TestBenignBareKeyVariants(t *testing.T) {
+	long := "Sup3rS3cretValueZZ"
+	for _, c := range []struct {
+		prefix, val string
+		want        bool
+	}{
+		{`"key": "`, "short", true},
+		{`"key":"`, "a/b/c/long/path/value", true},
+		{`key=`, "id:12345678901234", true},
+		{`"Key" : `, "two words in a value", true},
+		{`  KEY:`, "tiny", true},
+		{`"key":[`, "short", true},
+		{`"key": "`, `back\slash-long-value`, true},
+		{`"key": "`, long, false},
+		{`"key": "`, strings.Repeat("a", 11), true},
+		{`"key": "`, strings.Repeat("a", 12), false},
+		{`"apikey": "`, "short", false},
+		{`"api_key": "`, "short", false},
+		{`"keys": "`, "short", false},
+		{``, "short", false},
+		{`"`, "short", false},
+		{`=`, "short", false},
+	} {
+		if got := benignBareKey(c.prefix, c.val); got != c.want {
+			t.Errorf("benignBareKey(%q, %q) = %v, want %v", c.prefix, c.val, got, c.want)
+		}
+	}
+}
+
+func TestBenignResourceIDsAndULIDs(t *testing.T) {
+	for _, s := range []string{
+		"req_abc123", "msg_x", "resp_x", "ch_x", "cus_x", "in_x", "sub_x", "pi_x", "pm_x", "evt_x", "cs_x",
+		"i-0abc", "vpc-0abc", "ami-0abc", "subnet-0abc", "sg-0abc",
+		"sha256-abcdef", "sha384-abcdef", "sha512-abcdef",
+		"01ARZ3NDEKTSV4RRFFQ69G5FAV",
+	} {
+		if !benignResourceID(s) {
+			t.Errorf("%q should be a benign resource id", s)
+		}
+	}
+	for _, s := range []string{
+		"pi_abc_secret_xyz", "cs_live_secret_abc", "", "token_abc", "i-1abc", "sha1-abc",
+		"81ARZ3NDEKTSV4RRFFQ69G5FAV",  // first character past 7
+		"01ARZ3NDEKTSV4RRFFQ69G5FAI",  // I is not Crockford base32
+		"01ARZ3NDEKTSV4RRFFQ69G5FAL",  // L
+		"01ARZ3NDEKTSV4RRFFQ69G5FAO",  // O
+		"01ARZ3NDEKTSV4RRFFQ69G5FAU",  // U
+		"01arz3ndektsv4rrffq69g5fav",  // lower case
+		"01ARZ3NDEKTSV4RRFFQ69G5FA",   // 25 characters
+		"01ARZ3NDEKTSV4RRFFQ69G5FAVX", // 27 characters
+		"01ARZ3NDEKTSV4RRFFQ69G5FA-",  // a symbol
+	} {
+		if benignResourceID(s) {
+			t.Errorf("%q must not be a benign resource id", s)
+		}
+	}
+	if isULID("") || !isULID("7ZZZZZZZZZZZZZZZZZZZZZZZZZ") || isULID("8ZZZZZZZZZZZZZZZZZZZZZZZZZ") {
+		t.Error("isULID boundaries")
+	}
+}
+
+func TestReplaceIPv4Skips(t *testing.T) {
+	s := fxApp(t).scrub
+	for name, in := range map[string]string{
+		"version after Product/":  "Chrome/120.0.6099.109",
+		"loopback":                "connect 127.0.0.1 now",
+		"unspecified":             "bind 0.0.0.0 now",
+		"no address":              "nothing here",
+		"leading zeros":           "host 01.02.03.04 end",
+		"version in a longer UA":  "ua Mozilla/5.0 Safari/537.36 Edge/120.0.2210.91",
+	} {
+		count := 0
+		if out := replaceIPv4(s, in, &count); out != in || count != 0 {
+			t.Errorf("%s: %q -> %q (%d)", name, in, out, count)
+		}
+	}
+	// An address in a URL path is not a product version.
+	count := 0
+	out := replaceIPv4(s, "GET /api/10.20.30.40 and /x/Chrome/8.8.4.4 end", &count)
+	if count != 2 || strings.Contains(out, "10.20.30.40") || strings.Contains(out, "8.8.4.4") {
+		t.Errorf("addresses in paths: %q (%d)", out, count)
+	}
+}

@@ -34,19 +34,28 @@
     background-image: radial-gradient(60rem 28rem at 50% -8rem, color-mix(in srgb, var(--accent) 14%, transparent), transparent);
     font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  main { max-width: 62rem; margin: 0 auto; padding: 3.5rem 1.25rem 4rem; }
-  header { text-align: center; margin-bottom: 2.25rem; }
-  h1 { margin: 0; font-size: clamp(2rem, 5vw, 3rem); letter-spacing: -.02em; line-height: 1.15; }
-  .tag { margin: .6rem auto 0; max-width: 34rem; color: var(--muted); font-size: 1.1rem; }
-  .pills { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: center; margin-top: 1.1rem; }
-  .pill { font-size: .8rem; color: var(--muted); border: 1px solid var(--line); background: var(--card); padding: .2rem .7rem; border-radius: 999px; }
+  main {
+    width: min(100%, 72rem);
+    margin: 0 auto;
+    padding: clamp(3rem, 5vw, 3.5rem) clamp(.75rem, 3.5vw, 1.75rem) clamp(2rem, 6vw, 4rem);
+  }
+  header { text-align: center; margin-bottom: clamp(1.25rem, 3.5vw, 2.25rem); }
+  h1 { margin: 0; font-size: clamp(1.75rem, 1.2rem + 2.8vw, 3rem); letter-spacing: -.02em; line-height: 1.15; }
+  .tag { margin: .6rem auto 0; max-width: 34rem; color: var(--muted); font-size: clamp(.95rem, .88rem + .45vw, 1.15rem); }
+  .pills { display: flex; flex-wrap: wrap; gap: clamp(.35rem, 1.2vw, .5rem); justify-content: center; margin-top: 1.1rem; }
+  .pill { font-size: clamp(.75rem, .72rem + .15vw, .82rem); color: var(--muted); border: 1px solid var(--line); background: var(--card); padding: .22rem .7rem; border-radius: 999px; }
 
-  .demo { background: var(--card); border: 1px solid var(--line); border-radius: 22px; box-shadow: var(--shadow); padding: 1.25rem; }
+  .demo {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: clamp(14px, 2.5vw, 22px);
+    box-shadow: var(--shadow);
+    padding: clamp(.85rem, 2.5vw, 1.35rem);
+  }
   .bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; margin-bottom: 1rem; }
   .chips { display: flex; flex-wrap: wrap; gap: .45rem; align-items: center; }
   .chips span { color: var(--muted); font-size: .85rem; margin-right: .15rem; }
   button { font: inherit; cursor: pointer; }
-  .chip { font-size: .85rem; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 999px; padding: .25rem .8rem; transition: border-color .15s, color .15s; }
+  .chip { font-size: clamp(.78rem, .75rem + .15vw, .86rem); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 999px; padding: .3rem .8rem; transition: border-color .15s, color .15s; }
   .chip:hover, .chip:focus-visible { border-color: var(--accent); color: var(--accent); outline: none; }
   .chip.custom { border-style: dashed; border-color: var(--accent); color: var(--accent); }
   .chip.custom:hover, .chip.custom:focus-visible { background: color-mix(in srgb, var(--accent) 12%, transparent); }
@@ -54,43 +63,64 @@
   .dot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--muted); opacity: .6; }
   .dot.on { background: var(--ok); opacity: 1; box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 20%, transparent); }
 
-  .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-  @media (max-width: 720px) { .panes { grid-template-columns: 1fr; } }
+  /* .panes auto-fits (1 col on phones, 2 from ~800px); .grid keeps an explicit 2-col layout above 720px */
+  .panes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: clamp(.75rem, 2vw, 1.1rem); }
+  .grid  { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 clamp(.75rem, 2vw, 1rem); }
+  @media (max-width: 720px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+  .pane, .cmd { min-width: 0; } /* prevents long URLs/code from blowing out mobile width */
+
   .pane label { display: block; font-size: .78rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 .4rem .2rem; }
   textarea, .out {
-    width: 100%; min-height: 17rem; margin: 0; padding: .9rem 1rem; border-radius: 14px;
-    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
-    font: .88rem/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    width: 100%;
+    min-height: clamp(11rem, 28vh, 21rem);
+    max-height: 60vh;
+    margin: 0;
+    padding: clamp(.7rem, 2vw, .95rem) clamp(.8rem, 2.2vw, 1rem);
+    border-radius: 14px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--ink);
+    font: clamp(.8rem, .76rem + .22vw, .92rem)/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   textarea { resize: vertical; display: block; }
   textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 1px; border-color: transparent; }
   .out { white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
   .out .ph { color: var(--muted); }
   mark { background: var(--mark-bg); color: var(--mark-ink); border-radius: 6px; padding: .05rem .3rem; font-weight: 600; }
-  .foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5rem 1.5rem; margin-top: 1rem; color: var(--muted); font-size: .85rem; }
+  .engine-note { text-align: center; color: var(--muted); font-size: clamp(.85rem, .8rem + .2vw, .95rem); margin: 1.1rem 0 .9rem; }
+  .foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5rem 1.5rem; margin-top: 1rem; color: var(--muted); font-size: clamp(.78rem, .75rem + .15vw, .86rem); }
   .foot b { color: var(--ink); font-weight: 600; }
 
-  section { margin-top: 3rem; }
-  h2 { font-size: 1.25rem; margin: 0 0 .9rem; letter-spacing: -.01em; }
+  section { margin-top: clamp(2rem, 4.5vw, 3rem); }
+  h2 { font-size: clamp(1.1rem, 1rem + .5vw, 1.35rem); margin: 0 0 .9rem; letter-spacing: -.01em; }
   .cmd { position: relative; margin: 0 0 1rem; }
   .cmd small { display: block; color: var(--muted); margin: 0 0 .35rem .2rem; font-size: .85rem; }
-  .cmd pre { margin: 0; background: var(--code); border: 1px solid var(--line); border-radius: 14px; padding: .9rem 4.6rem .9rem 1rem; overflow-x: auto; font: .85rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .copy { position: absolute; right: .55rem; bottom: .55rem; font-size: .78rem; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: .2rem .6rem; }
+  .cmd pre {
+    margin: 0; min-height: 2.75rem; display: flex; align-items: center;
+    background: var(--code); border: 1px solid var(--line); border-radius: 14px;
+    padding: .85rem 4.6rem .85rem clamp(.8rem, 2vw, 1rem); overflow-x: auto;
+    font: clamp(.78rem, .74rem + .22vw, .88rem)/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .copy { position: absolute; right: .55rem; bottom: .55rem; font-size: .78rem; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: .25rem .65rem; }
   .copy:hover { color: var(--accent); border-color: var(--accent); }
-  .note { color: var(--muted); font-size: .92rem; }
+  .note { color: var(--muted); font-size: clamp(.86rem, .82rem + .2vw, .94rem); }
   a { color: var(--accent); text-underline-offset: 3px; }
-  footer { text-align: center; color: var(--muted); font-size: .85rem; margin-top: 3rem; }
+  footer { text-align: center; color: var(--muted); font-size: .85rem; margin-top: clamp(2rem, 5vw, 3rem); }
 
-  .theme { display: none; position: fixed; top: 1rem; right: 1rem; z-index: 10; width: 2.5rem; height: 2.5rem; place-items: center; padding: 0; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 50%; box-shadow: var(--shadow); transition: color .15s, border-color .15s; }
+  .theme {
+    display: none; position: fixed;
+    top: clamp(.6rem, 2vw, 1rem); right: clamp(.6rem, 2vw, 1rem); z-index: 10;
+    width: clamp(2.25rem, 5vw, 2.55rem); height: clamp(2.25rem, 5vw, 2.55rem);
+    place-items: center; padding: 0; color: var(--muted); background: var(--card);
+    border: 1px solid var(--line); border-radius: 50%; box-shadow: var(--shadow);
+    transition: color .15s, border-color .15s;
+  }
   .js .theme { display: grid; }
   .theme:hover, .theme:focus-visible { color: var(--accent); border-color: var(--accent); outline: none; }
   .theme svg { width: 1.15rem; height: 1.15rem; }
   .theme .sun { display: none; }
   .theme.is-dark .sun { display: block; }
   .theme.is-dark .moon { display: none; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1rem; }
-  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
   h3 { font-size: .8rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 1.6rem 0 .7rem .2rem; }
+  @media (pointer: coarse) { textarea, .out { font-size: 16px; } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 <script>
@@ -114,6 +144,8 @@ document.documentElement.classList.add("js");
       <span class="pill">MCP server built in</span>
     </div>
   </header>
+
+  <p class="engine-note"><mark>This is the real Go engine, compiled to WebAssembly.</mark> Nothing you type leaves this page.</p>
 
   <div class="demo">
     <div class="bar">
@@ -140,7 +172,7 @@ document.documentElement.classList.add("js");
     </div>
     <div class="foot">
       <span id="count"><b>0</b> secrets hidden</span>
-      <span>This is the real Go engine, compiled to WebAssembly. Nothing you type leaves this page.</span>
+      <span>Runs locally in your browser</span>
     </div>
   </div>
 
@@ -233,7 +265,7 @@ scoop install nullwire-mcp</pre>
     <p class="note">Prefer to download by hand? The <a href="https://github.com/VoxNode-ux/nullwire-mcp/releases/latest">latest release</a> has plain binaries for Linux, macOS, Windows, FreeBSD, OpenBSD and NetBSD, plus <code>.deb</code>, <code>.rpm</code> and <code>.apk</code> packages, with a <code>SHA256SUMS.txt</code> to check them against.</p>
   </section>
 
-  <footer>MIT licensed · <a href="https://github.com/VoxNode-ux/nullwire-mcp">GitHub</a></footer>
+  <footer>Apache 2.0 licensed · <a href="https://github.com/VoxNode-ux/nullwire-mcp">GitHub</a></footer>
 </main>
 
 <noscript><p style="text-align:center">The live demo needs JavaScript. The install commands above still work.</p></noscript>
@@ -243,7 +275,7 @@ scoop install nullwire-mcp</pre>
 (() => {
   const $ = (id) => document.getElementById(id);
   const input = $("in"), out = $("out"), count = $("count"), status = $("status"), dot = $("dot");
-  const TAG = /\[REDACTED_[A-Z]+#[0-9a-f]{6}\]/g;
+  const TAG = /\[REDACTED_[A-Z0-9_]+#[0-9a-f]{6}\]/g;
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
   // Fake values only. The AWS pair is the example from Amazon's own docs.

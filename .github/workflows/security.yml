@@ -1,6 +1,9 @@
 name: Security checks
 
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
   schedule:
     - cron: "23 3 * * 1"   # Mondays 03:23 UTC, on the default branch
@@ -35,7 +38,8 @@ jobs:
 
   fuzz:
     name: Fuzz the scrubber (${{ matrix.target }})
-    # Runs weekly on main and on demand.
+    # Runs weekly on main, on pushes to main and on demand; not on pull requests.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:

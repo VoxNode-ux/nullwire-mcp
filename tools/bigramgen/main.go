@@ -8,35 +8,31 @@
 //
 // Usage (see the go:generate line in internal/app/tokenscore.go):
 //
-//	go run ./tools/bigramgen -benign dir1,file2 [-secrets file] [-synthetic N] -out bigram_trained.go
+//	go run ./tools/bigramgen -benign dir1,file2 [-secrets file] [-synthetic N] [-synthetic-benign N] [-holdout-mod N] -out bigram_trained.go
 package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"go/format"
-	"io/fs"
+	"io"
 	"math"
-	"math/rand"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/VoxNode-ux/nullwire-mcp/tools/internal/corpus"
 )
 
 const (
-	minTokenLen = 4  // shorter runs are noise
-	maxTokenLen = 64 // longer runs are blobs, not identifiers
-	minPairs    = 8  // a pair needs this many observations (both classes) to be emitted
+	minTokenLen = corpus.MinTokenLen
+	minPairs    = 8 // a pair needs this many observations (both classes) to be emitted
 	lo, hi      = -4, 6
 )
 
 type counts [128 * 128]float64
-
-func isTokByte(c byte) bool {
-	return c == '_' || c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-}
 
 // addToken counts the byte pairs of one token.
 func addToken(c *counts, tok string) {
@@ -49,46 +45,12 @@ func addToken(c *counts, tok string) {
 
 // addText splits text into identifier-like tokens and counts each.
 func addText(c *counts, text string) int {
-	n := 0
-	start := -1
-	for i := 0; i <= len(text); i++ {
-		if i < len(text) && isTokByte(text[i]) {
-			if start < 0 {
-				start = i
-			}
-			continue
-		}
-		if start >= 0 {
-			if l := i - start; l >= minTokenLen && l <= maxTokenLen {
-				addToken(c, text[start:i])
-				n++
-			}
-			start = -1
-		}
-	}
-	return n
+	return corpus.Tokens(text, func(tok string) { addToken(c, tok) })
 }
 
-// synthetic returns n random secret-like strings (hex, base62, base64url) from
-// a fixed seed, so the generated table is reproducible.
-func synthetic(n int) []string {
-	r := rand.New(rand.NewSource(1)) // #nosec G404 -- the seed is fixed on purpose so the table is reproducible; nothing here is secret
-	alphabets := []string{
-		"0123456789abcdef",
-		"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
-		"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_",
-	}
-	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		a := alphabets[i%len(alphabets)]
-		b := make([]byte, 20+r.Intn(44))
-		for j := range b {
-			b[j] = a[r.Intn(len(a))]
-		}
-		out = append(out, string(b))
-	}
-	return out
-}
+// synthetic returns n random secret-like strings (hex, base62, base64url,
+// no "eyJ", few '-'/'_') from the training seed, so the table is reproducible.
+func synthetic(n int) []string { return corpus.Secrets(n, corpus.SeedTrain) }
 
 type entry struct {
 	a, b byte
@@ -143,18 +105,35 @@ func render(es []entry) ([]byte, error) {
 	b.WriteString("// trainedBigram holds the pairs with enough evidence in the training corpus.\n")
 	b.WriteString("var trainedBigram = []bigramEntry{\n")
 	for _, e := range es {
-		fmt.Fprintf(&b, "\t{%d, %d, %d},\n", e.a, e.b, e.v)
+		_, _ = fmt.Fprintf(&b, "\t{%d, %d, %d},\n", e.a, e.b, e.v)
 	}
 	b.WriteString("}\n")
 	return format.Source([]byte(b.String()))
 }
 
 func main() {
-	benignArg := flag.String("benign", "", "comma-separated files or directories of benign text (code, docs)")
-	secretsFile := flag.String("secrets", "", "optional file with one real secret per line")
-	synth := flag.Int("synthetic", 0, "number of synthetic random secret-like strings to add")
-	out := flag.String("out", "bigram_trained.go", "output file")
-	flag.Parse()
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		_, _ = fmt.Fprintln(os.Stderr, "bigramgen:", err)
+		os.Exit(1)
+	}
+}
+
+// run is main without the process: it parses args, trains and writes the table.
+func run(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("bigramgen", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	benignArg := fs.String("benign", "", "comma-separated files or directories of benign text (code, docs)")
+	secretsFile := fs.String("secrets", "", "optional file with one real secret per line")
+	synth := fs.Int("synthetic", 0, "number of synthetic random secret-like strings to add")
+	synthBenign := fs.Int("synthetic-benign", 0, "number of synthetic benign identifiers (diverse casing, never a small word list) to add")
+	holdoutMod := fs.Int("holdout-mod", 0, "if > 0, files whose path hash % N == 0 are kept out of training (they are the holdout)")
+	out := fs.String("out", "bigram_trained.go", "output file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	var benign, secret counts
 	nb := 0
@@ -163,45 +142,16 @@ func main() {
 		if root == "" {
 			continue
 		}
-		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				if n := d.Name(); n == ".git" || n == "node_modules" || n == "vendor" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			// Test files hold fake secrets and the output file is this tool's own
-			// product; neither is benign training text.
-			if strings.HasSuffix(path, "_test.go") || filepath.Base(path) == "bigram_trained.go" {
-				return nil
-			}
-			switch strings.ToLower(filepath.Ext(path)) {
-			case ".go", ".md", ".txt", ".py", ".js", ".ts", ".json", ".yaml", ".yml", ".toml":
-			default:
-				return nil
-			}
-			data, err := os.ReadFile(path) // #nosec G304 G122 -- offline developer tool: it reads the folders the user passed with -benign
-			if err != nil {
-				return err
-			}
-			nb += addText(&benign, string(data))
-			return nil
-		})
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "bigramgen:", err)
-			os.Exit(1)
+		if err := corpus.Walk(root, *holdoutMod, false, func(text string) { nb += addText(&benign, text) }); err != nil {
+			return err
 		}
 	}
 
 	ns := 0
 	if *secretsFile != "" {
-		f, err := os.Open(*secretsFile)
+		f, err := os.Open(*secretsFile) // #nosec G304 -- offline developer tool: the path is the -secrets flag
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "bigramgen:", err)
-			os.Exit(1)
+			return err
 		}
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 1<<20), 1<<20)
@@ -211,30 +161,33 @@ func main() {
 				ns++
 			}
 		}
-		if err := sc.Err(); err != nil {
-			fmt.Fprintln(os.Stderr, "bigramgen: reading -secrets:", err)
-			os.Exit(1)
+		err = sc.Err()
+		_ = f.Close()
+		if err != nil {
+			return fmt.Errorf("reading -secrets: %w", err)
 		}
-		f.Close()
 	}
 	for _, s := range synthetic(*synth) {
 		addToken(&secret, s)
 		ns++
 	}
 
+	for _, s := range corpus.Benign(*synthBenign, corpus.SeedTrain) {
+		addToken(&benign, s)
+		nb++
+	}
+
 	es := train(&benign, &secret)
 	if len(es) == 0 {
-		fmt.Fprintf(os.Stderr, "bigramgen: no table (benign tokens %d, secret tokens %d); need both\n", nb, ns)
-		os.Exit(1)
+		return fmt.Errorf("no table (benign tokens %d, secret tokens %d); need both", nb, ns)
 	}
 	src, err := render(es)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "bigramgen:", err)
-		os.Exit(1)
+		return err
 	}
 	if err := os.WriteFile(*out, src, 0o600); err != nil {
-		fmt.Fprintln(os.Stderr, "bigramgen:", err)
-		os.Exit(1)
+		return err
 	}
-	fmt.Printf("bigramgen: %d pairs from %d benign and %d secret tokens -> %s\n", len(es), nb, ns, *out)
+	_, _ = fmt.Fprintf(stdout, "bigramgen: %d pairs from %d benign and %d secret tokens -> %s\n", len(es), nb, ns, *out)
+	return nil
 }

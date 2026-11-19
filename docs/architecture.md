@@ -32,6 +32,7 @@ This page lists the algorithms NullWire uses and where they live in `internal/ap
 - **Circular ring buffer.** 50 flows in RAM, overwritten oldest first. `app.go`.
 - **Overlap capture window.** 8 KiB beyond the size limit is captured before truncation and scrubbed with the body. `app.go`.
 - **Zip-bomb shield.** Size and entry limits on archives, and a decoded-size cap on gzip and base64 content. `scrub_extra.go`.
+- **permessage-deflate (opt-in).** One flate reader per direction, the last 32 KiB of output kept as the next message's dictionary under context takeover, with per-message and per-connection output caps. `ws.go`.
 - **WebSocket unmasking.** Client-to-server frames are XORed with the 4-byte masking key at index `(position + i) & 3`, on a read-only copy of the payload. `ws.go`.
 
 <a id="development"></a>
@@ -64,8 +65,18 @@ go test -race ./...
 | `main.go` | Tiny entry point (keeps `go install github.com/VoxNode-ux/nullwire-mcp@latest` working) |
 | `internal/app/app.go` | Proxy, scrubber, ring buffer, MCP server and CLI |
 | `internal/app/ws.go` | WebSocket frame reader and capture (read-only taps) |
+| `internal/app/gateway.go` | `-target-map`: the `/_gw/<name>/` route allowlist for the reverse gateway |
+| `internal/app/graphql.go` | GraphQL operation labels for the flow note: JSON, batches, GET, persisted queries |
+| `internal/app/har.go` | The `export_har` tool: scrubbed flows as a size-capped HAR 1.2 document, in memory |
+| `internal/app/protowire.go` | Schema-less protobuf and gRPC decoder: frame header, varints, text or nested message or bytes |
 | `internal/app/inspect.go` | Request shield, multipart scrubbing, `Accept-Encoding` and protobuf rules |
-| `internal/app/scrub_extra.go` | JSON array, XML and base64 redaction |
+| `internal/app/scrub_extra.go` | JSON array, XML, base64, hex, Base32 and Base58 redaction |
+| `internal/app/scrub_xml.go` | Nested XML, CDATA and escaped-XML redaction (`encoding/xml`) |
+| `internal/app/binary_json.go` | Shared core of the MessagePack and CBOR walkers: the JSON writer, depth and size limits, and the Content-Type entry point |
+| `internal/app/msgpack.go` | Read-only MessagePack walker: map keys and UTF-8 strings into JSON, `bin` and `ext` payloads left out |
+| `internal/app/cbor.go` | Read-only CBOR walker (RFC 8949): the same for CBOR, including indefinite lengths and tag 24 |
+| `internal/app/ws_live.go` | Live refresh of an open WebSocket's flow |
+| `internal/app/limits.go` | `-max-body` and the limits derived from it |
 | `internal/app/scrub_context.go` | Header, query and body contexts; the decode pass for URL-encoded and escaped secrets (`%XX`, `\"`, `\/`, `\uXXXX`) |
 | `internal/app/guards.go` | False-positive guards: bare `key` fields, prose after `Token`/`Basic`, resource ids, IPv4 handling |
 | `internal/app/siphash.go` | SipHash-2-4, the keyed hash behind the taint ring |
@@ -78,6 +89,8 @@ go test -race ./...
 | `internal/app/tokenscore.go` | Log-odds score behind the randomness detector |
 | `internal/app/bigram_trained.go` | Trained character-pair table (an empty stub until `go generate` runs) |
 | `tools/bigramgen/` | Generator that trains the character-pair table |
+| `tools/trigramgen/` | Generator for the optional trigram table used only on borderline scores (`internal/app/trigram_trained.go`, empty = off) |
+| `tools/internal/corpus/` | Shared reproducible benign/secret corpora and holdout split |
 | `internal/vendors/` | Vendor prefix tiers |
 | `internal/app/cloud_secrets.go` | Prefix-less cloud credentials (AWS, Azure, Cloudflare) and their headers |
 | `internal/scan/` | The `scan` command (`scan.go`, `env_scan.go`, `toml_scan.go`, `yaml_scan.go`, `zip_scan.go`, `history_scan.go`, plus the small `Scrubber` interface in `scrubber.go`) |

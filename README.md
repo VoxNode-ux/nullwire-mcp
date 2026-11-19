@@ -118,7 +118,7 @@ Where each one lives in the code is in [docs/architecture.md](docs/architecture.
 - Redaction is pattern and heuristic based. A secret in an unanticipated shape that is also low in randomness can slip through, and the detector can redact a harmless long identifier. Add your own patterns in the config.
 - A secret made only of decimal digits is not caught by the randomness detector. It is still redacted under a secret-looking field name or in a secret header.
 - Brotli and Zstd bodies are never decoded: requests are refused with `415` (unless you pass `-allow-uninspectable`) and responses are flagged.
-- Binary protobuf and gRPC bodies are not captured. WebSocket flows appear when the connection closes.
+- Protobuf and gRPC bodies are read without a schema (field numbers, no names), so only value-based rules apply, and a body that is not readable protobuf is not stored. gRPC-Web text mode and compression other than gzip and deflate are not decoded. A WebSocket flow appears when the socket opens and is refreshed while it stays open.
 - Release binaries carry signed build provenance, not OS-vendor code-signing certificates. Verify them with `SHA256SUMS.txt` and `gh attestation verify`.
 
 The full list and the safety shields are in [docs/security.md](docs/security.md).
@@ -138,7 +138,7 @@ Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-Built by [VoxNode-ux](https://github.com/VoxNode-ux) · Version 1.2.0 · License: see the repository's `LICENSE` file
+Built by [VoxNode-ux](https://github.com/VoxNode-ux) · Version 1.2.0 · License: [Apache 2.0](LICENSE)
 
 
 **If NullWire saved you from pasting a secret into a chat, a ⭐ helps others find it.**

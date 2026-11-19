@@ -1,0 +1,62 @@
+name: Install secret scanners
+description: >
+  Installs gitleaks and trufflehog from their release tarballs. Each download is
+  checked against a pinned checksums-file hash and a pinned tarball hash before
+  it is unpacked. Nothing is written to the repository.
+
+inputs:
+  gitleaks-version:
+    description: gitleaks version without the leading v
+    default: "8.30.1"
+  gitleaks-tarball-sha256:
+    description: SHA-256 of gitleaks_<v>_linux_x64.tar.gz
+    default: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  gitleaks-checksums-sha256:
+    description: SHA-256 of gitleaks_<v>_checksums.txt
+    default: "061476c21adaf5441516f96f185c1a4706a83cd6329b9b38762271b3d4a52fae"
+  trufflehog-version:
+    description: trufflehog version without the leading v
+    default: "3.99.9"
+  trufflehog-tarball-sha256:
+    description: SHA-256 of trufflehog_<v>_linux_amd64.tar.gz
+    default: "12050095c8063bf4d34f9f6cbce6ba9fa8d0deea9d503d0570364feba093658e"
+  trufflehog-checksums-sha256:
+    description: SHA-256 of trufflehog_<v>_checksums.txt
+    default: "eb54cf007da6f82620297c73d12f9972c25eeb69acc4dde951110880cd8ed877"
+
+runs:
+  using: composite
+  steps:
+    - name: Download, verify and unpack gitleaks and trufflehog
+      shell: bash
+      env:
+        GL_V: ${{ inputs.gitleaks-version }}
+        GL_TAR: ${{ inputs.gitleaks-tarball-sha256 }}
+        GL_SUM: ${{ inputs.gitleaks-checksums-sha256 }}
+        TH_V: ${{ inputs.trufflehog-version }}
+        TH_TAR: ${{ inputs.trufflehog-tarball-sha256 }}
+        TH_SUM: ${{ inputs.trufflehog-checksums-sha256 }}
+      run: |
+        set -euo pipefail
+        bin="$RUNNER_TEMP/scanner-bin"; mkdir -p "$bin"
+        cd "$RUNNER_TEMP"
+
+        gl="https://github.com/gitleaks/gitleaks/releases/download/v${GL_V}"
+        curl -fsSLO "$gl/gitleaks_${GL_V}_linux_x64.tar.gz"
+        curl -fsSLO "$gl/gitleaks_${GL_V}_checksums.txt"
+        echo "${GL_SUM}  gitleaks_${GL_V}_checksums.txt" | sha256sum -c -
+        echo "${GL_TAR}  gitleaks_${GL_V}_linux_x64.tar.gz" | sha256sum -c -
+        grep " gitleaks_${GL_V}_linux_x64.tar.gz\$" "gitleaks_${GL_V}_checksums.txt" | sha256sum -c -
+        tar -xzf "gitleaks_${GL_V}_linux_x64.tar.gz" -C "$bin" gitleaks
+
+        th="https://github.com/trufflesecurity/trufflehog/releases/download/v${TH_V}"
+        curl -fsSLO "$th/trufflehog_${TH_V}_linux_amd64.tar.gz"
+        curl -fsSLO "$th/trufflehog_${TH_V}_checksums.txt"
+        echo "${TH_SUM}  trufflehog_${TH_V}_checksums.txt" | sha256sum -c -
+        echo "${TH_TAR}  trufflehog_${TH_V}_linux_amd64.tar.gz" | sha256sum -c -
+        grep " trufflehog_${TH_V}_linux_amd64.tar.gz\$" "trufflehog_${TH_V}_checksums.txt" | sha256sum -c -
+        tar -xzf "trufflehog_${TH_V}_linux_amd64.tar.gz" -C "$bin" trufflehog
+
+        echo "$bin" >> "$GITHUB_PATH"
+        "$bin/gitleaks" version
+        "$bin/trufflehog" --version

@@ -261,7 +261,10 @@ func TestChaosClientDropsMidRequest(t *testing.T) {
 		fmt.Fprintf(c, "POST /v1/login HTTP/1.1\r\nHost: %s\r\nX-Target-URL: %s\r\nContent-Length: 5000\r\n\r\n{\"password\":\"hunter2", srv.Listener.Addr().String(), up.URL)
 		_ = c.Close() // vanish halfway through the body
 	}
-	time.Sleep(200 * time.Millisecond)
+	// Close blocks until every in-flight handler has returned, so the
+	// capture is no longer pending on the request path when the leak check
+	// starts (chaosNoLeak still polls for the background capture itself).
+	srv.Close()
 	chaosNoLeak(t, app)
 	chaosStillServes(t, app)
 }

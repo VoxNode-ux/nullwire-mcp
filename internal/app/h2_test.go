@@ -303,3 +303,85 @@ func TestConnectNeverInterceptsTLS(t *testing.T) {
 		t.Errorf("the tunnel's payload leaked into the ring: %q / %q", e.RequestBody, e.ResponseBody)
 	}
 }
+
+func TestGRPCStatusSources(t *testing.T) {
+	h := func(kv ...string) http.Header {
+		out := http.Header{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			out.Set(kv[i], kv[i+1])
+		}
+		return out
+	}
+	cases := []struct {
+		name         string
+		f            rawFlow
+		status, mess string
+	}{
+		{"trailers win", rawFlow{respTrailers: h("Grpc-Status", "5", "Grpc-Message", "not found"), respHeaders: h("Grpc-Status", "0")}, "5", "not found"},
+		{"headers when there are no trailers", rawFlow{respHeaders: h("Grpc-Status", " 14 ", "Grpc-Message", "down")}, "14", "down"},
+		{"blank trailer falls through to headers", rawFlow{respTrailers: h("Grpc-Status", "  "), respHeaders: h("Grpc-Status", "3")}, "3", ""},
+		{"non-numeric status", rawFlow{respTrailers: h("Grpc-Status", "oops", "Grpc-Message", "x")}, "", ""},
+		{"non-numeric trailer hides a good header", rawFlow{respTrailers: h("Grpc-Status", "x"), respHeaders: h("Grpc-Status", "0")}, "", ""},
+		{"nothing", rawFlow{}, "", ""},
+	}
+	for _, c := range cases {
+		if st, msg := grpcStatus(c.f); st != c.status || msg != c.mess {
+			t.Errorf("%s: got (%q, %q), want (%q, %q)", c.name, st, msg, c.status, c.mess)
+		}
+	}
+}
+
+func TestAcceptsTrailersAndProtocols(t *testing.T) {
+	for name, vals := range map[string][]string{
+		"trailers":        {"trailers"},
+		"mixed case":      {"Trailers"},
+		"in a list":       {"gzip, Trailers"},
+		"second header":   {"gzip", "trailers"},
+		"spaces":          {"  trailers  "},
+	} {
+		h := http.Header{}
+		for _, v := range vals {
+			h.Add("Te", v)
+		}
+		if !acceptsTrailers(h) {
+			t.Errorf("%s: TE %v must accept trailers", name, vals)
+		}
+	}
+	for name, vals := range map[string][]string{"none": nil, "gzip only": {"gzip"}, "empty": {""}, "lookalike": {"trailersx"}} {
+		h := http.Header{}
+		for _, v := range vals {
+			h.Add("Te", v)
+		}
+		if acceptsTrailers(h) {
+			t.Errorf("%s: TE %v must not accept trailers", name, vals)
+		}
+	}
+	if p := serverProtocols(); !p.HTTP1() || !p.UnencryptedHTTP2() || p.HTTP2() {
+		t.Errorf("serverProtocols = http1:%v h2c:%v h2:%v", p.HTTP1(), p.UnencryptedHTTP2(), p.HTTP2())
+	}
+}
+
+func TestRoundTripperForPicksByProtocol(t *testing.T) {
+	app := fxApp(t)
+	plain, _ := url.Parse("http://upstream.test/")
+	secure, _ := url.Parse("https://upstream.test/")
+	h1 := &http.Request{ProtoMajor: 1}
+	h2 := &http.Request{ProtoMajor: 2}
+
+	if rt := app.roundTripperFor(h1, plain); rt != http.RoundTripper(app.transport) {
+		t.Error("an HTTP/1 client uses the shared transport")
+	}
+	if rt := app.roundTripperFor(h2, secure); rt != http.RoundTripper(app.transport) {
+		t.Error("an HTTPS upstream negotiates HTTP/2 on its own, with the shared transport")
+	}
+	first := app.roundTripperFor(h2, plain)
+	if first == http.RoundTripper(app.transport) || app.h2c == nil || first != http.RoundTripper(app.h2c) {
+		t.Fatalf("an h2c client with a plain upstream needs the h2c transport: %v", first)
+	}
+	if again := app.roundTripperFor(h2, plain); again != first {
+		t.Error("the h2c transport is created once")
+	}
+	if !app.h2c.Protocols.UnencryptedHTTP2() {
+		t.Error("the h2c transport must speak unencrypted HTTP/2")
+	}
+}

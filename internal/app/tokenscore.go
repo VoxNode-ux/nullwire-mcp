@@ -2,7 +2,8 @@ package app
 
 import "math"
 
-//go:generate go run ../../tools/bigramgen -benign ../.. -synthetic 20000 -out bigram_trained.go
+//go:generate go run ../../tools/bigramgen -benign ../.. -synthetic 20000 -synthetic-benign 20000 -holdout-mod 5 -out bigram_trained.go
+//go:generate go run ../../tools/trigramgen -benign ../.. -synthetic 40000 -synthetic-benign 40000 -holdout-mod 5 -out trigram_trained.go
 
 // Token scoring that replaces the hard entropy/vowel cliffs with one smooth
 // log-odds score: positive means "looks like a secret".
@@ -28,6 +29,18 @@ const (
 	wLen     = 0.05
 	cLen     = 24.0
 	maxLenW  = 64
+)
+
+// Borderline trigram escalation. When the normal score lands within
+// trigramBand of 0 and a trained trigramTable exists, the bigram mean is
+// blended with the trigram mean. trigramAlpha is conservative because trigrams
+// the table does not know count as 0 and must not drag a strong bigram signal
+// toward 0. trigramLo/Hi are the same evidence range as bigramMean.
+const (
+	trigramBand  = 2.0
+	trigramAlpha = 0.3
+	trigramLo    = -4.0
+	trigramHi    = 6.0
 )
 
 var (
@@ -151,15 +164,66 @@ func maxWindowEntropy(s string) float64 {
 	return best
 }
 
+// trigramMean is the mean trigram evidence of s in [trigramLo, trigramHi]:
+// triples missing from trigramTable and non-ASCII triples count as 0, and it
+// is 0 for fewer than three bytes or an empty table. No allocation.
+func trigramMean(s string) float64 {
+	if len(s) < 3 || len(trigramTable) == 0 {
+		return 0
+	}
+	sum := 0.0
+	for i := 2; i < len(s); i++ {
+		a, b, c := s[i-2], s[i-1], s[i]
+		if a >= 128 || b >= 128 || c >= 128 {
+			continue
+		}
+		key := uint32(a)<<14 | uint32(b)<<7 | uint32(c)
+		// Manual binary search: entries are (key<<8 | score-trigramLo), sorted by key.
+		l, h := 0, len(trigramTable)
+		for l < h {
+			m := l + (h-l)/2
+			if trigramTable[m]>>8 < key {
+				l = m + 1
+			} else {
+				h = m
+			}
+		}
+		if l < len(trigramTable) && trigramTable[l]>>8 == key {
+			sum += float64(trigramTable[l]&0xff) + trigramLo
+		}
+	}
+	m := sum / float64(len(s)-2)
+	if m < trigramLo {
+		return trigramLo
+	}
+	if m > trigramHi {
+		return trigramHi
+	}
+	return m
+}
+
+// combineScore is the log-odds sum for a given bigram-style mean.
+func combineScore(entropy, mean, vowel, n float64) float64 {
+	z := wEntropy * (entropy - cEntropy)
+	z -= wBigram * mean
+	z -= wVowel * (vowel - cVowel)
+	z += wLen * (n - cLen)
+	return z
+}
+
 // tokenLogOdds returns the log-odds score that s is a secret (> 0 means yes).
+// Borderline scores (|z| < trigramBand) are re-scored with the trigram table
+// blended in; clear cases never pay for it.
 func tokenLogOdds(s string) float64 {
 	n := len(s)
 	if n > maxLenW {
 		n = maxLenW
 	}
-	z := wEntropy * (maxWindowEntropy(s) - cEntropy)
-	z -= wBigram * bigramMean(s)
-	z -= wVowel * (vowelRatio(s) - cVowel)
-	z += wLen * (float64(n) - cLen)
+	h, vr, bm := maxWindowEntropy(s), vowelRatio(s), bigramMean(s)
+	z := combineScore(h, bm, vr, float64(n))
+	if len(trigramTable) > 0 && math.Abs(z) < trigramBand {
+		mean := (1-trigramAlpha)*bm + trigramAlpha*trigramMean(s)
+		z = combineScore(h, mean, vr, float64(n))
+	}
 	return z
 }

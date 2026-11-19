@@ -45,3 +45,40 @@ func TestSyntheticIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+func TestRcovAddTokenIgnoresNonASCII(t *testing.T) {
+	var c counts
+	addToken(&c, "ab\xc3\xa9cd") // a pair that touches a byte >= 128 is not counted
+	var total float64
+	for _, v := range c {
+		total += v
+	}
+	if total != 2 { // only "ab" and "cd"
+		t.Errorf("counted %v pairs, want 2", total)
+	}
+	addToken(&c, "a") // too short for any pair
+}
+
+func TestRcovTrainClampsAndNeedsBothClasses(t *testing.T) {
+	var benign, secret counts
+	if got := train(&benign, &secret); got != nil {
+		t.Errorf("empty classes: %v, want nil", got)
+	}
+	benign[int('a')<<7|int('b')] = 1e6
+	if got := train(&benign, &secret); got != nil {
+		t.Errorf("no secret class: %v, want nil", got)
+	}
+	secret[int('c')<<7|int('d')] = 1e6
+	secret[int('a')<<7|int('b')] = 1
+	benign[int('c')<<7|int('d')] = 1
+	got := train(&benign, &secret)
+	if len(got) != 2 {
+		t.Fatalf("entries = %v, want 2", got)
+	}
+	if got[0].a != 'a' || got[0].b != 'b' || got[0].v != hi {
+		t.Errorf("benign-only pair = %+v, want clamped to %d", got[0], hi)
+	}
+	if got[1].a != 'c' || got[1].b != 'd' || got[1].v != lo {
+		t.Errorf("secret-only pair = %+v, want clamped to %d", got[1], lo)
+	}
+}
