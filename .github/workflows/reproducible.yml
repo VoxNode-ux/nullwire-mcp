@@ -27,18 +27,22 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
           cache: false
       - name: Build the same targets as release.yml
         shell: bash
         env:
           CGO_ENABLED: "0"
+          GOARM: "7"
         run: |
           set -euo pipefail
           mkdir -p out
           go version | tee out/go-version.txt
-          for t in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+          for t in linux/amd64 linux/arm64 linux/arm linux/riscv64 linux/386 \
+                   darwin/amd64 darwin/arm64 windows/amd64 windows/arm64 \
+                   freebsd/amd64 freebsd/arm64 openbsd/amd64 openbsd/arm64 \
+                   netbsd/amd64 netbsd/arm64; do
             os="${t%/*}"; arch="${t#*/}"
             ext=""; [ "$os" = windows ] && ext=".exe"
             GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o "out/nullwire-$os-$arch$ext" .
@@ -48,10 +52,15 @@ jobs:
             if command -v sha256sum >/dev/null 2>&1; then sha256sum "$f"; else shasum -a 256 "$f"; fi
           done | tr -d '\r' | sed 's/^\([0-9a-f]*\) [ *]/\1  /' > sums.txt
           cat sums.txt
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      - name: Save the checksums and the Go version
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: sums-${{ matrix.os }}
-          path: out/sums.txt
+          path: |
+            out/sums.txt
+            out/go-version.txt
+          if-no-files-found: ignore
           retention-days: 7
 
   compare:
@@ -69,11 +78,22 @@ jobs:
           cd sums
           first=$(ls | head -n 1)
           status=0
+          : > ../compare-diff.txt
+          echo "Go toolchain per runner:"
+          for d in *; do echo "  $d: $(cat "$d/go-version.txt" 2>/dev/null || echo unknown)"; done
           for d in *; do
-            if ! diff -u "$first/sums.txt" "$d/sums.txt"; then
+            if ! diff -u "$first/sums.txt" "$d/sums.txt" | tee -a ../compare-diff.txt; then
               echo "::error::$d built different binaries than $first"
               status=1
             fi
           done
           [ "$status" = 0 ] && echo "All runners produced identical binaries." | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$status"
+      - name: Save the differences
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: reproducible-diff
+          path: compare-diff.txt
+          if-no-files-found: ignore
+          retention-days: 7

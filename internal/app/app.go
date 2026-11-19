@@ -9,11 +9,13 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
+	"crypto/ecdsa"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -33,6 +35,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/VoxNode-ux/nullwire-mcp/internal/install"
 	"github.com/VoxNode-ux/nullwire-mcp/internal/protect"
@@ -62,6 +65,13 @@ const (
 	entropyShortMin       = 3.6
 	entropyMaxVowel       = 0.25
 	hasTokenSignalAutoLen = 24
+
+	// Header and query values are single short values, so the randomness
+	// check looks at much longer runs there than in free-text bodies.
+	entropyMaxLenWide    = 2048
+	entropyHexWebhookMin = 2.0
+	strictFieldMax       = 256
+	strictFieldMaxWide   = 2048
 )
 
 var defaultAndroidDNS = []string{"1.1.1.1:53", "9.9.9.9:53"}
@@ -91,7 +101,8 @@ type RingBuffer struct {
 
 func NewRingBuffer() *RingBuffer { return &RingBuffer{nextID: 1} }
 
-func (r *RingBuffer) Push(entry FlowEntry) {
+// Push stores entry and returns the ID it was given.
+func (r *RingBuffer) Push(entry FlowEntry) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	entry.ID = r.nextID
@@ -101,9 +112,30 @@ func (r *RingBuffer) Push(entry FlowEntry) {
 	if r.size < ringCapacity {
 		r.size++
 	}
+	return entry.ID
+}
+
+// Update changes the entry with the given ID in place and reports whether it
+// was found. It does nothing, and returns false, when the entry has already
+// been pushed out of the buffer (or the buffer was cleared).
+func (r *RingBuffer) Update(id uint64, fn func(*FlowEntry)) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := 0; i < r.size; i++ {
+		idx := (r.next - 1 - i + 2*ringCapacity) % ringCapacity
+		if r.slots[idx].ID == id {
+			fn(&r.slots[idx])
+			r.slots[idx].ID = id // fn cannot move an entry to another ID
+			return true
+		}
+	}
+	return false
 }
 
 func (r *RingBuffer) Len() int {
+	if r == nil {
+		return 0
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.size
@@ -149,9 +181,7 @@ func (r *RingBuffer) GetByID(id uint64) (FlowEntry, bool) {
 func (r *RingBuffer) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for i := range r.slots {
-		r.slots[i] = FlowEntry{}
-	}
+	clear(r.slots[:])
 	r.next = 0
 	r.size = 0
 }
@@ -166,8 +196,18 @@ type SecretsConfig struct {
 	SensitiveHeaders    []string       `json:"sensitive_headers"`
 	IgnoreURLSubstrings []string       `json:"ignore_url_substrings"`
 	IgnoreHeaders       []string       `json:"ignore_headers"`
+	IgnoreFields        []string       `json:"ignore_fields"`   // body fields whose value is left as it is
+	IgnorePatterns      []string       `json:"ignore_patterns"` // body text matching one of these is left alone
 	CustomVendors       []VendorConfig `json:"custom_vendors"`
 	ExtraRegexPatterns  []ExtraPattern `json:"extra_regex_patterns"`
+
+	// Host egress controls: exact hosts, *.domain wildcards, IPs and CIDRs.
+	// blocked always beats allowed; a non-empty allowed list denies the rest.
+	AllowedUpstreamHosts []string `json:"allowed_upstream_hosts"`
+	BlockedUpstreamHosts []string `json:"blocked_upstream_hosts"`
+
+	// Presets switches on compliance redaction: pci-dss, hipaa, gdpr or all.
+	Presets []string `json:"presets"`
 }
 
 type ExtraPattern struct {
@@ -183,6 +223,12 @@ func loadSecretsConfig(path string) (*SecretsConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("-secrets-config %s: %v", path, err)
 	}
+	return parseSecretsConfig(path, raw)
+}
+
+// parseSecretsConfig validates the bytes of a -secrets-config file. A signed
+// policy pack is verified on these same bytes before they get here.
+func parseSecretsConfig(path string, raw []byte) (*SecretsConfig, error) {
 	var c SecretsConfig
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil, fmt.Errorf("-secrets-config %s: invalid JSON: %v", path, err)
@@ -195,6 +241,9 @@ func loadSecretsConfig(path string) (*SecretsConfig, error) {
 			return nil, fmt.Errorf("-secrets-config %s: extra_regex_patterns[%d] (%q): %v", path, i, p.Name, err)
 		}
 	}
+	if _, err := newAllowlist(c.IgnoreFields, c.IgnorePatterns); err != nil {
+		return nil, fmt.Errorf("-secrets-config %s: %v", path, err)
+	}
 	for i, v := range c.CustomVendors {
 		if v.Pattern != "" {
 			if _, err := regexp.Compile(v.Pattern); err != nil {
@@ -202,16 +251,25 @@ func loadSecretsConfig(path string) (*SecretsConfig, error) {
 			}
 		}
 	}
+	if _, err := newEgressPolicy(c.AllowedUpstreamHosts, c.BlockedUpstreamHosts); err != nil {
+		return nil, fmt.Errorf("-secrets-config %s: %v", path, err)
+	}
+	if _, err := normalizePresets(c.Presets); err != nil {
+		return nil, fmt.Errorf("-secrets-config %s: presets: %v", path, err)
+	}
 	return &c, nil
 }
 
 type Scrubber struct {
 	nonce          []byte
+	taint          *taintRing // keyed hashes of secrets redacted earlier in this run
 	extraSensitive map[string]bool
 	ignoreHeaders  map[string]bool
 	extraPatterns  []*regexp.Regexp
 	vendorGate     *vendors.Gate // Aho-Corasick pre-check over every prefix (run on lower-cased text)
 	vendorRules    []vendorRule // strong, weak, DSN and custom prefix rules
+	allow          *allowlist   // body exemptions from the user's config; nil when none are set
+	presets        presetSet    // -preset: pci-dss, hipaa, gdpr (all off by default)
 
 	reBearer          *regexp.Regexp
 	reSensitiveHeader *regexp.Regexp
@@ -225,9 +283,20 @@ type Scrubber struct {
 	reXML             *regexp.Regexp
 	reJSONSecretArr   *regexp.Regexp
 
-	Tokens  atomic.Uint64
-	Cookies atomic.Uint64
-	IPs     atomic.Uint64
+	// Counters are pointers so detached() can give a live refresh its own set.
+	Tokens  *atomic.Uint64
+	Cookies *atomic.Uint64
+	IPs     *atomic.Uint64
+}
+
+// detached returns a view of s that shares every rule and the taint ring but
+// counts into counters of its own. Live SSE/WebSocket refreshes rebuild the
+// same entry every ~500 ms; they use a detached view so the global totals are
+// raised once, by the final capture, and not on every refresh.
+func (s *Scrubber) detached() *Scrubber {
+	c := *s
+	c.Tokens, c.Cookies, c.IPs = new(atomic.Uint64), new(atomic.Uint64), new(atomic.Uint64)
+	return &c
 }
 
 func NewScrubber() (*Scrubber, error) { return NewScrubberWithConfig(&SecretsConfig{}) }
@@ -291,6 +360,7 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		weak     bool
 	}{
 		{vendors.DefaultVendorPrefixes, vendorTokenClass, 16, false},
+		{vendors.DefaultDollarVendorPrefixes, vendorDollarTokenClass, 16, false},
 		{vendors.DefaultWeakVendorPrefixes, vendorTokenClass, 20, true},
 		{vendors.DefaultDSNPrefixes, vendorDSNClass, 8, false},
 		{customPrefixes, vendorTokenClass, 8, false},
@@ -306,8 +376,24 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		}
 	}
 
+	allow, err := newAllowlist(cfg.IgnoreFields, cfg.IgnorePatterns)
+	if err != nil {
+		return nil, fmt.Errorf("secrets config: %v", err)
+	}
+
+	pnames, err := normalizePresets(cfg.Presets)
+	if err != nil {
+		return nil, fmt.Errorf("secrets config: presets: %v", err)
+	}
+
 	return &Scrubber{
+		Tokens:         new(atomic.Uint64),
+		Cookies:        new(atomic.Uint64),
+		IPs:            new(atomic.Uint64),
 		nonce:          nonce,
+		taint:          newTaintRing(nonce),
+		allow:          allow,
+		presets:        newPresetSet(pnames),
 		extraSensitive: extra,
 		ignoreHeaders:  ignore,
 		extraPatterns:  extras,
@@ -316,7 +402,7 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		reBearer:       regexp.MustCompile(`(?i)(Bearer|Basic|Token)\s+([A-Za-z0-9._~+/=-]{8,})`),
 		reSensitiveHeader: regexp.MustCompile(`(?i)^(authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|proxy-authorization)$`),
 		reJWT:             regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
-		reAPIKey:          regexp.MustCompile(`(?i)\b(sk-[a-zA-Z0-9_-]{20,}|ghp_[a-zA-Z0-9]{30,}|github_pat_[a-zA-Z0-9_]{30,}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[0-9a-zA-Z-]+|AKIA[0-9A-Z]{16})\b`),
+		reAPIKey:          regexp.MustCompile(`(?i)\b((?-i:sk-[A-Za-z0-9]{20,})|ghp_[a-zA-Z0-9]{30,}|github_pat_[a-zA-Z0-9_]{30,}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[0-9a-zA-Z-]+|AKIA[0-9A-Z]{16})\b`),
 		reJSONSecret:      regexp.MustCompile(`(?i)("(?:access_token|refresh_token|id_token|api_key|apikey|secret|client_secret|password|passwd|session_id|auth_token|key)"\s*:\s*")((?:[^"\\]|\\.)+)(")`),
 		reQuerySecret:     regexp.MustCompile(`(?i)((?:^|[?&])(?:api_key|apikey|token|access_token|refresh_token|id_token|secret|client_secret|password|passwd|key)=)([^&\s#]+)`),
 		reUserInfo:        regexp.MustCompile(`(://[^/\s:@]+:)([^@/\s]+)(@)`),
@@ -326,7 +412,7 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		// The text of an XML element whose name suggests a secret. Only the opening "</" is part of the match, so the rest of the closing tag is
 		// left in place; a body cut off before the closing tag is redacted to the end of the text. RE2 has no backreferences, so the closing
 		// tag name is not compared with the opening one.
-		reXML: regexp.MustCompile(`(?is)(<(?:[A-Za-z0-9_.-]+:)?[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|apikey|api_key|api-key|authorization|credential|privatekey|private_key|accesskey|access_key|sessionid|session_id)[A-Za-z0-9_.-]*(?:\s[^<>]*)?>)(<!\[CDATA\[.*?\]\]>|[^<]+)(</|\z)`),
+		reXML: regexp.MustCompile(`(?is)(<(?:[A-Za-z0-9_.-]+:)?[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|apikey|api_key|api-key|authorization|credential|privatekey|private_key|accesskey|access_key|sessionid|session_id)[A-Za-z0-9_.-]*(?:\s(?:[^<>]*[^/<>])?)?>)(<!\[CDATA\[.*?\]\]>|[^<]+)(</|\z)`),
 		// "password": ["a", "b"]
 		reJSONSecretArr: regexp.MustCompile(`(?i)("(?:access_token|refresh_token|id_token|api_key|apikey|secret|client_secret|password|passwd|session_id|auth_token|key)"\s*:\s*\[)((?:\s*"(?:[^"\\]|\\.)*"\s*,?)+)(\s*\])`),
 	}, nil
@@ -335,6 +421,9 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 // tag returns a short label for a redacted value. It is a keyed hash (HMAC-SHA256 with a random per-run key), cut to six hex characters,
 // so the same value gets the same label within one run and the label cannot be used to guess the value. It is never stored.
 func (s *Scrubber) tag(kind, raw string) string {
+	if s.taint != nil && (kind == "TOKEN" || kind == "KEY") {
+		s.taint.add(raw)
+	}
 	h := hmac.New(sha256.New, s.nonce)
 	h.Write([]byte(raw))
 	return "[REDACTED_" + kind + "#" + hex.EncodeToString(h.Sum(nil))[:6] + "]"
@@ -344,6 +433,7 @@ func (s *Scrubber) ResetCounters() {
 	s.Tokens.Store(0)
 	s.Cookies.Store(0)
 	s.IPs.Store(0)
+	s.taint.clear()
 }
 
 func containsAny(s string, subs []string) bool {
@@ -360,6 +450,8 @@ func containsAny(s string, subs []string) bool {
 // strings may also contain URL punctuation.
 const (
 	vendorTokenClass = `[A-Za-z0-9._~+/=-]`
+	// Like vendorTokenClass, plus "$" for tokens such as access_token$production$<id>$<hex>.
+	vendorDollarTokenClass = `[A-Za-z0-9._~+/=$-]`
 	vendorDSNClass   = `[A-Za-z0-9._~:/?#\[\]@!$&*+=%-]`
 )
 
@@ -385,7 +477,7 @@ func buildVendorRule(prefixes []string, class string, minLen int, weak bool) (ve
 	}
 	b.WriteString(`)`)
 	b.WriteString(class)
-	b.WriteString(fmt.Sprintf("{%d,}", minLen))
+	fmt.Fprintf(&b, "{%d,}", minLen)
 	return vendorRule{re: regexp.MustCompile(b.String()), prefixes: prefixes, weak: weak}, true
 }
 
@@ -402,24 +494,48 @@ func weakVendorMatchOK(m string, prefixes []string) bool {
 
 // ScrubText redacts everything NullWire recognises in in and returns the
 // result with the number of redactions.
-func (s *Scrubber) ScrubText(in string) (string, int) { return s.scrubLayers(in, true) }
+func (s *Scrubber) ScrubText(in string) (string, int) { return s.ScrubTextIn(in, ContextBody) }
+
+// ScrubTextIn is ScrubText for text whose origin is known. Header and query
+// contexts apply stricter rules than ContextBody (see ScrubContext).
+func (s *Scrubber) ScrubTextIn(in string, ctx ScrubContext) (string, int) {
+	o := scrubOpts{allowB64: true, ctx: ctx}
+	if s.allow != nil && ctx == ContextBody {
+		return s.scrubWithAllowlist(in, o)
+	}
+	return s.scrubLayersOpts(in, o)
+}
 
 // scrubLayers runs every rule. Base64 decoding is switched off for text that
 // was itself decoded from base64, so it never nests.
 func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
+	return s.scrubLayersOpts(in, scrubOpts{allowB64: allowB64})
+}
+
+func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 	if in == "" {
 		return in, 0
 	}
-	lower := strings.ToLower(in)
-
-	preJWT := strings.Contains(in, "eyJ")
-	preVendor := s.vendorGate.Match(lower)
-	preAPIKey := containsAny(lower, []string{"sk-", "ghp_", "github_pat_", "aiza", "xox", "akia"})
-	preUserInfo := strings.Contains(in, "://") && strings.Contains(in, "@")
-	preBearer := containsAny(lower, []string{"bearer", "basic", "token"})
-	preSecretKey := containsAny(lower, []string{"token", "secret", "password", "passwd", "session_id", "api_key", "apikey", "key=", `"key"`})
-
+	// Stage 1: secrets hidden by URL-encoding or escaped quotes are replaced
+	// first, on the original text; it allocates only when such escapes exist.
 	count := 0
+	{
+		var n int
+		in, n = s.scrubUnwrapped(in, o.ctx)
+		count += n
+	}
+	// Stage 2: the deterministic rules (keys, secret fields, credentials, vendor
+	// formats, your own patterns, IP addresses and base64).
+	// One zero-allocation pass answers every pre-check below.
+	gm := scrubGate.Match(in)
+
+	preJWT := gm&gateJWT != 0 && strings.Contains(in, "eyJ")
+	preVendor := s.vendorGate.Match(in)
+	preAPIKey := gm&gateAPIKey != 0
+	preUserInfo := strings.Contains(in, "://") && strings.Contains(in, "@")
+	preBearer := gm&gateBearer != 0
+	preSecretKey := gm&gateSecretKey != 0
+
 	out := in
 
 	if strings.Contains(in, "-----BEGIN") {
@@ -436,6 +552,11 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 			if g == nil {
 				return m
 			}
+			// Stage 1 may already have replaced this value with its own tag. Leave
+			// that tag exactly as it is: tagging a tag corrupts it.
+			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) || benignBareKey(g[1], g[2]) {
+				return m
+			}
 			count++
 			s.Tokens.Add(1)
 			return g[1] + s.tag("TOKEN", g[2]) + g[3]
@@ -446,18 +567,27 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 			if g == nil {
 				return m
 			}
+			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) || benignBareKey(g[1], g[2]) {
+				return m
+			}
 			count++
 			s.Tokens.Add(1)
 			return g[1] + s.tag("TOKEN", g[2])
 		})
 	}
-	if strings.Contains(in, "<") && containsAny(lower, xmlSecretHints) {
+	if gm&gateXML != 0 && (strings.Contains(in, "<") || strings.Contains(in, "&lt;")) {
+		// Tree pass first: it handles CDATA, nesting, benign leaves and entity-escaped markup.
+		// The regexp then only mops up what the tree could not follow (e.g. malformed documents).
+		out = s.scrubXMLTree(out, &count)
 		out = s.scrubXMLSecrets(out, &count)
 	}
 	if preUserInfo {
 		out = s.reUserInfo.ReplaceAllStringFunc(out, func(m string) string {
 			g := s.reUserInfo.FindStringSubmatch(m)
 			if g == nil {
+				return m
+			}
+			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) {
 				return m
 			}
 			count++
@@ -468,7 +598,7 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 	if preBearer {
 		out = s.reBearer.ReplaceAllStringFunc(out, func(m string) string {
 			g := s.reBearer.FindStringSubmatch(m)
-			if g == nil {
+			if g == nil || proseAfterScheme(g[1], g[2], o.ctx) {
 				return m
 			}
 			count++
@@ -486,6 +616,17 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 	if preVendor {
 		for _, vr := range s.vendorRules {
 			out = vr.re.ReplaceAllStringFunc(out, func(m string) string {
+				// A match that already holds a redaction (a DSN whose password reUserInfo
+				// tagged) was handled by an earlier rule; redacting it again would
+				// overwrite that tag and count it twice.
+				if strings.Contains(m, "[REDACTED_") {
+					// Already counted by reUserInfo: collapse the whole DSN (host and
+					// path included) into one tag without counting it again.
+					if strings.Contains(m, "://") {
+						return s.tag("TOKEN", m)
+					}
+					return m
+				}
 				if vr.weak && !weakVendorMatchOK(m, vr.prefixes) {
 					return m
 				}
@@ -504,11 +645,11 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 	}
 
 	var nCloud int
-	out, nCloud = s.scrubCloudSecrets(out, lower)
+	out, nCloud = s.scrubCloudSecrets(out, gm)
 	count += nCloud
 
 	var nStrict int
-	out, nStrict = s.scrubStrictFields(out)
+	out, nStrict = s.scrubStrictFieldsMax(out, o.strictMax())
 	count += nStrict
 
 	for _, re := range s.extraPatterns {
@@ -519,31 +660,49 @@ func (s *Scrubber) scrubLayers(in string, allowB64 bool) (string, int) {
 		})
 	}
 
-	var n6 int
-	out, n6 = s.scrubIPv6(out)
-	count += n6
-
-	out = s.reIPv4.ReplaceAllStringFunc(out, func(m string) string {
-		addr, err := netip.ParseAddr(m)
-		if err != nil || !addr.Is4() {
-			return m
-		}
-		canon := addr.String()
-		if canon == "127.0.0.1" || canon == "0.0.0.0" {
-			return m
-		}
-		count++
-		s.IPs.Add(1)
-		return s.tag("IP", canon)
-	})
-
-	if allowB64 {
-		out = s.scrubBase64(out, &count)
+	if !o.skipIP {
+		var n6 int
+		out, n6 = s.scrubIPv6(out)
+		count += n6
 	}
 
-	var nEntropy int
-	out, nEntropy = s.scrubHighEntropy(out)
-	count += nEntropy
+	if !o.skipIP && maybeIPv4(out) {
+		out = replaceIPv4(s, out, &count)
+	}
+
+	var nPAN int
+	out, nPAN = s.scrubPANs(out)
+	count += nPAN
+
+	if s.presets.enabled() {
+		var nPreset int
+		out, nPreset = s.scrubPresets(out)
+		count += nPreset
+	}
+
+	if o.allowB64 && hasBase64Run(out) {
+		out = s.scrubBase64(out, &count)
+	}
+	if o.allowB64 && hasEncodedRun(out) {
+		out = s.scrubEncodedText(out, &count)
+	}
+
+	// Stage 3: identity matching against earlier redactions, then the
+	// randomness heuristics, which are guesses and so run last. Both are skipped
+	// for exempt headers and allowlisted fields.
+	if !o.skipEntropy {
+		var nTaint int
+		out, nTaint = s.scrubTainted(out)
+		count += nTaint
+		if o.ctx == ContextHeader || o.ctx == ContextQuery {
+			var nHex int
+			out, nHex = s.scrubHexSecrets(out)
+			count += nHex
+		}
+		var nEntropy int
+		out, nEntropy = s.scrubHighEntropyMax(out, o.entropyMax())
+		count += nEntropy
+	}
 	return out, count
 }
 
@@ -558,7 +717,7 @@ func isKeyByte(c byte) bool {
 // skipping quotes and spaces: `"api_key": ` gives api_key.
 func keyBefore(in string, i int) string {
 	j := i
-	for j > 0 && (in[j-1] == ' ' || in[j-1] == '"' || in[j-1] == '\'') {
+	for j > 0 && (in[j-1] == ' ' || in[j-1] == '"' || in[j-1] == '\'' || in[j-1] == '\\') {
 		j--
 	}
 	k := j
@@ -568,9 +727,61 @@ func keyBefore(in string, i int) string {
 	return in[k:j]
 }
 
+// nonSecretFields lists common API/DB/metadata field names that end in "key" or
+// contain hints like "secret"/"token"/"api" without holding actual secrets.
+// Adapted from Gitleaks' generic-api-key allowlist (MIT License, Zachary Rice).
+var nonSecretFields = map[string]bool{
+	"public_key": true, "public-key": true, "publickey": true,
+	"primary_key": true, "primary-key": true, "primarykey": true,
+	"foreign_key": true, "foreign-key": true, "foreignkey": true,
+	"partition_key": true, "partition-key": true, "partitionkey": true,
+	"sort_key": true, "sort-key": true, "sortkey": true,
+	"schema_key": true, "schema-key": true,
+	"bucket_key": true, "bucket-key": true,
+	"idempotency_key": true, "idempotency-key": true, "idempotencykey": true,
+	"cache_key": true, "cache-key": true, "cachekey": true,
+	"key_id": true, "key-id": true, "keyid": true,
+	"key_name": true, "key-name": true, "keyname": true,
+	"key_alias": true, "key-alias": true,
+	"key_type": true, "key-type": true,
+	"key_size": true, "key-size": true,
+	"key_length": true, "key-length": true,
+	"secret_name": true, "secret-name": true,
+	"secret_size": true, "secret-size": true,
+	"secret_length": true, "secret-length": true,
+	"api_id": true, "api-id": true,
+	"api_name": true, "api-name": true,
+	"api_version": true, "api-version": true,
+	"api_endpoint": true, "api-endpoint": true,
+	"api_url": true, "api-url": true,
+	"token_endpoint": true, "token-endpoint": true,
+	"token_url": true, "token-url": true,
+	"token_uri": true, "token-uri": true,
+	"credentials_id": true, "credentials-id": true,
+	"credentials_url": true, "credentials-url": true,
+	"credentials_endpoint": true, "credentials-endpoint": true,
+	"withcredentials": true, "author": true,
+	"monkey": true, "donkey": true, "turkey": true,
+	"translation_key": true, "translation-key": true, "translationkey": true,
+	"i18n_key": true, "i18n-key": true, "i18nkey": true,
+	"react_key": true, "react-key": true, "reactkey": true,
+	"token_type": true, "token-type": true, "tokentype": true,
+	"token_scope": true, "token-scope": true, "tokenscope": true,
+	"session_state": true, "session-state": true, "sessionstate": true,
+	"signature_algorithm": true, "signature-algorithm": true, "signaturealgorithm": true,
+	"password_policy": true, "password-policy": true, "passwordpolicy": true,
+	"auth_method": true, "auth-method": true, "authmethod": true,
+	"authorizer": true,
+	"routing_key": true, "routing-key": true, "routingkey": true,
+	"object_key": true, "object-key": true, "objectkey": true,
+	"s3_key": true, "s3-key": true, "s3key": true,
+	"shard_key": true, "shard-key": true, "shardkey": true,
+	"project_key": true, "project-key": true, "projectkey": true,
+}
+
 func secretishKey(key string) bool {
 	k := strings.ToLower(key)
-	if k == "" {
+	if k == "" || nonSecretFields[k] {
 		return false
 	}
 	if strings.HasSuffix(k, "key") || k == "sig" || strings.HasSuffix(k, "_sig") || strings.HasSuffix(k, "-sig") {
@@ -584,68 +795,234 @@ func secretishKey(key string) bool {
 	return false
 }
 
+// isPlaceholderValue skips template expressions (${VAR}, ${{ secrets.X }},
+// {{var}}, %VAR%) and repeated dummy masks ("******", "xxxxxx") so CI YAML,
+// templates, and masked error messages remain debuggable.
+// Adapted from Gitleaks' global allowlist (MIT License, Zachary Rice).
+func isPlaceholderValue(s string) bool {
+	t := strings.TrimSpace(s)
+	if len(t) == 0 {
+		return false
+	}
+	switch strings.ToLower(t) {
+	case "true", "false", "null", "none", "undefined", "changeme", "changeit":
+		return true
+	}
+	if (strings.HasPrefix(t, "${") && strings.HasSuffix(t, "}")) ||
+		(strings.HasPrefix(t, "{{") && strings.HasSuffix(t, "}}")) ||
+		(len(t) > 2 && t[0] == '%' && t[len(t)-1] == '%' && !strings.ContainsAny(t[1:len(t)-1], " \t%")) {
+		return true
+	}
+	first := t[0]
+	if first == '*' || first == 'x' || first == 'X' || first == '.' || first == '-' {
+		for i := 1; i < len(t); i++ {
+			if t[i] != first {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 // scrubStrictFields redacts the value of a secret-looking field (token, key,
 // auth, session, ...) even when the value matches no known key shape. It only
 // fires for 12-256 character values without spaces, slashes, dots or colons
 // (so URLs, paths and timestamps are left alone), and never for a field whose
 // name gives no hint: ordinary values like "model":"claude-opus-4-5" survive.
-func (s *Scrubber) scrubStrictFields(in string) (string, int) {
-	if len(in) < 12 {
+
+// scrubStrictFieldsMax is scrubStrictFields with a limit on the value length:
+// 256 for bodies, 2048 for header and query contexts.
+
+func (s *Scrubber) scrubStrictFieldsMax(in string, maxVal int) (string, int) {
+	ranges := strictFieldRanges(in, maxVal)
+	if len(ranges) == 0 {
 		return in, 0
 	}
 	var b strings.Builder
-	count, last := 0, 0
+	last := 0
+	for _, r := range ranges {
+		b.WriteString(in[last:r[0]])
+		b.WriteString(s.tag("TOKEN", in[r[0]:r[1]]))
+		s.Tokens.Add(1)
+		last = r[1]
+	}
+	b.WriteString(in[last:])
+	return b.String(), len(ranges)
+}
+
+// strictValueStop reports whether c ends an unquoted field value.
+func strictValueStop(c byte) bool {
+	switch c {
+	case ' ', '"', '\'', ',', '\n', '\r', '\t', '}', ']', ')', '&', ';':
+		return true
+	}
+	return false
+}
+
+// strictFieldRanges finds the [start, end) ranges of the values that
+// scrubStrictFieldsMax redacts.
+func strictFieldRanges(in string, maxVal int) [][2]int {
+	if len(in) < 12 {
+		return nil
+	}
+	var out [][2]int
 	for i := 0; i < len(in); i++ {
 		if in[i] != ':' && in[i] != '=' {
 			continue
 		}
 		start := i + 1
-		for start < len(in) && (in[start] == ' ' || in[start] == '"' || in[start] == '\'') {
-			start++
+		for start < len(in) {
+			if c := in[start]; c == ' ' || c == '"' || c == '\'' {
+				start++
+			} else if c == '\\' && start+1 < len(in) && in[start+1] == '"' {
+				start += 2 // escaped quote, as in {\"custom_key\":\"...\"}
+			} else {
+				break
+			}
 		}
 		end := start
-		for end < len(in) && in[end] != ' ' && in[end] != '"' && in[end] != '\'' && in[end] != ',' && in[end] != '\n' && in[end] != '}' && in[end] != '&' {
+		for end < len(in) && !strictValueStop(in[end]) && (in[end] != '\\' || end+1 >= len(in) || in[end+1] != '"') {
 			end++
 		}
-		if end-start < 12 || end-start > 256 {
+		if start < len(in) && ((in[start] == '%' && isPlaceholderValue(in[start:end])) || strings.HasPrefix(in[start:], "${") || strings.HasPrefix(in[start:], "{{")) {
+			continue // template: the end scan would stop at its brace
+		}
+		if end-start < 12 || end-start > maxVal {
 			continue
 		}
-		if !secretishKey(keyBefore(in, i)) {
+		kb := keyBefore(in, i)
+		if !secretishKey(kb) {
 			continue
 		}
 		val := in[start:end]
-		if strings.HasPrefix(val, "[REDACTED_") || strings.ContainsAny(val, "/.\\:") {
+		if strings.HasPrefix(val, "[REDACTED_") || hasAllowMark(val) || isPlaceholderValue(val) || strings.ContainsAny(val, "\\:") {
 			continue
 		}
-		b.WriteString(in[last:start])
-		b.WriteString(s.tag("TOKEN", val))
-		s.Tokens.Add(1)
-		last = end
-		count++
+		if strings.ContainsAny(val, "/.") && !strictSlashDotOK(val) && (!isSignatureKey(kb) || !signatureValueOK(val)) {
+			continue
+		}
+		out = append(out, [2]int{start, end})
 		i = end - 1
 	}
-	if count == 0 {
-		return in, 0
+	return out
+}
+
+var (
+	reStrictDate    = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(?:[Tt][0-9:.+Zz-]*)?$`)
+	reStrictVersion = regexp.MustCompile(`^[vV]?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?$`)
+	reStrictPath    = regexp.MustCompile(`^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+/?$`)
+)
+
+// isSignatureKey reports whether k names a signature field: sig, signature, x-amz-signature.
+func isSignatureKey(k string) bool {
+	k = strings.ToLower(k)
+	return k == "sig" || k == "signature" || strings.HasSuffix(k, "_sig") || strings.HasSuffix(k, "-sig") ||
+		strings.HasSuffix(k, "_signature") || strings.HasSuffix(k, "-signature")
+}
+
+// signatureValueOK reports whether v looks like a percent-encoded or base64 signature,
+// as in an Azure SAS URL (?sv=...&sig=Ab%2Fc...%3D), whatever the mix of letters:
+// only URL-safe and base64 characters, and either a %XX escape or a base64 "/", "+" or "=".
+func signatureValueOK(v string) bool {
+	if len(v) < 12 || strings.Contains(v, "://") || strings.HasPrefix(v, "/") {
+		return false
 	}
-	b.WriteString(in[last:])
-	return b.String(), count
+	special := false
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		case c == '%':
+			if i+2 >= len(v) || !isHexByte(v[i+1]) || !isHexByte(v[i+2]) {
+				return false
+			}
+			special = true
+		case c == '/' || c == '+' || c == '=':
+			special = true
+		default:
+			return false
+		}
+	}
+	return special
+}
+
+func isHexByte(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// isPlainPath reports whether v is a slash-separated path such as
+// "Users/Alice/Desktop/file1.txt" or "Config/Prod2/App.json". Base64 keys with
+// "+" or "=" never match reStrictPath; a base64 key whose only symbol is "/"
+// does, so with upper case present every segment must also be word-like: at
+// most one capital, and only as the first letter. Random base64 pieces such as
+// "Zq8Xv3LmP0aTr9Yk" have several and stay candidates for redaction.
+func isPlainPath(v string) bool {
+	if strings.ContainsAny(v, "+=") || !reStrictPath.MatchString(v) {
+		return false
+	}
+	for _, seg := range strings.Split(v, "/") {
+		for i := 1; i < len(seg); i++ {
+			if seg[i] >= 'A' && seg[i] <= 'Z' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// strictSlashDotOK reports whether a value that holds "/" or "." may still be
+// a secret. Base64 signing and encryption keys use both characters; URLs,
+// paths, ISO dates, versions and plain dotted names do not count.
+func strictSlashDotOK(v string) bool {
+	if strings.Contains(v, "://") || strings.HasPrefix(v, "//") || strings.HasPrefix(v, "/") || strings.HasPrefix(v, "~/") || strings.HasPrefix(v, "./") || strings.HasPrefix(v, "../") {
+		return false
+	}
+	if reStrictDate.MatchString(v) || reStrictVersion.MatchString(v) || isPlainPath(v) {
+		return false
+	}
+	var lower, upper, digit bool
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; {
+		case c >= 'a' && c <= 'z':
+			lower = true
+		case c >= 'A' && c <= 'Z':
+			upper = true
+		case c >= '0' && c <= '9':
+			digit = true
+		}
+	}
+	// A key mixes cases or letters and digits; "com.example.app" does not.
+	return (lower && (upper || digit)) || (upper && digit)
 }
 
 func isEntropyCandidate(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
 }
 
+// isHexLike reports whether s is hex digits with at least one letter a-f. A
+// run of only decimal digits is a number (timestamp, id), not a hex secret.
 func isHexLike(s string) bool {
+	hasLetter := false
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
 		case c >= '0' && c <= '9':
-		case c >= 'a' && c <= 'f':
-		case c >= 'A' && c <= 'F':
+		case (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'):
+			hasLetter = true
 		default:
 			return false
 		}
 	}
-	return true
+	return hasLetter
+}
+
+// isAllDigits reports whether s is non-empty and holds only 0-9.
+func isAllDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 func hasTokenSignal(s string) bool {
@@ -692,22 +1069,53 @@ func shannonEntropyBits(s string) float64 {
 	return h
 }
 
-func looksLikeToken(s string) bool {
+// isHexUUID reports whether s is a canonical 8-4-4-4-12 UUID made only of hex digits.
+func isHexUUID(s string) bool {
+	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			continue
+		}
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// looksLikeTokenMax is looksLikeToken with a limit on the run length.
+func looksLikeTokenMax(s string, maxLen int) bool {
 	n := len(s)
-	if n < entropyMinLen || n > entropyMaxLen {
+	if n < entropyMinLen || n > maxLen {
 		return false
 	}
 
-	if n == 36 && s[8] == '-' && s[13] == '-' && s[18] == '-' && s[23] == '-' {
+	if isHexUUID(s) {
 		return false
 	}
 
+	if benignResourceID(s) {
+		return false
+	}
+
+	// A run of only decimal digits is a number (nanosecond timestamp, order or
+	// account id). Digits alone score as random under the log-odds model, so
+	// without this a 19-digit timestamp sits right at the threshold.
+	if isAllDigits(s) {
+		return false
+	}
 	h := shannonEntropyBits(s)
 	if isHexLike(s) {
 		return h >= entropyHexMin
 	}
 	if !hasTokenSignal(s) {
 		return false
+	}
+	if useLogOdds {
+		return tokenLogOdds(s) > 0
 	}
 	if vowelRatio(s) > entropyMaxVowel {
 		return false
@@ -718,7 +1126,7 @@ func looksLikeToken(s string) bool {
 	return h >= entropyShortMin
 }
 
-func (s *Scrubber) scrubHighEntropy(in string) (string, int) {
+func (s *Scrubber) scrubHighEntropyMax(in string, maxLen int) (string, int) {
 	if len(in) < entropyMinLen {
 		return in, 0
 	}
@@ -735,7 +1143,12 @@ func (s *Scrubber) scrubHighEntropy(in string) (string, int) {
 		}
 		cand := in[i:j]
 
-		if !strings.Contains(cand, "REDACTED_") && looksLikeToken(cand) {
+		// A hex value under sha=, digest=, commit= ... is an identifier, not a secret.
+		if isHexLike(cand) && hexValueKeyIsIdentifier(in, i) {
+			i = j
+			continue
+		}
+		if !strings.Contains(cand, "REDACTED_") && looksLikeTokenMax(cand, maxLen) {
 			b.WriteString(in[last:i])
 			b.WriteString(s.tag("TOKEN", cand))
 			s.Tokens.Add(1)
@@ -749,6 +1162,42 @@ func (s *Scrubber) scrubHighEntropy(in string) (string, int) {
 	}
 	b.WriteString(in[last:])
 	return b.String(), count
+}
+
+// identifierHexKeys name fields whose hex value is an identifier (a commit, a
+// digest, a checksum), not a secret.
+var identifierHexKeys = map[string]bool{
+	"sha": true, "sha1": true, "sha256": true, "sha512": true, "md5": true,
+	"digest": true, "commit": true, "commit_id": true, "commit_sha": true,
+	"revision": true, "rev": true, "checksum": true, "etag": true,
+	"hash": true, "tree": true, "parent": true, "git_sha": true, "image_id": true,
+	"trace_id": true, "traceid": true, "request_id": true, "requestid": true,
+	"correlation_id": true, "correlationid": true, "span_id": true, "spanid": true, "parent_id": true,
+}
+
+// hexValueKeyIsIdentifier reports whether the entropy candidate that starts at
+// in[i] is the value of an identifier field such as sha=, digest: or "commit":.
+func hexValueKeyIsIdentifier(in string, i int) bool {
+	j := i
+	for j > 0 && (in[j-1] == ' ' || in[j-1] == '"' || in[j-1] == '\'' || in[j-1] == '\\') {
+		j--
+	}
+	if j == 0 || (in[j-1] != ':' && in[j-1] != '=') {
+		return false
+	}
+	key := strings.ReplaceAll(strings.ToLower(keyBefore(in, j-1)), "-", "_")
+	if key == "" || strings.Contains(key, "secret") || strings.Contains(key, "pass") || strings.Contains(key, "token") {
+		return false
+	}
+	if identifierHexKeys[key] {
+		return true
+	}
+	for _, suf := range []string{"_sha", "_sha1", "_sha256", "_digest", "_checksum", "_commit", "_hash", "_trace_id", "_request_id", "_correlation_id", "_span_id", "_parent_id"} {
+		if strings.HasSuffix(key, suf) {
+			return true
+		}
+	}
+	return false
 }
 
 func isV6Byte(c byte) bool {
@@ -877,17 +1326,27 @@ func (s *Scrubber) ScrubHeaders(h http.Header) (map[string]string, int) {
 				s.Cookies.Add(1)
 				count++
 			case (lname == "authorization" || lname == "proxy-authorization") && s.reBearer.MatchString(joined):
-				v, n := s.ScrubText(joined)
+				v, n := s.scrubHeaderValue(lname, joined)
 				out[name] = v
 				count += n
 			default:
+				// Custom Authorization schemes ("ApiKey secret"): keep the scheme, tag only the credential,
+				// so the taint ring stores the bare secret and not "scheme secret".
+				if lname == "authorization" || lname == "proxy-authorization" {
+					if i := strings.IndexByte(joined, ' '); i > 0 && strings.TrimSpace(joined[i+1:]) != "" {
+						out[name] = joined[:i+1] + s.tag("TOKEN", strings.TrimSpace(joined[i+1:]))
+						s.Tokens.Add(1)
+						count++
+						continue
+					}
+				}
 				out[name] = s.tag("TOKEN", joined)
 				s.Tokens.Add(1)
 				count++
 			}
 			continue
 		}
-		v, n := s.ScrubText(joined)
+		v, n := s.scrubHeaderValue(lname, joined)
 		out[name] = v
 		count += n
 	}
@@ -897,24 +1356,58 @@ func (s *Scrubber) ScrubHeaders(h http.Header) (map[string]string, int) {
 type App struct {
 	ring                *RingBuffer
 	scrub               *Scrubber
+	egress              *egressPolicy   // -secrets-config allowed/blocked_upstream_hosts; nil means no policy
+	disabledTools       map[string]bool // -disable-tools
 	port                int
 	target              *url.URL
 	upstreams           map[string]*url.URL
+	gwMap               map[string]*url.URL // -target-map: reached as /_gw/<name>/
 	transport           *http.Transport
+	h2cOnce             sync.Once
+	h2c                 *http.Transport
+	h1Once              sync.Once
+	h1                  *http.Transport
 	ignoreURLSubstrings []string
+	finishing           sync.WaitGroup // background finishLive calls; tests wait on it
 	tunnels             atomic.Int64
 	tunnelIdle          time.Duration
 	allowUninspectable  bool // forward request bodies whose Content-Encoding cannot be decoded
+	maxBody             int  // -max-body: stored body size in bytes; 0 means the defaults
+	wsDeflate           bool // -ws-deflate: keep permessage-deflate and decode it for capture
+	listener            string // "" for the TCP loopback listener, "unix" for -listen
+	sockPath            string // the -listen socket path, for the status bar
+	tokenOn             bool   // -proxy-token: every request must carry the token
+	tokenSum            [sha256.Size]byte
+	att                 attestInfo // facts export_attestation reports
 	barMu               sync.Mutex
 	stdoutMu            sync.Mutex
+	stdout, stderr      io.Writer // nil means os.Stdout / os.Stderr (run() injects its own)
+}
+
+func (a *App) outW() io.Writer {
+	if a.stdout != nil {
+		return a.stdout
+	}
+	return os.Stdout
+}
+
+func (a *App) errW() io.Writer {
+	if a.stderr != nil {
+		return a.stderr
+	}
+	return os.Stderr
 }
 
 func (a *App) drawBar() {
-	fmt.Fprintf(os.Stderr, "\r\033[K⚡ [NullWire-MCP] Proxy 127.0.0.1:%d | RAM Ring: %d/%d | Scrubbed: %d Tokens, %d Cookies, %d IPs | Disk: 0B",
-		a.port, a.ring.Len(), ringCapacity, a.scrub.Tokens.Load(), a.scrub.Cookies.Load(), a.scrub.IPs.Load())
+	where := fmt.Sprintf("127.0.0.1:%d", a.port)
+	if a.listener == "unix" {
+		where = "unix socket"
+	}
+	fmt.Fprintf(a.errW(), "\r\033[K⚡ [NullWire-MCP] Proxy %s | RAM Ring: %d/%d | Scrubbed: %d Tokens, %d Cookies, %d IPs | Disk: 0B",
+		where, a.ring.Len(), ringCapacity, a.scrub.Tokens.Load(), a.scrub.Cookies.Load(), a.scrub.IPs.Load())
 }
 func (a *App) Bar() { a.barMu.Lock(); defer a.barMu.Unlock(); a.drawBar() }
-func (a *App) Logf(format string, args ...any) { a.barMu.Lock(); defer a.barMu.Unlock(); fmt.Fprintf(os.Stderr, "\r\033[K"+format+"\n", args...); a.drawBar() }
+func (a *App) Logf(format string, args ...any) { a.barMu.Lock(); defer a.barMu.Unlock(); fmt.Fprintf(a.errW(), "\r\033[K"+format+"\n", args...); a.drawBar() }
 
 type capBuffer struct {
 	mu  sync.Mutex
@@ -995,8 +1488,22 @@ func isLoopbackHost(hostport string) bool {
 }
 
 func (a *App) isSelf(hostport string) bool {
-	h := strings.ToLower(hostport)
-	return h == fmt.Sprintf("127.0.0.1:%d", a.port) || h == fmt.Sprintf("localhost:%d", a.port) || h == fmt.Sprintf("[::1]:%d", a.port)
+	hp := strings.ToLower(strings.TrimSpace(hostport))
+	host, port, err := net.SplitHostPort(hp)
+	if err != nil {
+		// No explicit port (http://localhost): the default HTTP port, 80.
+		host, port = strings.Trim(hp, "[]"), "80"
+	}
+	if port != strconv.Itoa(a.port) {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	// Any loopback address (127.0.0.0/8, ::1) and the unspecified addresses
+	// (0.0.0.0, ::) reach this proxy when it listens on loopback.
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
 var reUpstreamName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`)
@@ -1072,7 +1579,21 @@ func (a *App) matchUpstream(p, rawPath string) (base *url.URL, rest, rawRest str
 	return b, tail, rawRest, true, nil
 }
 
+// resolveUpstream picks the destination and then applies the egress policy to
+// its host, so every route (forward proxy, X-Target-URL, -target, -target-map)
+// is checked in one place.
 func (a *App) resolveUpstream(r *http.Request) (*url.URL, bool, int, error) {
+	u, reverse, status, err := a.resolveUpstreamRaw(r)
+	if err != nil {
+		return u, reverse, status, err
+	}
+	if perr := a.egress.checkHost(u.Hostname()); perr != nil {
+		return nil, reverse, http.StatusForbidden, perr
+	}
+	return u, reverse, 0, nil
+}
+
+func (a *App) resolveUpstreamRaw(r *http.Request) (*url.URL, bool, int, error) {
 	if r.URL.IsAbs() && r.URL.Host != "" {
 		if r.URL.Scheme != "http" && r.URL.Scheme != "https" {
 			return nil, false, http.StatusBadRequest, fmt.Errorf("unsupported scheme %q", r.URL.Scheme)
@@ -1094,6 +1615,12 @@ func (a *App) resolveUpstream(r *http.Request) (*url.URL, bool, int, error) {
 			return nil, true, http.StatusBadRequest, err
 		}
 		base = parsed
+	} else if len(a.gwMap) > 0 && hasGatewayPrefix(r.URL.Path) {
+		nb, nrest, nraw, status, err := a.matchGateway(r.URL.Path, r.URL.RawPath)
+		if err != nil {
+			return nil, true, status, err
+		}
+		base, rest, restRaw = nb, nrest, nraw
 	} else {
 		nb, nrest, nraw, found, err := a.matchUpstream(r.URL.Path, r.URL.RawPath)
 		if err != nil {
@@ -1104,6 +1631,9 @@ func (a *App) resolveUpstream(r *http.Request) (*url.URL, bool, int, error) {
 		}
 	}
 	if base == nil {
+		if len(a.upstreams) == 0 && len(a.gwMap) > 0 {
+			return nil, true, http.StatusNotFound, fmt.Errorf("unknown route: start the path with %s/<name>/ with one of: %s", gwBase, strings.Join(a.gatewayNames(), ", "))
+		}
 		if names := a.upstreamNames(); len(names) > 0 {
 			return nil, true, http.StatusNotFound, fmt.Errorf("unknown upstream: start the path with one of /%s/", strings.Join(names, "/, /"))
 		}
@@ -1134,12 +1664,36 @@ type rawFlow struct {
 	status      int
 	respHeaders http.Header
 	respBody    []byte
+	respCut     bool // the body was cut by a collector smaller than respCap (SSE)
 	latencyMs   int64
 	note        string
+
+	respTrailers http.Header // read after the body; gRPC puts its status here
+}
+
+// upgradeTransport returns a transport that never negotiates HTTP/2. An
+// upgrade (WebSocket or any other) exists only in HTTP/1.1, and an
+// HTTP/2-capable HTTPS server would otherwise answer the TLS handshake with h2.
+func (a *App) upgradeTransport() *http.Transport {
+	a.h1Once.Do(func() {
+		t := a.transport.Clone()
+		t.ForceAttemptHTTP2 = false
+		// A non-nil, empty map is the documented way to switch HTTP/2 off. The
+		// copied TLS settings may already offer "h2" (the main transport added it).
+		t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		if t.TLSClientConfig != nil {
+			t.TLSClientConfig.NextProtos = nil
+		}
+		a.h1 = t
+	})
+	return a.h1
 }
 
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	if !a.authorize(w, r) {
+		return
+	}
 	if r.Method == http.MethodConnect {
 		a.handleConnect(w, r, start)
 		return
@@ -1160,13 +1714,13 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nullwire-mcp: "+err.Error(), status)
 		return
 	}
-	reqCap := &capBuffer{max: maxReqCapture}
+	reqCap := &capBuffer{max: a.limits().reqCap}
 	var outBody io.Reader = http.NoBody
 	hasBody := r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0
 	if hasBody {
 		outBody = io.TeeReader(r.Body, reqCap)
 	}
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), outBody)
+	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), outBody) // #nosec G704 -- a proxy forwards the client's own request by design; it listens on loopback only and resolveUpstream picks the destination
 	if err != nil {
 		http.Error(w, "nullwire-mcp: cannot build upstream request: "+err.Error(), http.StatusBadRequest)
 		return
@@ -1181,6 +1735,10 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		outReq.Header = copyHeaders(r.Header, "Accept-Encoding")
 	}
+	// gRPC servers look for "TE: trailers", so this one hop-by-hop value travels on.
+	if acceptsTrailers(r.Header) {
+		outReq.Header.Set("Te", "trailers")
+	}
 	// Response shield: never ask the server for an encoding NullWire cannot read.
 	restrictAcceptEncoding(outReq.Header, r.Header)
 	upgrade := isUpgradeRequest(r.Header)
@@ -1190,8 +1748,11 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
 			// Extensions such as permessage-deflate compress the frames, which
 			// would make them unreadable. Dropping the offer is always legal:
-			// the server then simply sends uncompressed frames.
-			outReq.Header.Del("Sec-WebSocket-Extensions")
+			// the server then simply sends uncompressed frames. With
+			// -ws-deflate the offer is kept and the frames are decoded instead.
+			if !a.wsDeflate {
+				outReq.Header.Del("Sec-WebSocket-Extensions")
+			}
 		}
 	}
 	if _, ok := outReq.Header["User-Agent"]; !ok {
@@ -1199,12 +1760,22 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	flow := rawFlow{started: start, method: r.Method, url: outURL.String(), reqHeaders: r.Header.Clone()}
 	outReq.Host = outURL.Host
-	resp, err := a.transport.RoundTrip(outReq)
+	rt := a.roundTripperFor(r, outURL)
+	if upgrade {
+		// Go keeps WebSocket on HTTP/1.1 by itself, but not other upgrade tokens,
+		// so every upgrade goes over a transport that cannot choose HTTP/2.
+		rt = a.upgradeTransport()
+	}
+	resp, err := rt.RoundTrip(outReq)
 	if err != nil {
 		msg := "nullwire-mcp: upstream error: " + err.Error()
-		http.Error(w, msg, http.StatusBadGateway)
+		code := http.StatusBadGateway
+		if errors.Is(err, errEgressDenied) {
+			code = http.StatusForbidden // the resolved address is blocked (DNS rebinding guard)
+		}
+		http.Error(w, msg, code)
 		flow.reqBody = reqCap.Bytes()
-		flow.status = http.StatusBadGateway
+		flow.status = code
 		flow.respHeaders = http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}}
 		flow.respBody = []byte(msg)
 		flow.latencyMs = time.Since(start).Milliseconds()
@@ -1218,19 +1789,43 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.handleUpgrade(w, resp, flow, isWS)
 		return
 	}
-	respCap := &capBuffer{max: maxRespCapture}
+	if isEventStream(resp.Header) {
+		a.streamSSE(w, r, resp, flow, reqCap, start)
+		return
+	}
+	respCap := &capBuffer{max: a.limits().respCap}
 	dst := w.Header()
 	for k, vs := range copyHeaders(resp.Header) {
 		dst[k] = vs
 	}
 	w.WriteHeader(resp.StatusCode)
+	if resp.ContentLength < 0 {
+		// A stream of unknown length (server-sent events, gRPC): the client
+		// sees the headers now, not together with the first chunk.
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+	}
 	_, _ = io.Copy(&flushWriter{w: w}, io.TeeReader(resp.Body, respCap))
+	// Trailers are only known once the body has been read.
+	for k, vs := range resp.Trailer {
+		if len(vs) > 0 { // a declared trailer the server never sent has no value
+			w.Header()[http.TrailerPrefix+k] = append([]string(nil), vs...)
+		}
+	}
 	flow.reqBody = reqCap.Bytes()
 	flow.status = resp.StatusCode
 	flow.respHeaders = resp.Header.Clone()
+	flow.respTrailers = resp.Trailer.Clone()
 	flow.respBody = respCap.Bytes()
 	flow.latencyMs = time.Since(start).Milliseconds()
 	go a.capture(flow)
+}
+
+// wipe zeroes the captured body copies once they are scrubbed and stored.
+func (f *rawFlow) wipe() {
+	clear(f.reqBody)
+	clear(f.respBody)
 }
 
 type closeWriter interface{ CloseWrite() error }
@@ -1358,6 +1953,12 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.T
 		http.Error(w, "nullwire-mcp: refusing to tunnel back to the proxy itself", http.StatusLoopDetected)
 		return
 	}
+	if perr := a.egress.checkHost(host); perr != nil {
+		msg := "nullwire-mcp: " + perr.Error()
+		http.Error(w, msg, http.StatusForbidden)
+		go a.capture(rawFlow{started: start, method: http.MethodConnect, url: target, reqHeaders: r.Header.Clone(), respHeaders: http.Header{}, status: http.StatusForbidden, note: msg, latencyMs: time.Since(start).Milliseconds()})
+		return
+	}
 	if !a.acquireTunnel() {
 		http.Error(w, "nullwire-mcp: too many concurrent tunnels", http.StatusServiceUnavailable)
 		return
@@ -1372,8 +1973,12 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.T
 	up, err := a.dial(r.Context(), target)
 	if err != nil {
 		msg := "nullwire-mcp: cannot reach " + target + ": " + err.Error()
-		http.Error(w, msg, http.StatusBadGateway)
-		flow.status = http.StatusBadGateway
+		code := http.StatusBadGateway
+		if errors.Is(err, errEgressDenied) {
+			code = http.StatusForbidden // the resolved address is blocked (DNS rebinding guard)
+		}
+		http.Error(w, msg, code)
+		flow.status = code
 		flow.note = msg
 		flow.latencyMs = time.Since(start).Milliseconds()
 		go a.capture(flow)
@@ -1455,35 +2060,68 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 	var clientRWC io.ReadWriteCloser = client
 	var upstreamRWC = rwc
 	var wsUp, wsDown *wsCollector
+	var wsUpInfl, wsDownInfl *wsInflater
+	liveID := uint64(0)
+	var liveStop chan struct{}
+	var liveDone chan struct{}
+	flow.status = http.StatusSwitchingProtocols
+	flow.respHeaders = resp.Header.Clone()
 	if isWS {
 		// Read-only taps: every byte is forwarded untouched and a copy is
 		// parsed for capture. client->server frames are what the client sends.
-		wsUp = newWSCollector(maxReqBody + scrubWindow)
-		wsDown = newWSCollector(maxRespBody + scrubWindow)
+		lim := a.limits()
+		wsUp = newWSCollector(lim.reqBody + scrubWindow)
+		wsDown = newWSCollector(lim.respBody + scrubWindow)
 		upParser := newWSParser(wsUp.add)
 		downParser := newWSParser(wsDown.add)
+		upParser.maxMsg = lim.respBody + scrubWindow
+		downParser.maxMsg = lim.respBody + scrubWindow
+		if a.wsDeflate {
+			if found, serverFresh, clientFresh := parseDeflateNegotiation(resp.Header.Values("Sec-WebSocket-Extensions")); found {
+				wsUpInfl = newWSInflater(!clientFresh, lim.respBody+scrubWindow)
+				wsDownInfl = newWSInflater(!serverFresh, lim.respBody+scrubWindow)
+				upParser.inflate, downParser.inflate = wsUpInfl, wsDownInfl
+			}
+		}
 		clientRWC = &tapRWC{rwc: client, onRead: upParser.Feed}
 		upstreamRWC = &tapRWC{rwc: rwc, onRead: downParser.Feed}
 		if len(pre) > 0 {
 			upParser.Feed(pre)
 		}
+		// The flow is visible as soon as the socket opens and is refreshed
+		// while it stays open; the final capture replaces it on close.
+		open := flow
+		open.latencyMs = 0
+		open.note = wsLiveNote(resp.Header.Get("Upgrade"), wsUp, wsDown)
+		if id, ok := a.pushLive(open); ok {
+			liveID = id
+			liveStop, liveDone = make(chan struct{}), make(chan struct{})
+			go a.wsLiveLoop(liveID, open, resp.Header.Get("Upgrade"), wsUp, wsDown, liveStop, liveDone)
+		}
 	}
 
 	sent, recv := splice(clientRWC, upstreamRWC, a.idle(), pre)
+	// The connection is over: release the flate readers now, not at the next GC.
+	wsUpInfl.Close()
+	wsDownInfl.Close()
 
-	flow.status = http.StatusSwitchingProtocols
-	flow.respHeaders = resp.Header.Clone()
+	if liveStop != nil {
+		// Wait for the refresher to stop, so a late refresh cannot overwrite
+		// the final capture.
+		close(liveStop)
+		<-liveDone
+	}
 	flow.latencyMs = time.Since(flow.started).Milliseconds()
 	note := fmt.Sprintf("upgraded connection (%s): %d B client->upstream, %d B upstream->client", resp.Header.Get("Upgrade"), sent, recv)
 	if isWS {
 		flow.reqBody = wsUp.Bytes()
 		flow.respBody = wsDown.Bytes()
-		note += fmt.Sprintf("; WebSocket text messages are captured and scrubbed when the connection closes (client->server: %s; server->client: %s); live frames are forwarded unmodified", wsUp.Summary(), wsDown.Summary())
+		note += fmt.Sprintf("; WebSocket text messages are captured and scrubbed (refreshed live while open, final on close) (client->server: %s; server->client: %s); live frames are forwarded unmodified", wsUp.Summary(), wsDown.Summary())
 	} else {
 		note += "; frames not inspected or stored"
 	}
 	flow.note = note
-	go a.capture(flow)
+	a.goFinishLive(liveID, flow)
 }
 
 func parseDNSServers(spec string) ([]string, error) {
@@ -1551,6 +2189,35 @@ func addPEMPath(pool *x509.CertPool, path string) (bool, error) {
 	return got, nil
 }
 
+// buildClientCert loads the upstream mTLS client certificate. Both files or
+// neither must be given; with neither it returns (nil, nil).
+func buildClientCert(certFile, keyFile string) (*tls.Certificate, error) {
+	if certFile == "" && keyFile == "" {
+		return nil, nil
+	}
+	if certFile == "" || keyFile == "" {
+		return nil, errors.New("-client-cert and -client-key must be given together")
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("client certificate: %w", err)
+	}
+	return &cert, nil
+}
+
+// buildTLSConfig returns the upstream TLS settings, or nil when neither extra
+// roots nor a client certificate is set.
+func buildTLSConfig(rootCAs *x509.CertPool, cert *tls.Certificate) *tls.Config {
+	if rootCAs == nil && cert == nil {
+		return nil
+	}
+	cfg := &tls.Config{RootCAs: rootCAs, MinVersion: tls.VersionTLS12}
+	if cert != nil {
+		cfg.Certificates = []tls.Certificate{*cert}
+	}
+	return cfg
+}
+
 func buildRootCAs(cacert string, termux bool) (*x509.CertPool, string, error) {
 	explicit := cacert != ""
 	if !explicit && (!termux || os.Getenv("SSL_CERT_FILE") != "" || os.Getenv("SSL_CERT_DIR") != "") {
@@ -1582,8 +2249,13 @@ func onTermux() bool {
 	return os.Getenv("TERMUX_VERSION") != "" || strings.Contains(os.Getenv("PREFIX"), "com.termux")
 }
 
-func newDialer(servers []string) *net.Dialer {
+func newDialer(servers []string, egress *egressPolicy) *net.Dialer {
 	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	if egress.needsDialControl() {
+		// Runs on the resolved address of every connection attempt, so a name
+		// that resolves or rebinds into a blocked CIDR is refused.
+		d.Control = egress.control
+	}
 	if len(servers) > 0 {
 		d.Resolver = &net.Resolver{
 			PreferGo: true,
@@ -1612,13 +2284,28 @@ func decodableEncoding(ce string) bool {
 	return false
 }
 
-func decodeBody(ce string, b []byte) (string, bool) {
-	var rd io.Reader
-	switch strings.ToLower(strings.TrimSpace(ce)) {
+// decodeBodyMax decodes a gzip or deflate body, expanding it to at most limit
+// bytes of text (the guard against compression bombs). When the text was cut
+// there, truncMarker is appended to it.
+func decodeBodyMax(ce string, b []byte, limit int) (string, bool) {
+	text, cut, ok := decodeBodyMaxCut(ce, b, limit)
+	if ok && cut {
+		text += truncMarker
+	}
+	return text, ok
+}
+
+// decodeBodyMaxCut is decodeBodyMax for callers that need the bytes
+// themselves: it returns the text without a marker and reports the cut
+// separately, so a body that really ends in the marker text is not mistaken
+// for a cut one.
+func decodeBodyMaxCut(ce string, b []byte, limit int) (text string, cut, ok bool) {
+	var rd io.ReadCloser
+	switch strings.ToLower(effectiveContentEncoding(ce)) {
 	case "gzip", "x-gzip":
 		zr, err := gzip.NewReader(bytes.NewReader(b))
 		if err != nil {
-			return "", false
+			return "", false, false
 		}
 		rd = zr
 	case "deflate":
@@ -1628,25 +2315,43 @@ func decodeBody(ce string, b []byte) (string, bool) {
 			rd = flate.NewReader(bytes.NewReader(b))
 		}
 	default:
-		return "", false
+		return "", false, false
 	}
-	out, err := io.ReadAll(io.LimitReader(rd, decodedLimit))
+	defer rd.Close()
+	out, err := io.ReadAll(io.LimitReader(rd, int64(limit)))
+	defer clear(out) // string(out) below is a copy
 	if len(out) == 0 && err != nil {
-		return "", false
+		return "", false, false
 	}
-	text := string(out)
-	if err != nil || len(out) >= decodedLimit {
-		text += truncMarker
-	}
-	return text, true
+	return string(out), err != nil || len(out) >= limit, true
 }
 
-func bodyText(h http.Header, b []byte) string {
+func bodyText(h http.Header, b []byte) string { return bodyTextMax(h, b, decodedLimit) }
+
+// joinedContentEncoding returns every Content-Encoding header line joined with ", ",
+// so a stacked "Content-Encoding: identity" + "Content-Encoding: gzip" is seen whole.
+func joinedContentEncoding(h http.Header) string {
+	return strings.Join(h.Values("Content-Encoding"), ", ")
+}
+
+// effectiveContentEncoding drops "identity" entries and blanks from a Content-Encoding
+// value: "identity, gzip" becomes "gzip", and "identity" becomes "".
+func effectiveContentEncoding(ce string) string {
+	var keep []string
+	for _, p := range strings.Split(ce, ",") {
+		if p = strings.TrimSpace(p); p != "" && !strings.EqualFold(p, "identity") {
+			keep = append(keep, p)
+		}
+	}
+	return strings.Join(keep, ", ")
+}
+
+func bodyTextMax(h http.Header, b []byte, decoded int) string {
 	if len(b) == 0 {
 		return ""
 	}
-	if ce := strings.TrimSpace(h.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
-		if text, ok := decodeBody(ce, b); ok {
+	if ce := effectiveContentEncoding(joinedContentEncoding(h)); ce != "" {
+		if text, ok := decodeBodyMax(ce, b, decoded); ok {
 			return text
 		}
 		return fmt.Sprintf("[encoded body omitted: Content-Encoding %s, %d bytes captured]", ce, len(b))
@@ -1658,40 +2363,139 @@ func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + truncMarker
+	if maxLen < 0 {
+		maxLen = 0
+	}
+	cut := maxLen
+	// Never split a multi-byte rune: s[cut] must start one.
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	// Never leave half a redaction tag: when the cut falls inside "[REDACTED_...]",
+	// step back to its opening bracket.
+	lo := cut - truncTagLookback
+	if lo < 0 {
+		lo = 0
+	}
+	if i := strings.LastIndex(s[lo:cut], "[REDACTED_"); i >= 0 && !strings.Contains(s[lo+i:cut], "]") {
+		cut = lo + i
+	} else {
+		// ...or inside the opening "[REDACTED_" itself.
+		const open = "[REDACTED_"
+		for k := len(open) - 1; k >= 1; k-- {
+			if strings.HasSuffix(s[:cut], open[:k]) {
+				cut -= k
+				break
+			}
+		}
+	}
+	return s[:cut] + truncMarker
 }
+
+// truncTagLookback is how far back truncate looks for an unfinished redaction tag
+// ("[REDACTED_TOKEN#ab12cd]" is 24 bytes; the margin covers longer kinds).
+const truncTagLookback = 40
 
 func (a *App) capture(f rawFlow) {
 	defer func() { _ = recover() }()
+	defer f.wipe()
+	if e, ok := a.buildEntry(f); ok {
+		a.ring.Push(e)
+		a.Bar()
+	}
+}
+
+// buildEntry scrubs a flow and returns the entry to store. ok is false for a
+// flow that is ignored (-secrets-config ignore_url_substrings).
+func (a *App) buildEntry(f rawFlow) (FlowEntry, bool) { return a.buildEntryWith(a.scrub, f) }
+
+// buildEntryWith is buildEntry using sc, whose counters receive the redaction counts.
+func (a *App) buildEntryWith(sc *Scrubber, f rawFlow) (FlowEntry, bool) {
 	for _, sub := range a.ignoreURLSubstrings {
 		if sub != "" && strings.Contains(f.url, sub) {
-			return
+			return FlowEntry{}, false
 		}
 	}
+	lim := a.limits()
 
 	total := 0
 	note := f.note
 
-	u, n := a.scrub.ScrubText(f.url)
+	u, n := sc.ScrubURL(f.url)
 	total += n
-	rh, n := a.scrub.ScrubHeaders(f.reqHeaders)
+	rh, n := sc.ScrubHeaders(f.reqHeaders)
 	total += n
 
-	rawReqBody := bodyText(f.reqHeaders, f.reqBody)
+	rawReqBody := bodyTextMax(f.reqHeaders, f.reqBody, lim.decoded)
+	gqlSrc := "" // the "operations" field of a GraphQL multipart upload
 	if ct := f.reqHeaders.Get("Content-Type"); strings.HasPrefix(strings.ToLower(strings.TrimSpace(ct)), "multipart/") &&
 		!strings.HasPrefix(rawReqBody, "[encoded body omitted") {
-		rawReqBody = a.scrubMultipart(ct, []byte(rawReqBody))
+		gqlSrc = gqlMultipartBody(ct, rawReqBody)
+		var mn int
+		rawReqBody, mn = a.scrubMultipartWith(sc, ct, []byte(rawReqBody), int64(lim.reqBody+scrubWindow))
+		total += mn
 	}
-	rawRespBody := bodyText(f.respHeaders, f.respBody)
-	// Protobuf and gRPC bodies are binary: storing their bytes helps nobody and
-	// cannot be scrubbed, so only their size is recorded.
+	rawRespBody := bodyTextMax(f.respHeaders, f.respBody, lim.decoded)
+	// Protobuf and gRPC bodies are binary. They are read without a schema into
+	// text, which is scrubbed like any other body; the raw bytes are never
+	// stored. A body that is not readable protobuf records only its size.
 	if len(f.reqBody) > 0 && isProtobufContentType(f.reqHeaders.Get("Content-Type")) {
-		rawReqBody = fmt.Sprintf("[protobuf/gRPC body not captured: %d bytes]", len(f.reqBody))
-		note += " Protobuf/gRPC request body not captured (binary)."
+		if text, ok := decodeProtoBody(f.reqHeaders, f.reqBody, lim.decoded); ok {
+			rawReqBody = text
+			note += " Protobuf/gRPC request body decoded without a schema (values scrubbed; field-name rules cannot apply)."
+		} else {
+			rawReqBody = fmt.Sprintf("[protobuf/gRPC body not captured: %d bytes]", len(f.reqBody))
+			note += " Protobuf/gRPC request body not captured (binary)."
+		}
 	}
 	if len(f.respBody) > 0 && isProtobufContentType(f.respHeaders.Get("Content-Type")) {
-		rawRespBody = fmt.Sprintf("[protobuf/gRPC body not captured: %d bytes]", len(f.respBody))
-		note += " Protobuf/gRPC response body not captured (binary)."
+		if text, ok := decodeProtoBody(f.respHeaders, f.respBody, lim.decoded); ok {
+			rawRespBody = text
+			note += " Protobuf/gRPC response body decoded without a schema (values scrubbed; field-name rules cannot apply)."
+		} else {
+			rawRespBody = fmt.Sprintf("[protobuf/gRPC body not captured: %d bytes]", len(f.respBody))
+			note += " Protobuf/gRPC response body not captured (binary)."
+		}
+	}
+
+	// MessagePack and CBOR are binary too. They are shown as JSON, which the
+	// JSON rules then scrub; binaryBodyText leaves every other body alone.
+	if text, bn, ok := binaryBodyText(f.reqHeaders, rawReqBody, lim.decoded); ok {
+		rawReqBody = text
+		note += bn
+	}
+	if text, bn, ok := binaryBodyText(f.respHeaders, rawRespBody, lim.decoded); ok {
+		rawRespBody = text
+		note += bn
+	}
+
+	// GraphQL: say which operation the request was. The note holds only a name
+	// that is a plain identifier and passes the scrubber.
+	gqlBody := rawReqBody
+	if gqlSrc != "" {
+		gqlBody = gqlSrc
+	}
+	if gn, cnt := a.graphqlNoteWith(sc, f.method, f.url, f.reqHeaders.Get("Content-Type"), gqlBody); gn != "" {
+		note += gn
+		total += cnt
+		// Say that the call failed even on a 200: only the count, never the text.
+		if ne, more := gqlResponseErrors(rawRespBody); ne > 0 {
+			plus := ""
+			if more {
+				plus = "+"
+			}
+			note += fmt.Sprintf(" GraphQL errors: %d%s.", ne, plus)
+		}
+	}
+
+	if st, msg := grpcStatus(f); st != "" {
+		note += " gRPC status " + st
+		if msg != "" {
+			scrubbed, cnt := sc.ScrubTextIn(msg, ContextHeader)
+			total += cnt
+			note += ": " + truncate(scrubbed, 200)
+		}
+		note += "."
 	}
 
 	if strings.HasPrefix(rawReqBody, "[encoded body omitted") {
@@ -1701,27 +2505,28 @@ func (a *App) capture(f rawFlow) {
 		note += " ⚠️ WARNING: Response body encoded (Brotli/Zstd), not inspected."
 	}
 
-	if len(f.reqBody) >= maxReqCapture || len(f.respBody) >= maxRespCapture {
+	if len(f.reqBody) >= lim.reqCap || len(f.respBody) >= lim.respCap || f.respCut {
 		note += " ⚠️ WARNING: Payload exceeded memory limits; truncated before full inspection."
 	}
 
-	rawReqBody = truncate(rawReqBody, maxReqBody+scrubWindow)
-	rawRespBody = truncate(rawRespBody, maxRespBody+scrubWindow)
+	// Scrub first, cut second: the extra scrubWindow lets a secret that
+	// straddles the stored limit be seen whole before the text is cut.
+	rawReqBody = truncate(rawReqBody, lim.reqBody+scrubWindow)
+	rawRespBody = truncate(rawRespBody, lim.respBody+scrubWindow)
 
-	rb, n := a.scrub.ScrubText(rawReqBody)
+	rb, n := sc.ScrubText(rawReqBody)
 	total += n
-	ph, n := a.scrub.ScrubHeaders(f.respHeaders)
+	ph, n := sc.ScrubHeaders(f.respHeaders)
 	total += n
-	pb, n := a.scrub.ScrubText(rawRespBody)
+	pb, n := sc.ScrubText(rawRespBody)
 	total += n
 
-	a.ring.Push(FlowEntry{
+	return FlowEntry{
 		Timestamp: f.started.UTC().Format(time.RFC3339), Method: f.method, URL: u,
-		RequestHeaders: rh, RequestBody: truncate(rb, maxReqBody),
-		StatusCode: f.status, ResponseHeaders: ph, ResponseBody: truncate(pb, maxRespBody),
+		RequestHeaders: rh, RequestBody: truncate(rb, lim.reqBody),
+		StatusCode: f.status, ResponseHeaders: ph, ResponseBody: truncate(pb, lim.respBody),
 		LatencyMs: f.latencyMs, RedactionCount: total, Note: strings.TrimSpace(note),
-	})
-	a.Bar()
+	}, true
 }
 
 type rpcRequest struct {
@@ -1764,7 +2569,7 @@ func (a *App) writeFrame(resp rpcResponse) {
 	}
 	a.stdoutMu.Lock()
 	defer a.stdoutMu.Unlock()
-	_, _ = os.Stdout.Write([]byte(line + "\n"))
+	_, _ = a.outW().Write([]byte(line + "\n"))
 }
 
 func (a *App) writeBatch(resps []rpcResponse) {
@@ -1777,7 +2582,7 @@ func (a *App) writeBatch(resps []rpcResponse) {
 	}
 	a.stdoutMu.Lock()
 	defer a.stdoutMu.Unlock()
-	_, _ = os.Stdout.Write([]byte(line + "\n"))
+	_, _ = a.outW().Write([]byte(line + "\n"))
 }
 
 func (a *App) writeError(id json.RawMessage, code int, msg string) {
@@ -1808,6 +2613,19 @@ func toolDefinitions() []any {
 			},
 		},
 		map[string]any{
+			"name": "export_har", "description": "Returns recent scrubbed flows as a HAR 1.2 document, built in memory (nothing is written to disk). Bodies are left out unless include_bodies is true. The reply is capped at 1 MiB.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"limit":          map[string]any{"type": "integer", "default": 10, "minimum": 1, "maximum": ringCapacity},
+					"method":         map[string]any{"type": "string"},
+					"url_contains":   map[string]any{"type": "string"},
+					"include_bodies": map[string]any{"type": "boolean", "default": false},
+				},
+				"additionalProperties": false,
+			},
+		},
+		map[string]any{
 			"name": "export_sanitized_curl", "description": "Rebuilds a curl command with env placeholders.",
 			"inputSchema": map[string]any{
 				"type": "object", "properties": map[string]any{"flow_id": map[string]any{"type": "integer", "minimum": 1}},
@@ -1816,6 +2634,10 @@ func toolDefinitions() []any {
 		},
 		map[string]any{
 			"name": "clear_ram_buffer", "description": "Wipes all 50 slots and resets counters.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		},
+		map[string]any{
+			"name": "export_attestation", "description": "Returns a signed local attestation (ECDSA P-256): counts, policy SHA-256, active presets and a control summary. It holds no URLs, bodies or redaction tags.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		},
 	}
@@ -1856,7 +2678,7 @@ func (a *App) toolInspect(args json.RawMessage) map[string]any {
 	return toolResult(text, false)
 }
 
-var reTag = regexp.MustCompile(`\[REDACTED_(TOKEN|COOKIE|IP|KEY)#[0-9a-f]{6}\]`)
+var reTag = regexp.MustCompile(`\[REDACTED_(TOKEN|COOKIE|IP|KEY|PAN)#[0-9a-f]{6}\]`)
 
 func envFor(kind string) string {
 	switch kind {
@@ -1866,6 +2688,8 @@ func envFor(kind string) string {
 		return "NULLWIRE_IP"
 	case "KEY":
 		return "NULLWIRE_PRIVATE_KEY"
+	case "PAN":
+		return "NULLWIRE_CARD_NUMBER"
 	default:
 		return "NULLWIRE_AUTH_TOKEN"
 	}
@@ -1920,8 +2744,8 @@ func buildCurl(e FlowEntry) string {
 	sortStrings(names)
 	body := e.RequestBody
 	body = strings.TrimSuffix(body, truncMarker)
-	if strings.HasPrefix(body, "[encoded body omitted") {
-		body = ""
+	if strings.HasPrefix(body, "[encoded body omitted") || strings.HasPrefix(body, "[protobuf/gRPC body") {
+		body = "" // a placeholder or a decoded protobuf is not a body that can be replayed
 	}
 	source := e.URL + "\n" + body
 	for _, k := range names {
@@ -2007,7 +2831,7 @@ func (a *App) dispatchTo(req rpcRequest) *rpcResponse {
 	case "ping":
 		return &rpcResponse{ID: id, Result: map[string]any{"resultType": "complete"}}
 	case "tools/list":
-		return &rpcResponse{ID: id, Result: map[string]any{"resultType": "complete", "ttlMs": 300000, "cacheScope": "global", "tools": toolDefinitions()}}
+		return &rpcResponse{ID: id, Result: map[string]any{"resultType": "complete", "ttlMs": 300000, "cacheScope": "global", "tools": a.toolDefs()}}
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -2016,14 +2840,21 @@ func (a *App) dispatchTo(req rpcRequest) *rpcResponse {
 		if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
 			return &rpcResponse{ID: id, Error: &rpcError{Code: -32602, Message: "invalid params"}}
 		}
+		if a.disabledTools[p.Name] {
+			return &rpcResponse{ID: id, Error: &rpcError{Code: -32602, Message: "tool disabled: " + p.Name}}
+		}
 		var result map[string]any
 		switch p.Name {
 		case "inspect_traffic":
 			result = a.toolInspect(p.Arguments)
+		case "export_har":
+			result = a.toolExportHAR(p.Arguments)
 		case "export_sanitized_curl":
 			result = a.toolExportCurl(p.Arguments)
 		case "clear_ram_buffer":
 			result = a.toolClear()
+		case "export_attestation":
+			result = a.toolAttestation()
 		default:
 			return &rpcResponse{ID: id, Error: &rpcError{Code: -32602, Message: "unknown tool"}}
 		}
@@ -2110,11 +2941,6 @@ func (a *App) handleBatch(line []byte) {
 	a.writeBatch(responses)
 }
 
-func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "\r\033[K"+format+"\n", args...)
-	os.Exit(1)
-}
-
 // Main runs the nullwire-mcp command line and returns when it is done.
 func Main() {
 	if len(os.Args) > 1 && os.Args[1] == "scan" {
@@ -2126,31 +2952,113 @@ func Main() {
 	if len(os.Args) > 1 && os.Args[1] == "install" {
 		os.Exit(install.Run(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "policy" {
+		os.Exit(RunPolicy(os.Args[2:], os.Stdout, os.Stderr))
+	}
 
-	port := flag.Int("port", 8080, "TCP port for the diagnostic proxy (always bound to 127.0.0.1)")
-	target := flag.String("target", "", "upstream base URL(s)")
-	cacert := flag.String("cacert", "", "extra CA certificates")
-	dnsSpec := flag.String("dns", "auto", "upstream DNS")
-	secretsConfig := flag.String("secrets-config", "", "path to -secrets-config JSON")
-	scrubHeaders := flag.String("scrub-headers", "", "extra sensitive headers")
-	allowUninspectable := flag.Bool("allow-uninspectable", false, "forward request bodies whose Content-Encoding (br, zstd, ...) cannot be inspected; by default they are refused with 415")
-	flag.Parse()
+	err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+	switch {
+	case err == nil:
+	case errors.Is(err, flag.ErrHelp):
+	case errors.As(err, new(flagParseError)):
+		os.Exit(2) // the flag set already printed the message
+	default:
+		fmt.Fprintf(os.Stderr, "\r\033[K%v\n", err)
+		os.Exit(1)
+	}
+}
+
+// flagParseError marks a command-line parse failure (already reported by the flag set).
+type flagParseError struct{ error }
+
+func (e flagParseError) Unwrap() error { return e.error }
+
+// run is the proxy + MCP stdio server behind Main. It returns when stdin
+// reaches EOF (nil) or when startup validation fails (a non-nil error).
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("nullwire-mcp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	port := fs.Int("port", 8080, "TCP port for the diagnostic proxy (always bound to 127.0.0.1)")
+	target := fs.String("target", "", "upstream base URL(s)")
+	targetMap := fs.String("target-map", "", "fixed routes name=URL,... reached as /_gw/<name>/ (an explicit allowlist, for clients that cannot send X-Target-URL)")
+	cacert := fs.String("cacert", "", "extra CA certificates")
+	dnsSpec := fs.String("dns", "auto", "upstream DNS")
+	secretsConfig := fs.String("secrets-config", "", "path to -secrets-config JSON")
+	clientCert := fs.String("client-cert", "", "PEM client certificate presented to upstream servers (mTLS); needs -client-key")
+	clientKey := fs.String("client-key", "", "PEM private key for -client-cert")
+	scrubHeaders := fs.String("scrub-headers", "", "extra sensitive headers")
+	disableTools := fs.String("disable-tools", "", "comma-separated MCP tools to turn off, e.g. export_sanitized_curl,export_har (they are hidden from tools/list and refused by tools/call)")
+	presetSpec := fs.String("preset", "", "comma-separated compliance redaction presets: pci-dss, hipaa, gdpr, all (off by default)")
+	allowUninspectable := fs.Bool("allow-uninspectable", false, "forward request bodies whose Content-Encoding (br, zstd, ...) cannot be inspected; by default they are refused with 415")
+	maxBodySpec := fs.String("max-body", "", "stored body size per request/response, e.g. 1m (default 32 KiB request / 256 KiB response; at most 2m). Secrets are scrubbed before the cut")
+	wsDeflate := fs.Bool("ws-deflate", false, "keep WebSocket permessage-deflate and decode it for capture (default: drop the offer so frames stay readable)")
+	policyPubkey := fs.String("policy-pubkey", "", "enterprise mode: ECDSA P-256 public key (PEM file, hex file or hex text) that must verify <secrets-config>.sig; also refuses -allow-uninspectable")
+	attestOut := fs.String("attest-out", "", "write the signed attestation report to this file when the server exits")
+	attestKey := fs.String("attest-key", "", "PEM ECDSA P-256 key that signs attestation reports (default: a fresh key per run)")
+	proxyToken := fs.String("proxy-token", "", "require this token on every proxy request (Proxy-Authorization password, or "+tokenHeader+"); \"auto\" makes one and prints it; also read from "+tokenEnv)
+	listen := fs.String("listen", "", "opt-in: listen on a unix socket instead of TCP, as unix:///absolute/path.sock (mode 0600; Linux and macOS)")
+	if err := fs.Parse(args); err != nil {
+		return flagParseError{err}
+	}
 
 	if *port < 0 || *port > 65535 {
-		fatalf("nullwire-mcp: -port must be between 0 and 65535")
+		return errors.New("nullwire-mcp: -port must be between 0 and 65535")
 	}
-	cfg, err := loadSecretsConfig(*secretsConfig)
+	maxBody, err := parseMaxBody(*maxBodySpec)
 	if err != nil {
-		fatalf("nullwire-mcp: %v", err)
+		return fmt.Errorf("nullwire-mcp: %v", err)
+	}
+	if err := policyLockError(*policyPubkey != "", *allowUninspectable); err != nil {
+		return fmt.Errorf("nullwire-mcp: %v", err)
+	}
+	cfg, polSHA, polSigned, err := loadPolicy(*secretsConfig, *policyPubkey)
+	if err != nil {
+		return fmt.Errorf("nullwire-mcp: %v", err)
 	}
 	for _, h := range strings.Split(*scrubHeaders, ",") {
 		if h = strings.TrimSpace(h); h != "" {
 			cfg.SensitiveHeaders = append(cfg.SensitiveHeaders, h)
 		}
 	}
+	cfg.Presets = append(cfg.Presets, splitPresetFlag(*presetSpec)...)
+	activePresets, err := normalizePresets(cfg.Presets)
+	if err != nil {
+		return fmt.Errorf("nullwire-mcp: -preset: %v", err)
+	}
+	egress, err := newEgressPolicy(cfg.AllowedUpstreamHosts, cfg.BlockedUpstreamHosts)
+	if err != nil {
+		return fmt.Errorf("nullwire-mcp: %v", err)
+	}
+	disabled, err := disabledToolSet(*disableTools)
+	if err != nil {
+		return fmt.Errorf("nullwire-mcp: %v", err)
+	}
+	tok, tokGenerated := *proxyToken, false
+	envTok := os.Getenv(tokenEnv)
+	_ = os.Unsetenv(tokenEnv) // keep it out of any process this one starts
+	if tok == "" {
+		tok = envTok
+	}
+	switch {
+	case tok == "auto":
+		if tok, err = newProxyToken(); err != nil {
+			return fmt.Errorf("nullwire-mcp: cannot make a proxy token: %v", err)
+		}
+		tokGenerated = true
+	case tok != "":
+		if err := validProxyToken(tok); err != nil {
+			return fmt.Errorf("nullwire-mcp: %v", err)
+		}
+	}
+	var attestSigningKey *ecdsa.PrivateKey
+	if *attestKey != "" {
+		if attestSigningKey, err = loadP256PrivateKeyFile(*attestKey); err != nil {
+			return fmt.Errorf("nullwire-mcp: -attest-key: %v", err)
+		}
+	}
 	scrub, err := NewScrubberWithConfig(cfg)
 	if err != nil {
-		fatalf("nullwire-mcp: %v", err)
+		return fmt.Errorf("nullwire-mcp: %v", err)
 	}
 
 	var dnsServers []string
@@ -2165,45 +3073,86 @@ func Main() {
 	default:
 		dnsServers, err = parseDNSServers(*dnsSpec)
 		if err != nil {
-			fatalf("nullwire-mcp: %v", err)
+			return fmt.Errorf("nullwire-mcp: %v", err)
 		}
 	}
-	dialer := newDialer(dnsServers)
+	dialer := newDialer(dnsServers, egress)
 
 	rootCAs, caSource, err := buildRootCAs(*cacert, onTermux())
 	if err != nil {
-		fatalf("nullwire-mcp: %v", err)
+		return fmt.Errorf("nullwire-mcp: %v", err)
 	}
-	var tlsCfg *tls.Config
-	if rootCAs != nil {
-		tlsCfg = &tls.Config{RootCAs: rootCAs, MinVersion: tls.VersionTLS12}
+	clientCrt, err := buildClientCert(*clientCert, *clientKey)
+	if err != nil {
+		return fmt.Errorf("nullwire-mcp: %v", err)
 	}
+	tlsCfg := buildTLSConfig(rootCAs, clientCrt)
 
 	app := &App{
-		ring: NewRingBuffer(), scrub: scrub, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable,
-		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 32, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg},
+		ring: NewRingBuffer(), scrub: scrub, egress: egress, disabledTools: disabled, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable, maxBody: maxBody, wsDeflate: *wsDeflate,
+		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 32, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true},
+	}
+	app.stdout, app.stderr = stdout, stderr
+	app.setProxyToken(tok)
+	app.att = attestInfo{
+		started: time.Now().UTC(), policySHA: polSHA, policySigned: polSigned, presets: activePresets,
+		egressAllow: len(cfg.AllowedUpstreamHosts), egressBlock: len(cfg.BlockedUpstreamHosts),
+		out: *attestOut, key: attestSigningKey,
 	}
 	if *target != "" {
 		def, named, err := parseTargets(*target)
 		if err != nil {
-			fatalf("nullwire-mcp: -target: %v", err)
+			return fmt.Errorf("nullwire-mcp: -target: %v", err)
 		}
 		app.target = def
 		app.upstreams = named
 	}
-
-	ln, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", *port))
-	if err != nil {
-		fatalf("nullwire-mcp: cannot listen: %v", err)
+	if *targetMap != "" {
+		gw, err := parseTargetMap(*targetMap)
+		if err != nil {
+			return fmt.Errorf("nullwire-mcp: -target-map: %v", err)
+		}
+		for n := range gw {
+			if _, dup := app.upstreams[n]; dup {
+				return fmt.Errorf("nullwire-mcp: -target-map: name %q is also used in -target", n)
+			}
+		}
+		app.gwMap = gw
 	}
-	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
-	if !ok || !tcpAddr.IP.IsLoopback() {
-		ln.Close()
-		fatalf("nullwire-mcp: refusing to run on non-loopback")
-	}
-	app.port = tcpAddr.Port
 
-	srv := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
+	var ln net.Listener
+	sockPath := ""
+	if *listen != "" {
+		if sockPath, err = parseListen(*listen); err != nil {
+			return fmt.Errorf("nullwire-mcp: %v", err)
+		}
+		if ln, err = listenUnix(sockPath); err != nil {
+			return fmt.Errorf("nullwire-mcp: %v", err)
+		}
+		app.listener = "unix"
+		app.sockPath = sockPath
+	} else {
+		if ln, err = net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", *port)); err != nil {
+			return fmt.Errorf("nullwire-mcp: cannot listen: %v", err)
+		}
+		tcpAddr, ok := ln.Addr().(*net.TCPAddr)
+		if !ok || !tcpAddr.IP.IsLoopback() {
+			ln.Close()
+			return errors.New("nullwire-mcp: refusing to run on non-loopback")
+		}
+		app.port = tcpAddr.Port
+	}
+	// finish writes the -attest-out report and removes the unix socket file.
+	finish := func() {
+		if err := app.writeAttestFile(); err != nil {
+			app.Logf("cannot write -attest-out: %v", err)
+		}
+		if sockPath != "" {
+			_ = os.Remove(sockPath)
+		}
+	}
+
+	srv := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, Protocols: serverProtocols()}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			app.Logf("proxy server stopped: %v", err)
@@ -2212,10 +3161,19 @@ func Main() {
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	done := make(chan struct{})
+	defer signal.Stop(sigs)
+	defer close(done)
 	go func() {
-		<-sigs
+		select {
+		case <-sigs:
+		case <-done:
+			return
+		}
 		app.Logf("signal received; wiping RAM")
+		finish()
 		app.ring.Clear()
+		app.scrub.taint.clear()
 		_ = srv.Close()
 		os.Exit(0)
 	}()
@@ -2227,9 +3185,26 @@ func Main() {
 	if caSource != "" {
 		app.Logf("TLS roots: %s", caSource)
 	}
-	app.Logf("MCP stdio server ready; proxy listening on 127.0.0.1:%d", app.port)
+	if sockPath != "" {
+		app.Logf("MCP stdio server ready; proxy listening on unix socket %s (mode 600)", sockPath)
+	} else {
+		app.Logf("MCP stdio server ready; proxy listening on 127.0.0.1:%d", app.port)
+	}
+	switch {
+	case tok != "" && tokGenerated && sockPath == "":
+		app.Logf("proxy token required. Use HTTP_PROXY=http://nw:%s@127.0.0.1:%d (or send the header %s: %s)", tok, app.port, tokenHeader, tok)
+	case tok != "" && tokGenerated:
+		app.Logf("proxy token required. Send Proxy-Authorization (any user, password %s) or the header %s: %s", tok, tokenHeader, tok)
+	case tok != "":
+		app.Logf("proxy token required (Proxy-Authorization password, or the header %s)", tokenHeader)
+	}
+	for _, n := range app.gatewayNames() {
+		if u := app.gwMap[n]; u != nil {
+			app.Logf("gateway route %s/%s/ -> %s", gwBase, n, u.Host)
+		}
+	}
 
-	scanner := bufio.NewScanner(os.Stdin)
+	scanner := bufio.NewScanner(stdin)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -2242,6 +3217,9 @@ func Main() {
 		app.Logf("stdin error: %v", err)
 	}
 	app.Logf("stdin closed; wiping RAM")
+	finish()
 	app.ring.Clear()
+	app.scrub.taint.clear()
 	_ = srv.Close()
+	return nil
 }

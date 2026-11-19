@@ -29,7 +29,7 @@ jobs:
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$RUNNER_TEMP/trivy-cache:/root/.cache" \
-            aquasec/trivy:0.58.1 image \
+            aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb image \
               --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
               nullwire-scan:local 2>&1 | tee trivy.txt
       - name: Save the report

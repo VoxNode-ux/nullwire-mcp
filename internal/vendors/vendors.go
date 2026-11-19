@@ -19,7 +19,7 @@ var DefaultVendorPrefixes = []string{
 	"sk-proj-", "sk-svcacct-", "sk-admin-", "sk-ant-", "sk-or-", "sk-lf-",
 	"AIza", "ya29.", "GOCSPX-", "pplx-", "gsk_", "xai-", "nvapi-", "csk-",
 	"api_org_", "lsv2_pt_", "lsv2_sk_", "pcsk_", "tvly-", "jina_", "sk-None-",
-	"tgp_v1_",
+	"tgp_v1_", "e2b_", "wandb_v1_",
 
 	// AWS, Alibaba, Tencent, Yandex
 	"AKIA", "ASIA", "ABIA", "ACCA", "A3T", "ABSK", "LTAI", "AKID", "AQVN",
@@ -30,11 +30,16 @@ var DefaultVendorPrefixes = []string{
 	"dp.pt.", "dp.st.", "dp.sa.", "dp.ct.", "dp.scim.", "tskey-", "tk-us-",
 	"pscale_tkn_", "pscale_oauth_", "pscale_pw_", "vercel_blob_rw_", "vcp_", "nfp_",
 	"cfut_", "cfat_", "SSWS ", "essu_",
+	"napi_",   // Neon API key
+	"FlyV1 ",  // Fly.io macaroon token
 	"AccountKey=", "SharedAccessKey=",
 
 	// Source hosting, CI and package registries
 	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
 	"glpat-", "glptt-", "glrt-", "gldt-", "glft-", "glimt-", "glagent-",
+	"glffct-",          // GitLab feature flag client token
+	"p8e-",             // Adobe OAuth client secret
+	"bedrock-api-key-", // AWS Bedrock short-lived API key
 	"glsoat-", "glcbt-", "gloas-",
 	"ATATT3", "ATCTT3", "ATBB", "bkua_", "CCIPAT_", "CLOJARS_",
 	"npm_", "pypi-AgEI", "pypi-AgEN", "rubygems_", "dckr_pat_", "dckr_oat_",
@@ -53,6 +58,7 @@ var DefaultVendorPrefixes = []string{
 	"FLWSECK-", "FLWSECK_TEST-", "shippo_live_", "shippo_test_", "EZAK", "EZTK",
 	"duffel_live_", "duffel_test_",
 	"access-sandbox-", "access-development-", "access-production-",
+	"EAAAl", "EAAAE", // Square OAuth access tokens (production, sandbox)
 
 	// Messaging and email
 	"SG.", "xkeysib-", "os_v2_app_", "os_v2_org_",
@@ -66,6 +72,17 @@ var DefaultVendorPrefixes = []string{
 
 	// Private key material
 	"AGE-SECRET-KEY-",
+
+	// Encrypted or signed token formats: PASETO and Fernet
+	"v2.local.", "v2.public.", "v3.local.", "v3.public.", "v4.local.", "v4.public.", "gAAAAA",
+}
+
+// DefaultDollarVendorPrefixes are token prefixes whose token may itself contain
+// "$" separators, such as PayPal and Braintree
+// "access_token$production$<16 chars>$<32 hex>". They are matched with a token
+// class that allows "$".
+var DefaultDollarVendorPrefixes = []string{
+	"access_token$production$", "access_token$sandbox$",
 }
 
 // DefaultWeakVendorPrefixes also occur in ordinary words and identifiers
@@ -76,8 +93,11 @@ var DefaultWeakVendorPrefixes = []string{
 	"hf_", "r8_", "cohere_", "replicate_", "supabase_", "neon_",
 	"twilio_sk_", "sendgrid_", "mailgun_", "dapi",
 	"secret_", "api_key_", "apikey_", "private_key_", "access_token_",
-	"bearer ", "token ",
 	"fw_",
+	"sk_",    // ElevenLabs
+	"oy2",    // NuGet
+	"cio",    // Crates.io
+	"sess-",  // OpenAI session key
 }
 
 // DefaultDSNPrefixes are connection-string and webhook-URL prefixes. The rest
@@ -86,22 +106,24 @@ var DefaultWeakVendorPrefixes = []string{
 var DefaultDSNPrefixes = []string{
 	"mongodb+srv://", "mongodb://", "postgres://", "postgresql://",
 	"postgresql+psycopg2://", "postgresql+psycopg://", "postgresql+asyncpg://", "postgresql+pg8000://",
-	"mysql://", "mysql+pymysql://", "mysql+aiomysql://", "mysql+mysqlconnector://", "mysql+mysqldb://",
-	"mariadb://", "mssql://", "mssql+pyodbc://", "mssql+pymssql://", "sqlserver://",
+	"mysql://", "mysql+pymysql://", "mysql+aiomysql://", "mysql+mysqlconnector://", "mysql+mysqldb://", "mysql+asyncmy://",
+	"mariadb://", "mssql://", "mssql+pyodbc://", "mssql+pymssql://", "mssql+aioodbc://", "sqlserver://",
 	"oracle://", "oracle+cx_oracle://", "oracle+oracledb://", "jdbc:oracle:thin:",
-	"cockroachdb://", "clickhouse://", "redshift://", "snowflake://", "trino://", "cassandra://",
+	"cockroachdb://", "cockroachdb+psycopg2://", "clickhouse://", "redshift://", "snowflake://", "trino://", "cassandra://",
 	"neo4j://", "neo4j+s://", "neo4j+ssc://", "bolt://", "bolt+s://",
 	"couchbase://", "couchbases://", "libsql://", "cloudinary://",
 	"redis://", "rediss://", "valkey://", "valkeys://",
-	"amqp://", "amqps://", "nats://",
+	"amqp://", "amqps://", "nats://", "nats+tls://",
+	"mqtt://", "mqtts://",
 	"https://hooks.zapier.com/hooks/catch/", "https://maker.ifttt.com/use/",
 	"https://chat.googleapis.com/v1/spaces/", "https://api.telegram.org/bot",
 }
 
 // Gate is an Aho-Corasick automaton that answers one question: does the text
 // contain any of a fixed set of literals? It reads the text once, however many
-// literals there are. Literals are lower-cased when the gate is built, so run
-// Match on lower-cased text for a case-insensitive check.
+// literals there are. Literals are lower-cased when the gate is built and Match
+// lower-cases ASCII letters as it reads, so the check is case-insensitive and
+// callers pass the text as it is, with no lower-cased copy.
 type Gate struct {
 	class [256]uint8 // byte -> class; every byte no literal uses shares class 0
 	width int        // number of classes
@@ -182,7 +204,8 @@ func NewGate(literals ...[]string) *Gate {
 	return g
 }
 
-// Match reports whether text contains any of the gate's literals.
+// Match reports whether text contains any of the gate's literals, ignoring
+// ASCII case. It does not allocate.
 func (g *Gate) Match(text string) bool {
 	if g == nil || len(g.hit) <= 1 {
 		return false
@@ -190,7 +213,11 @@ func (g *Gate) Match(text string) bool {
 	n := g.width
 	s := 0
 	for i := 0; i < len(text); i++ {
-		s = int(g.next[s*n+int(g.class[text[i]])])
+		c := text[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		s = int(g.next[s*n+int(g.class[c])])
 		if g.hit[s] {
 			return true
 		}

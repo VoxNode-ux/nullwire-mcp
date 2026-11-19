@@ -177,7 +177,9 @@ jobs:
           case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::bad tag: $TAG"; exit 1 ;; esac
           sed -i "s/^version = .*/version = \"${TAG#v}\"/" pyproject.toml
           sed -i "s/^__version__ = .*/__version__ = \"${TAG#v}\"/" src/nullwire_mcp/__init__.py
-          python -m pip install build
+          # build and its dependencies are pinned by hash (build 1.6.1, commit
+          # 89cccef40df9011f03bec18cf52c53d1096ed6ee); pip refuses any mismatch.
+          python -m pip install --require-hashes -r build-requirements.txt
           python -m build
       - name: Publish with trusted publishing
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

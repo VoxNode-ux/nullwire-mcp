@@ -1,6 +1,9 @@
 name: Security checks
 
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
   schedule:
     - cron: "23 3 * * 1"   # Mondays 03:23 UTC, on the default branch
@@ -16,11 +19,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
           cache: false
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0 # e672cbe8fbc8c76e28fcb6db0efd9ce354e0dac5
       - name: Scan the code and the Go standard library it uses
         run: |
           set -o pipefail
@@ -35,18 +38,19 @@ jobs:
 
   fuzz:
     name: Fuzz the scrubber (${{ matrix.target }})
-    # Runs weekly on main and on demand.
+    # Runs weekly on main, on pushes to main and on demand; not on pull requests.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        target: [FuzzScrubberNoLeak, FuzzScrubberDeterministic, FuzzScrubberNoPanic, FuzzVendorKeysNoLeak, FuzzIPv6NoLeak, FuzzIPv6Stable]
+        target: [FuzzScrubberNoLeak, FuzzScrubberDeterministic, FuzzScrubberNoPanic, FuzzVendorKeysNoLeak, FuzzIPv6NoLeak, FuzzIPv6Stable, FuzzUnwrapEscapes, FuzzScrubContextsNoPanic]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
           cache: false
       - name: Show the Go version
@@ -92,11 +96,11 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           check-latest: true
           cache: false
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.22.0
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0 # 5eb1d104ef85ff2c905c877eb600e8c1dee33a22
       - name: Scan (medium severity and above)
         run: |
           set -o pipefail

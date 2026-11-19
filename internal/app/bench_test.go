@@ -113,3 +113,18 @@ func BenchmarkProxyRoundTrip(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkScrubTextEscaped measures text that needs the unwrap pass (a
+// percent-escaped key and double-escaped JSON), the case that is allowed to
+// allocate. Compare it with BenchmarkScrubTextClean, which must stay flat.
+func BenchmarkScrubTextEscaped(b *testing.B) {
+	s := benchScrubber(b)
+	in := strings.Repeat(`{\"api_key\":\"plainvalue123456\",\"next\":\"%73k_live_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6\"} `, 20)
+	b.SetBytes(int64(len(in)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		out, _ := s.ScrubText(in)
+		benchSink = out
+	}
+}

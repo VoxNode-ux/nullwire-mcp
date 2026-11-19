@@ -24,13 +24,17 @@ var cloudSensitiveHeaders = []string{
 	"x-access-token", "x-api-token", "x-rapidapi-key", "x-shopify-access-token",
 	"x-figma-token", "dd-api-key", "dd-application-key", "x-ibm-client-secret",
 	"apikey", "x-csrf-token", "x-xsrf-token",
+	// AI, search, backend and webhook signing
+	"xi-api-key", "x-client-secret", "x-secret-key", "x-webhook-secret", "x-hasura-admin-secret",
+	"x-supabase-api-key", "x-algolia-api-key", "x-meilisearch-api-key", "x-typesense-api-key",
+	"x-hub-signature", "x-hub-signature-256", "x-slack-signature", "stripe-signature",
 }
 
 // cloudGate is the cheap lower-case check that decides whether the name-based
 // rules below are worth running on a piece of text.
 var cloudGate = []string{
 	"secret", "accountkey", "account_key", "account-key", "sharedaccess",
-	"shared_access", "shared-access", "sas_token", "sas-token", "session",
+	"shared_access", "shared-access", "sas_token", "sas-token", "sastoken", "session",
 	"security", "password", "pwd",
 }
 
@@ -48,28 +52,32 @@ var (
 
 	// Azure AD (Entra ID) client secrets: 3 characters, "8Q~", then 30+ more.
 	reAzureADSecret = regexp.MustCompile(`[A-Za-z0-9_.~-]{3}8Q~[A-Za-z0-9_.~-]{30,}`)
+
+	// Cloudflare Origin CA key: "v1.0-", hex, "-", more hex. A bare "v1.0-"
+	// vendor prefix would also match release tags like v1.0-linux-amd64-musl.
+	reCloudflareOriginCA = regexp.MustCompile(`\bv1\.0-[0-9a-fA-F]{16,}-[0-9a-fA-F]{32,}\b`)
 )
 
-// scrubCloudSecrets runs the cloud rules. lower is the lower-cased text, passed
-// in so it is not computed twice.
-func (s *Scrubber) scrubCloudSecrets(in, lower string) (string, int) {
+// scrubCloudSecrets runs the cloud rules. gm is the scrubGate result for the
+// text, computed once by the caller.
+func (s *Scrubber) scrubCloudSecrets(in string, gm uint32) (string, int) {
 	out := in
 	count := 0
 
-	if containsAny(lower, cloudGate) {
+	if gm&gateCloud != 0 {
 		out = reCloudNamedSecret.ReplaceAllStringFunc(out, func(m string) string {
 			g := reCloudNamedSecret.FindStringSubmatch(m)
-			if g == nil {
+			if g == nil || strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) {
 				return m
 			}
 			count++
 			s.Tokens.Add(1)
 			return g[1] + s.tag("KEY", g[2])
 		})
-		if strings.Contains(lower, "pass") || strings.Contains(lower, "pwd") {
+		if gm&gateCloudPass != 0 {
 			out = reCloudConnPassword.ReplaceAllStringFunc(out, func(m string) string {
 				g := reCloudConnPassword.FindStringSubmatch(m)
-				if g == nil || strings.HasPrefix(g[2], "[REDACTED_") {
+				if g == nil || strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) {
 					return m
 				}
 				count++
@@ -81,6 +89,14 @@ func (s *Scrubber) scrubCloudSecrets(in, lower string) (string, int) {
 
 	if strings.Contains(out, "8Q~") {
 		out = reAzureADSecret.ReplaceAllStringFunc(out, func(m string) string {
+			count++
+			s.Tokens.Add(1)
+			return s.tag("KEY", m)
+		})
+	}
+
+	if strings.Contains(out, "v1.0-") {
+		out = reCloudflareOriginCA.ReplaceAllStringFunc(out, func(m string) string {
 			count++
 			s.Tokens.Add(1)
 			return s.tag("KEY", m)
@@ -132,11 +148,29 @@ func looksLikeAWSSecretKey(c string) bool {
 // scrubAWSSecretKeys redacts a standalone AWS-style secret access key found
 // anywhere in text, even with no field name next to it.
 func (s *Scrubber) scrubAWSSecretKeys(in string) (string, int) {
-	if len(in) < 40 || !strings.ContainsAny(in, "/+") {
+	spans := awsSecretKeySpans(in)
+	if len(spans) == 0 {
 		return in, 0
 	}
 	var b strings.Builder
-	count, last := 0, 0
+	last := 0
+	for _, sp := range spans {
+		b.WriteString(in[last:sp.start])
+		b.WriteString(s.tag("KEY", in[sp.start:sp.end]))
+		s.Tokens.Add(1)
+		last = sp.end
+	}
+	b.WriteString(in[last:])
+	return b.String(), len(spans)
+}
+
+// awsSecretKeySpans returns where standalone AWS-style secret access keys sit
+// in in. It allocates only when it finds one.
+func awsSecretKeySpans(in string) []secretSpan {
+	if len(in) < 40 || !strings.ContainsAny(in, "/+") {
+		return nil
+	}
+	var spans []secretSpan
 	for i := 0; i < len(in); {
 		if !isAWSSecretByte(in[i]) {
 			i++
@@ -147,25 +181,19 @@ func (s *Scrubber) scrubAWSSecretKeys(in string) (string, int) {
 			j++
 		}
 		if j-i == 40 && awsKeyBoundaryOK(in, i, j) && looksLikeAWSSecretKey(in[i:j]) {
-			b.WriteString(in[last:i])
-			b.WriteString(s.tag("KEY", in[i:j]))
-			s.Tokens.Add(1)
-			count++
-			last = j
+			spans = append(spans, secretSpan{start: i, end: j})
 		}
 		i = j
 	}
-	if count == 0 {
-		return in, 0
-	}
-	b.WriteString(in[last:])
-	return b.String(), count
+	return spans
 }
 
 // awsKeyBoundaryOK rejects a 40-character run that is only a piece of a longer
-// token or identifier (neighbouring "=", "_", "-" or ".").
+// token or identifier (neighbouring "_", "-" or "."). A "=" in front is allowed,
+// so KEY=<secret> assignments are caught; one after the run still rejects it
+// (base64 padding means the run is part of something longer).
 func awsKeyBoundaryOK(in string, i, j int) bool {
-	if i > 0 && strings.IndexByte("=_-.", in[i-1]) >= 0 {
+	if i > 0 && strings.IndexByte("_-.", in[i-1]) >= 0 {
 		return false
 	}
 	if j < len(in) && strings.IndexByte("=_-.", in[j]) >= 0 {

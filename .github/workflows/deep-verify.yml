@@ -1,0 +1,725 @@
+name: Deep verify (code, protocol and security hardening)
+
+# Workflow 1. Slow, strict checks that complement quality.yml and security.yml:
+#   race + shuffle + goroutine-leak guard, nilaway, gremlins (mutation testing),
+#   grype (CVE scan of the built binary), MCP Inspector, agent-scan (mcp-scan),
+#   the Autobahn WebSocket conformance suite, the named scrub-context unit tests
+#   (repeated under -race), gitleaks + trufflehog (repo scan and an independent
+#   cross-check of NullWire's own output) and a websocat end-to-end redaction check.
+# Nothing here changes the repository; everything is installed on the runner.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * 2"   # Tuesdays 04:41 UTC, on the default branch
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deep-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.27.2"
+
+jobs:
+  # ------------------------------------------------------------------ 1
+  race:
+    name: Race detector + shuffled order
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Test with -race and a random order (the seed is printed on failure)
+        run: |
+          set -o pipefail
+          go test -race -shuffle=on -count=1 ./... 2>&1 | tee race.txt
+      - name: Summarize race test results
+        if: always()
+        run: |
+          {
+            echo "## Race Detector + Shuffled Order"
+            if [ ! -f race.txt ]; then
+              echo "_No log generated._"
+              exit 0
+            fi
+            seed=$(grep -m1 '^-test.shuffle' race.txt || true)
+            [ -n "$seed" ] && echo "- **Shuffle seed:** \`$seed\`"
+            races=$(grep -c 'WARNING: DATA RACE' race.txt || true)
+            echo "- **Data races detected:** $races"
+            echo ""
+            echo "### Package Summary"
+            echo '```text'
+            grep -E '^(ok|FAIL|\?)\s+' race.txt || tail -n 30 race.txt
+            echo '```'
+            if grep -qE 'WARNING: DATA RACE|--- FAIL:' race.txt; then
+              echo "### Failure / Race Details"
+              echo '```text'
+              grep -n -C 8 -E 'WARNING: DATA RACE|--- FAIL:' race.txt | head -n 120
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: race-log
+          path: race.txt
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 2
+  leak-guard:
+    name: Goroutine leak guard (goleak)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Add goleak on the runner only (the repo stays dependency-free)
+        run: |
+          # go.uber.org/goleak v1.3.0 = 31095c657c34bba405a8d480db27989aa5f60b9c
+          go get go.uber.org/goleak@v1.3.0
+          for pkg in internal/app internal/scan internal/protect internal/install internal/vendors; do
+            if grep -rqs 'func TestMain' "$pkg"; then
+              echo "skip $pkg: it already has a TestMain"
+              continue
+            fi
+            name=$(sed -n 's/^package \([a-z_0-9]*\)$/\1/p' "$pkg"/*.go | grep -v _test | head -n 1)
+            printf 'package %s\n\nimport (\n\t"testing"\n\n\t"go.uber.org/goleak"\n)\n\nfunc TestMain(m *testing.M) { goleak.VerifyTestMain(m) }\n' "$name" > "$pkg/zz_leakguard_test.go"
+          done
+          git status --short
+      - name: Run the tests with the leak guard
+        run: |
+          set -o pipefail
+          go test -count=1 -shuffle=on ./... 2>&1 | tee leak.txt
+      - name: Summarize goleak results
+        if: always()
+        run: |
+          {
+            echo "## Goroutine Leak Guard (goleak)"
+            if [ ! -f leak.txt ]; then
+              echo "_No log generated._"
+              exit 0
+            fi
+            leaks=$(grep -c 'found unexpected goroutines:' leak.txt || true)
+            echo "- **Packages with leaked goroutines:** $leaks"
+            echo ""
+            echo "### Package Summary"
+            echo '```text'
+            grep -E '^(ok|FAIL|\?)\s+' leak.txt || tail -n 30 leak.txt
+            echo '```'
+            if grep -qE 'found unexpected goroutines:|--- FAIL:' leak.txt; then
+              echo "### Leak / Failure Details"
+              echo '```text'
+              grep -n -A 25 -E 'found unexpected goroutines:|--- FAIL:' leak.txt | head -n 120
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: leak-log
+          path: leak.txt
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 3
+  nilaway:
+    name: Nil-pointer analysis (nilaway)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Install nilaway
+        run: go install go.uber.org/nilaway/cmd/nilaway@v0.0.0-20260918162853-acb8859b9031 # acb8859b9031
+      - name: Analyse our own packages
+        run: |
+          set -o pipefail
+          "$(go env GOPATH)/bin/nilaway" -include-pkgs="github.com/VoxNode-ux/nullwire-mcp" ./... 2>&1 | tee nilaway.txt
+      - name: Summarize nilaway findings
+        if: always()
+        run: |
+          {
+            echo "## Nil-Pointer Analysis (nilaway)"
+            if [ ! -s nilaway.txt ]; then
+              echo "✅ **0 nilability findings reported.**"
+            else
+              findings=$(grep -cE '^[^#].*:[0-9]+:[0-9]+:' nilaway.txt || true)
+              echo "⚠️ **Findings reported:** $findings"
+              echo '```text'
+              head -n 120 nilaway.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: nilaway-report
+          path: nilaway.txt
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 4
+  gremlins:
+    name: Mutation testing (gremlins)
+    # Slow: not on pull requests.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Install gremlins
+        run: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
+      - name: Mutate the smaller packages (internal/app is too big for one run)
+        run: |
+          set -o pipefail
+          for pkg in ./internal/scan ./internal/protect ./internal/vendors; do
+            echo "=== $pkg ==="
+            "$(go env GOPATH)/bin/gremlins" unleash --threshold-efficacy 70 "$pkg" 2>&1
+          done | tee gremlins.txt
+      - name: Summarize gremlins mutation scores
+        if: always()
+        run: |
+          {
+            echo "## Mutation Testing Scores (gremlins — threshold 70%)"
+            if [ ! -s gremlins.txt ]; then
+              echo "_No gremlins report generated._"
+              exit 0
+            fi
+            echo '```text'
+            grep -E '^(=== |Mutation testing|Killed:|Lived:|Timed out:|Not covered:|Test efficacy:|Mutator coverage:)' gremlins.txt || tail -n 40 gremlins.txt
+            echo '```'
+            if grep -q 'LIVED' gremlins.txt; then
+              echo "### Surviving Mutants (LIVED)"
+              echo '```text'
+              grep -E 'LIVED' gremlins.txt | head -n 80
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: gremlins-report
+          path: gremlins.txt
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 5
+  grype:
+    name: CVE scan of the binary and its SBOM (grype)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Install grype v0.122.0 (checksum-verified)
+        env:
+          GRYPE_VERSION: "0.122.0"
+          TARBALL_SHA256: e697e6f7224637df87e267e4318cc027feae99a8e1b80280241d32b9ee5d4920   # linux_amd64
+          CHECKSUMS_SHA256: e9bacbd2c4113cbabdc48149c2af5aabfa3f518569c0059ceae5f7de8ba96f48
+        run: |
+          set -euo pipefail
+          base="https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}"
+          curl -fsSLO "$base/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "$base/grype_${GRYPE_VERSION}_checksums.txt"
+          echo "${CHECKSUMS_SHA256}  grype_${GRYPE_VERSION}_checksums.txt" | sha256sum -c -
+          echo "${TARBALL_SHA256}  grype_${GRYPE_VERSION}_linux_amd64.tar.gz" | sha256sum -c -
+          tar -xzf "grype_${GRYPE_VERSION}_linux_amd64.tar.gz" grype
+          ./grype version
+      - name: Build the binary
+        run: CGO_ENABLED=0 go build -trimpath -o nullwire-mcp .
+      - name: Write an SBOM (CycloneDX, from the Go build info)
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest
+          "$(go env GOPATH)/bin/cyclonedx-gomod" app -json -output sbom.cdx.json -main . .
+      - name: Scan the SBOM and the binary (fail on high or critical)
+        run: |
+          set -o pipefail
+          {
+            echo "== SBOM =="
+            ./grype sbom:sbom.cdx.json --fail-on high
+            echo "== binary =="
+            ./grype file:./nullwire-mcp --fail-on high
+          } 2>&1 | tee grype.txt
+      - name: Summarize grype CVE results
+        if: always()
+        run: |
+          {
+            echo "## CVE Scan (Grype — SBOM & Binary)"
+            if [ ! -s grype.txt ]; then
+              echo "_No grype output generated._"
+              exit 0
+            fi
+            echo '```text'
+            cat grype.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: grype-report
+          path: |
+            grype.txt
+            sbom.cdx.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 6
+  inspector:
+    name: MCP protocol check (MCP Inspector 2.16.0)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Build a stdio launcher for the server
+        run: |
+          go build -o "$PWD/nullwire-mcp" .
+          printf '#!/bin/sh\nexec "%s/nullwire-mcp" -port 0\n' "$PWD" > nw-stdio.sh
+          chmod +x nw-stdio.sh
+      - name: Inspector CLI - list the tools
+        run: |
+          set -o pipefail
+          # Version pinned exactly (2.16.0, release commit eb54b44).
+          npx --yes @modelcontextprotocol/inspector@2.16.0 --cli "$PWD/nw-stdio.sh" --method tools/list | tee inspector-tools.json
+          grep -q inspect_traffic inspector-tools.json
+      - name: Inspector CLI - call inspect_traffic
+        run: |
+          set -o pipefail
+          npx --yes @modelcontextprotocol/inspector@2.16.0 --cli "$PWD/nw-stdio.sh" \
+            --method tools/call --tool-name inspect_traffic --tool-arg limit=5 | tee inspector-call.json
+      - name: Summarize MCP Inspector output
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+
+          print("## MCP Inspector 2.16.0 Check")
+          if os.path.exists("inspector-tools.json"):
+              try:
+                  data = json.load(open("inspector-tools.json"))
+                  tools = [t.get("name", "?") for t in data.get("tools", [])]
+                  print(f"- **Exposed tools ({len(tools)}):** `{', '.join(tools)}`")
+              except Exception as e:
+                  print(f"- **tools/list parse error:** `{e}`")
+          else:
+              print("- **tools/list:** _not generated_")
+
+          if os.path.exists("inspector-call.json"):
+              raw = open("inspector-call.json").read().strip()
+              print("\n### `tools/call` (`inspect_traffic`)")
+              print("```json")
+              print(raw[:2000])
+              print("```")
+          else:
+              print("- **tools/call:** _not generated_")
+          PY
+      - name: Save the output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: inspector-output
+          path: inspector-*.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 7
+  mcp-scan:
+    name: MCP security scan (snyk agent-scan / mcp-scan v0.6.11)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Download agent-scan v0.6.11 (the latest non-snapshot tag) and verify it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA256_LINUX_X86_64: b0b9f49c2007bd278e53b79671558f67e4ab2ba5a83c02f18d0291d4651b8d00
+        run: |
+          set -euo pipefail
+          gh release download v0.6.11 --repo snyk/agent-scan --pattern '*linux-x86_64*' --output agent-scan
+          echo "${SHA256_LINUX_X86_64}  agent-scan" | sha256sum -c -
+          chmod +x agent-scan
+      - name: Build the server and describe it in an MCP config
+        run: |
+          go build -o "$PWD/nullwire-mcp" .
+          cat > mcp-config.json <<JSON
+          {"mcpServers":{"nullwire":{"command":"$PWD/nullwire-mcp","args":["-port","0"]}}}
+          JSON
+      - name: Inspect the tools the server exposes
+        run: ./agent-scan inspect mcp-config.json 2>&1 | tee agent-scan-inspect.txt
+      - name: Scan for tool poisoning and prompt injection (needs the SNYK_TOKEN secret)
+        if: env.SNYK_TOKEN != ''
+        run: ./agent-scan scan mcp-config.json 2>&1 | tee agent-scan.txt
+      - name: Summarize agent-scan results
+        if: always()
+        run: |
+          {
+            echo "## MCP Security Scan (snyk agent-scan v0.6.11)"
+            if [ -f agent-scan-inspect.txt ]; then
+              echo "### Tool Inspection"
+              echo '```text'
+              cat agent-scan-inspect.txt
+              echo '```'
+            fi
+            if [ -f agent-scan.txt ]; then
+              echo "### Security / Poisoning Scan"
+              echo '```text'
+              cat agent-scan.txt
+              echo '```'
+            elif [ -z "$SNYK_TOKEN" ]; then
+              echo "_Full poisoning scan skipped (`SNYK_TOKEN` not configured)._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: agent-scan-report
+          path: agent-scan*.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 8
+  autobahn:
+    name: WebSocket conformance (Autobahn 25.10.1)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Build the proxy
+        run: go build -o nullwire-mcp .
+      - name: Start a plain WebSocket echo server as the upstream
+        run: |
+          pip install --quiet websockets==15.0.1
+          cat > echo.py <<'PY'
+          import asyncio, websockets
+          async def echo(ws):
+              async for msg in ws:
+                  await ws.send(msg)
+          async def main():
+              async with websockets.serve(echo, "127.0.0.1", 18081, max_size=None, compression=None):
+                  await asyncio.Future()
+          asyncio.run(main())
+          PY
+          python3 echo.py > echo.log 2>&1 &
+          for i in $(seq 1 20); do (echo > /dev/tcp/127.0.0.1/18081) 2>/dev/null && break; sleep 0.5; done
+      - name: Start NullWire in front of it
+        run: |
+          rm -f go.flag
+          ( while [ ! -f go.flag ]; do sleep 1; done ) | ./nullwire-mcp -port 18080 -target http://127.0.0.1:18081 > nw-out.txt 2> nw-err.txt &
+          for i in $(seq 1 20); do (echo > /dev/tcp/127.0.0.1/18080) 2>/dev/null && break; sleep 0.5; done
+      - name: Run the Autobahn fuzzing client (compression cases 12.* and 13.* excluded)
+        run: |
+          mkdir -p autobahn/reports
+          cat > autobahn/fuzzingclient.json <<'JSON'
+          {
+            "outdir": "/reports",
+            "servers": [{"agent": "nullwire", "url": "ws://127.0.0.1:18080"}],
+            "cases": ["*"],
+            "exclude-cases": ["12.*", "13.*"],
+            "exclude-agent-cases": {}
+          }
+          JSON
+          chmod -R a+rwx autobahn
+          docker run --rm --network host \
+            -v "$PWD/autobahn:/config" -v "$PWD/autobahn/reports:/reports" \
+            crossbario/autobahn-testsuite@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074 \
+            wstest -m fuzzingclient -s /config/fuzzingclient.json
+      - name: Fail on any FAILED case
+        id: check
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          from collections import Counter
+
+          data = json.load(open("autobahn/reports/index.json"))
+          bad, total = [], 0
+          counts = Counter()
+          for agent, cases in data.items():
+              for case, r in cases.items():
+                  total += 1
+                  b, bc = r["behavior"], r["behaviorClose"]
+                  counts[b] += 1
+                  if b == "FAILED" or bc == "FAILED":
+                      bad.append((case, b, bc))
+
+          print(f"{total} cases run, {len(bad)} failed")
+          for c, _, _ in sorted(bad):
+              print("FAILED:", c)
+
+          with open("autobahn-summary.md", "w") as out:
+              out.write("## WebSocket Conformance (Autobahn 25.10.1)\n")
+              out.write(f"- **Total cases run:** {total}\n")
+              out.write(f"- **Failed:** {len(bad)}\n")
+              for k, v in sorted(counts.items()):
+                  out.write(f"  - `{k}`: {v}\n")
+              if bad:
+                  out.write("\n### Failed Cases\n| Case | Behavior | Close Behavior |\n|---|---|---|\n")
+                  for c, b, bc in sorted(bad):
+                      out.write(f"| `{c}` | `{b}` | `{bc}` |\n")
+
+          sys.exit(1 if bad else 0)
+          PY
+      - name: Summarize Autobahn results
+        if: always()
+        run: |
+          if [ -f autobahn-summary.md ]; then
+            cat autobahn-summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo -e "## WebSocket Conformance (Autobahn 25.10.1)\n_Test suite did not produce `index.json`._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Save the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: autobahn-report
+          path: |
+            autobahn/reports
+            nw-err.txt
+            echo.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 9
+  scrub-tests:
+    name: Scrub-context unit tests (repeated, race, shuffled) + fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Run the named scrub-context tests 20 times under -race
+        run: |
+          set -o pipefail
+          go test -race -shuffle=on -count=20 -v ./internal/app \
+            -run '^(TestUnwrapPercentEncodedSecret|TestUnwrapEncodedDigits|TestUnwrapEscapedJSONKeepsEscaping|TestNeedsUnwrap|TestContextEntropyLimit|TestContextHexWebhookSecrets|TestEntropyExemptHeaders|TestCheapChecksMatchTheirRules)$' 2>&1 | tee scrub-tests.txt
+      - name: Fuzz the same code for 30 s each
+        run: |
+          set -o pipefail
+          for f in FuzzUnwrapEscapes FuzzScrubContextsNoPanic; do
+            go test -run='^$' -fuzz="^${f}$" -fuzztime=30s ./internal/app 2>&1 | tee -a scrub-fuzz.txt
+          done
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## Scrub-context tests (20 runs, -race, shuffled)"
+            echo "| Test | Passes | Failures |"
+            echo "|---|---|---|"
+            for t in TestUnwrapPercentEncodedSecret TestUnwrapEncodedDigits TestUnwrapEscapedJSONKeepsEscaping TestNeedsUnwrap TestContextEntropyLimit TestContextHexWebhookSecrets TestEntropyExemptHeaders TestCheapChecksMatchTheirRules; do
+              p=$(grep -c -- "^--- PASS: $t " scrub-tests.txt 2>/dev/null || true)
+              f=$(grep -c -- "^--- FAIL: $t " scrub-tests.txt 2>/dev/null || true)
+              echo "| \`$t\` | $p | $f |"
+            done
+            [ -f scrub-fuzz.txt ] && { echo '### Fuzz'; echo '```text'; grep -E '^(ok|FAIL|PASS|---)' scrub-fuzz.txt; echo '```'; }
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: scrub-tests-log
+          path: |
+            scrub-tests.txt
+            scrub-fuzz.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 10
+  gitleaks:
+    name: Secret scan (gitleaks v8.30.1) + output cross-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Install gitleaks and trufflehog (checksum-verified)
+        uses: ./.github/actions/install-scanners
+      - name: Scan the repository and its history (report only; test fixtures hold fake secrets)
+        run: |
+          gitleaks git . --no-banner --redact --exit-code 0 --report-format json --report-path gitleaks-repo.json
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, collections
+          f = json.load(open("gitleaks-repo.json")) or []
+          print("## gitleaks v8.30.1 (repo + history)")
+          print(f"- **Findings:** {len(f)}")
+          for rule, n in collections.Counter(x["RuleID"] for x in f).most_common(10):
+              print(f"  - `{rule}`: {n}")
+          for x in f[:20]:
+              print(f"  - `{x['File']}:{x['StartLine']}` ({x['RuleID']})")
+          PY
+      - name: Cross-check - gitleaks and trufflehog must find nothing in NullWire's own scan report
+        run: |
+          go build -o nullwire-mcp .
+          .github/scripts/scanner-crosscheck.sh "$PWD/nullwire-mcp"
+      - name: Save the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: gitleaks-report
+          path: gitleaks-repo.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 11
+  trufflehog:
+    name: Secret scan (trufflehog v3.99.9, no network verification)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Install gitleaks and trufflehog (checksum-verified)
+        uses: ./.github/actions/install-scanners
+      - name: Scan the repository and its history (report only)
+        run: |
+          trufflehog git "file://$PWD" --no-verification --no-update --json > trufflehog-repo.jsonl 2> trufflehog.err || true
+          {
+            echo "## trufflehog v3.99.9 (repo + history, unverified)"
+            echo "- **Findings:** $(grep -c '"SourceMetadata"' trufflehog-repo.jsonl || true)"
+            echo '```text'
+            python3 -c '
+          import json, collections
+          c = collections.Counter()
+          for l in open("trufflehog-repo.jsonl"):
+              try: c[json.loads(l)["DetectorName"]] += 1
+              except Exception: pass
+          for k, v in c.most_common(10): print(k, v)
+          '
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: trufflehog-report
+          path: trufflehog-repo.jsonl
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 12
+  websocat:
+    name: WebSocket redaction end-to-end (websocat v1.14.2 built from a verified source zip)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      WEBSOCAT_VERSION: "1.14.2"
+      WEBSOCAT_ZIP_SHA256: 84ef6f855cc95fde332b554cb240925b5276ea474c3229daff3376516559c43e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Build websocat from the checksum-verified source zip
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o websocat.zip "https://github.com/vi/websocat/archive/refs/tags/v${WEBSOCAT_VERSION}.zip"
+          echo "${WEBSOCAT_ZIP_SHA256}  websocat.zip" | sha256sum -c -
+          unzip -q websocat.zip && cd "websocat-${WEBSOCAT_VERSION}"
+          cargo build --release
+          install -m 0755 target/release/websocat "$RUNNER_TEMP/websocat"
+          mkdir -p "$RUNNER_TEMP/wsbin" && mv "$RUNNER_TEMP/websocat" "$RUNNER_TEMP/wsbin/"
+          echo "$RUNNER_TEMP/wsbin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/wsbin/websocat" --version
+      - name: Build NullWire and start a WebSocket echo upstream
+        run: |
+          go build -o nullwire-mcp .
+          pip install --quiet websockets==15.0.1
+          cat > echo.py <<'PY'
+          import asyncio, websockets
+          async def echo(ws):
+              async for msg in ws:
+                  await ws.send(msg)
+          async def main():
+              async with websockets.serve(echo, "127.0.0.1", 18081, max_size=None, compression=None):
+                  await asyncio.Future()
+          asyncio.run(main())
+          PY
+          python3 echo.py > echo.log 2>&1 &
+          for i in $(seq 1 20); do (echo > /dev/tcp/127.0.0.1/18081) 2>/dev/null && break; sleep 0.5; done
+      - name: A secret must reach the upstream intact and stay out of the captured copy
+        run: python3 .github/scripts/ws-redaction-check.py "$PWD/nullwire-mcp" 18080 http://127.0.0.1:18081

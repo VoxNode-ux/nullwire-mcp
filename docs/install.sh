@@ -1,5 +1,5 @@
 #!/bin/sh
-# NullWire-MCP installer for macOS, Linux and Termux. No Node.js needed.
+# NullWire-MCP installer for macOS, Linux, FreeBSD, OpenBSD, NetBSD and Termux. No Node.js needed.
 #
 #   curl -fsSL https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/main/scripts/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/main/scripts/install.sh | sh -s -- --setup
@@ -41,7 +41,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 usage() {
   cat <<'USAGE'
-NullWire-MCP installer for macOS, Linux and Termux (no Node.js needed).
+NullWire-MCP installer for macOS, Linux, FreeBSD, OpenBSD, NetBSD and Termux (no Node.js needed).
 
   curl -fsSL https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/main/scripts/install.sh | sh
   curl -fsSL https://raw.githubusercontent.com/VoxNode-ux/nullwire-mcp/main/scripts/install.sh | sh -s -- --setup
@@ -85,12 +85,26 @@ arch=$(uname -m)
 case "$os" in
   Linux) os=linux ;;
   Darwin) os=darwin ;;
+  FreeBSD) os=freebsd ;;
+  OpenBSD) os=openbsd ;;
+  NetBSD) os=netbsd ;;
   *) die "unsupported operating system: $os (on Windows use scripts/install.ps1)" ;;
 esac
+# NetBSD reports "evbarm" for every ARM board; uname -p has the real CPU.
+[ "$arch" = evbarm ] && arch=$(uname -p)
 case "$arch" in
   x86_64|amd64) arch=amd64 ;;
   aarch64|arm64) arch=arm64 ;;
+  i386|i486|i586|i686) arch=386 ;;
+  armv7l|armv7|armv8l) arch=armv7 ;;
+  riscv64) arch=riscv64 ;;
   *) die "unsupported CPU: $arch" ;;
+esac
+case "$os-$arch" in
+  linux-amd64|linux-arm64|linux-386|linux-armv7|linux-riscv64) ;;
+  darwin-amd64|darwin-arm64) ;;
+  freebsd-amd64|freebsd-arm64|openbsd-amd64|openbsd-arm64|netbsd-amd64|netbsd-arm64) ;;
+  *) die "no prebuilt binary for $os/$arch: see https://github.com/$REPO/releases" ;;
 esac
 asset="nullwire-$os-$arch"
 
@@ -107,6 +121,9 @@ fetch() { # fetch URL DEST
     curl -fsSL $proto -o "$2" "$1" || die "download failed: $1"
   elif have wget; then
     wget -q -O "$2" "$1" || die "download failed: $1"
+  elif [ -x /usr/bin/fetch ]; then
+    # FreeBSD's own downloader (called by full path: this function is also named fetch)
+    /usr/bin/fetch -q -o "$2" "$1" || die "download failed: $1"
   else
     die "need curl or wget to download NullWire"
   fi
@@ -122,8 +139,11 @@ if have sha256sum; then
   actual=$(sha256sum "$tmp/$asset" | awk '{ print $1 }')
 elif have shasum; then
   actual=$(shasum -a 256 "$tmp/$asset" | awk '{ print $1 }')
+elif have sha256; then
+  # FreeBSD, OpenBSD and NetBSD print "SHA256 (file) = <hash>"
+  actual=$(sha256 "$tmp/$asset" | awk '{ print $NF }')
 else
-  die "need sha256sum or shasum to check the download"
+  die "need sha256sum, shasum or sha256 to check the download"
 fi
 [ "$actual" = "$expected" ] || die "checksum mismatch for $asset (expected $expected, got $actual); nothing was installed"
 say "Checksum OK."

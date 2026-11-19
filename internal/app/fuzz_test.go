@@ -13,6 +13,11 @@ func validSecretShape(s string) bool {
 	if len(s) < 8 || len(s) > 200 {
 		return false
 	}
+	// Masks ("--------", "xxxxxxxx") and placeholder words ("changeme") are
+	// kept on purpose, so they are not secrets the scrubber promises to catch.
+	if isPlaceholderValue(s) {
+		return false
+	}
 	// Our own tag text. A "secret" containing it would match the output by design.
 	if strings.Contains(s, "REDACTED") {
 		return false

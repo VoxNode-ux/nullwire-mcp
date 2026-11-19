@@ -2,15 +2,17 @@
   "name": "nullwire-mcp",
   "version": "1.2.0",
   "description": "Zero-dependency, RAM-only traffic inspector for AI assistants: see HTTP, HTTPS and WebSocket traffic with every secret scrubbed first.",
+  "license": "Apache-2.0",
   "bin": {
     "nullwire-mcp": "bin/nullwire-mcp.js"
   },
   "files": [
     "bin/",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
-    "node": ">=16"
+    "node": ">=24"
   },
   "keywords": [
     "mcp",

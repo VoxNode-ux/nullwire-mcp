@@ -1,6 +1,6 @@
 # Contributing to NullWire-MCP
 
-Thanks for helping! The code lives in `internal/app/` (start with `app.go`), with tests in `main_test.go` and `fuzz_test.go` beside it; the root `main.go` only starts it, so it is easy to read end to end before you change anything.
+Thanks for helping! The code lives in `internal/app/` (start with `app.go`), with its tests in the `*_test.go` files beside it; the root `main.go` only starts it, so it is easy to read end to end before you change anything.
 
 ## Quick start
 
@@ -12,7 +12,7 @@ go test -v -race ./...    # needs cgo (gcc/clang) on most platforms
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
 ```
 
-Go 1.26+ is required.
+Go 1.27+ is required.
 
 ## Ground rules
 
@@ -24,25 +24,25 @@ These are the project's core promises. PRs that break them will not be merged.
 4. **Loopback only.** No flag or option may bind the proxy to a non-loopback address.
 5. **Scrub before truncate.** Secrets must be redacted before any body is cut to its size limit.
 6. **Notifications stay silent.** Messages without an `id` must write zero bytes.
-7. **Be honest in docs.** If a change adds a limitation, update the README's "Security model and honest limits" section.
+7. **Be honest in docs.** If a change adds a limitation, update [docs/security.md](docs/security.md) (and the README's "Honest limits" list if it changes).
 
 ## Good first contributions
 
 - **New secret formats:** add a pattern and a test (use fake values only)
-- **IPv6 scrubbing:** currently only IPv4 is redacted
+- **False-positive reports:** a harmless value that gets redacted (open an issue with a fake example of the shape)
 - **Client recipes:** config snippets for other MCP clients
-- **Platform reports:** Windows ARM64 is cross-compiled in CI but not run, so a test report helps a lot
+- **Platform reports:** Linux ARMv7, RISC-V 64 and the ARM64 BSDs are only run under QEMU, so reports from real hardware help a lot
 - **Docs:** typos, clearer examples, troubleshooting tips
 
 ## Adding or changing a scrubbing pattern
 
 1. Add the regex in `NewScrubber` in `internal/app/app.go`.
 2. Handle it in `ScrubText` (or `ScrubHeaders` for headers).
-3. Add a test in `internal/app/main_test.go` that checks:
+3. Add a test in `internal/app/` (for example in `main_test.go`, or the closest `*_test.go` file) that checks:
    - the secret does **not** appear in the output
    - equal secrets get equal tags, different secrets get different tags
    - harmless text is **not** over-redacted
-4. Add a row to the README's "What gets scrubbed" table.
+4. Add or update the matching row in the layer table in [docs/redaction.md](docs/redaction.md).
 
 **Never put real secrets in tests, issues, or PRs.** Use obviously fake values like `sk-test-000000000000000000000`.
 
@@ -52,7 +52,7 @@ These are the project's core promises. PRs that break them will not be merged.
 - [ ] `go test -race ./...` passes
 - [ ] New behaviour has a test
 - [ ] No new dependencies and no file I/O
-- [ ] README updated if behaviour, flags or limitations changed
+- [ ] Docs updated if behaviour, flags or limitations changed (`README.md`, `docs/cli.md`, `docs/redaction.md`, `docs/security.md`)
 - [ ] Commit messages explain the *why*
 
 Keep PRs small and focused; one change per PR is easiest to review.

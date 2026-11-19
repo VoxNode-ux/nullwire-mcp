@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/VoxNode-ux/nullwire-mcp/internal/scan"
 )
@@ -17,8 +21,20 @@ import (
 // NULLWIRE_PROTECT_HELPER is set, the binary prints the arguments it was
 // started with and exits with the code in NULLWIRE_PROTECT_EXIT.
 func TestMain(m *testing.M) {
+	if os.Getenv("NULLWIRE_PROTECT_HELPER") == "wait" {
+		// Signal-forwarding helper: announce readiness through a file, then
+		// wait for SIGTERM/SIGINT and exit with code 7.
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGTERM, os.Interrupt)
+		if f := os.Getenv("NULLWIRE_PROTECT_READY"); f != "" {
+			_ = os.WriteFile(f, []byte("ready"), 0o600)
+		}
+		<-ch
+		os.Exit(7)
+	}
 	if os.Getenv("NULLWIRE_PROTECT_HELPER") == "1" {
 		fmt.Println("ARGS:" + strings.Join(os.Args[1:], " "))
+		fmt.Println("TOKEN:" + os.Getenv("NULLWIRE_PROXY_TOKEN"))
 		code, _ := strconv.Atoi(os.Getenv("NULLWIRE_PROTECT_EXIT"))
 		os.Exit(code)
 	}
@@ -104,6 +120,18 @@ func childArgs(t *testing.T, stdout string) string {
 	return ""
 }
 
+// childToken returns the NULLWIRE_PROXY_TOKEN the helper child received.
+func childToken(t *testing.T, stdout string) string {
+	t.Helper()
+	for _, line := range strings.Split(stdout, "\n") {
+		if rest, ok := strings.CutPrefix(line, "TOKEN:"); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	t.Fatalf("the server child printed no TOKEN line; stdout was %q", stdout)
+	return ""
+}
+
 func TestRunHelpExitsZero(t *testing.T) {
 	var code int
 	_, stderr := capture(t, func() { code = Run([]string{"-h"}) })
@@ -157,6 +185,34 @@ func TestRunPassesEveryOptionToTheServer(t *testing.T) {
 		"-secrets-config /tmp/secrets.json -scrub-headers X-Foo -allow-uninspectable"
 	if got := childArgs(t, stdout); got != want {
 		t.Errorf("server arguments:\n got  %s\n want %s", got, want)
+	}
+}
+
+func TestRunPassesTheRemainingOptionsToTheServer(t *testing.T) {
+	asServerChild(t, 0)
+	var code int
+	stdout, _ := capture(t, func() {
+		code = Run([]string{
+			"--no-scan", "--target-map", "api=http://a.test", "--max-body", "1m",
+			"--ws-deflate", "--policy-pubkey", "/tmp/pub.pem",
+			"--attest-out", "/tmp/att.json", "--attest-key", "/tmp/att.key",
+			"--listen", "unix:///tmp/nw.sock", "--proxy-token", "s3cret",
+		})
+	})
+	if code != 0 {
+		t.Fatalf("Run returned %d, want 0", code)
+	}
+	want := "-port 8080 -dns auto -target-map api=http://a.test -max-body 1m -ws-deflate " +
+		"-policy-pubkey /tmp/pub.pem -attest-out /tmp/att.json -attest-key /tmp/att.key " +
+		"-listen unix:///tmp/nw.sock"
+	if got := childArgs(t, stdout); got != want {
+		t.Errorf("server arguments:\n got  %s\n want %s", got, want)
+	}
+	if got := childToken(t, stdout); got != "s3cret" {
+		t.Errorf("NULLWIRE_PROXY_TOKEN = %q, want s3cret", got)
+	}
+	if strings.Contains(childArgs(t, stdout), "s3cret") {
+		t.Error("the proxy token must not appear on the command line")
 	}
 }
 
@@ -291,5 +347,75 @@ func TestReexecServeStartFailure(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "nullwire-mcp protect:") {
 		t.Errorf("expected a start-failure message, got:\n%s", stderr)
+	}
+}
+func TestRunClientCertFlags(t *testing.T) {
+	useFakeScrubber(t)
+	isolateHome(t)
+	asServerChild(t, 0)
+	for _, args := range [][]string{
+		{"-no-scan", "-client-cert", "c.pem"},
+		{"-no-scan", "-client-key", "k.pem"},
+	} {
+		var code int
+		_, stderr := capture(t, func() { code = Run(args) })
+		if code != 2 || !strings.Contains(stderr, "must be given together") {
+			t.Fatalf("%v: code=%d stderr=%q", args, code, stderr)
+		}
+	}
+	var code int
+	stdout, _ := capture(t, func() { code = Run([]string{"-no-scan", "-client-cert", "c.pem", "-client-key", "k.pem"}) })
+	if code != 0 || !strings.Contains(stdout, "-client-cert c.pem -client-key k.pem") {
+		t.Fatalf("code=%d stdout=%q", code, stdout)
+	}
+}
+
+func TestRunRejectsBadFlagValue(t *testing.T) {
+	var code int
+	_, stderr := capture(t, func() { code = Run([]string{"--no-scan", "--port", "not-a-number"}) })
+	if code != 2 {
+		t.Fatalf("bad -port value returned %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "invalid value") {
+		t.Errorf("expected an invalid-value error, got:\n%s", stderr)
+	}
+}
+
+func TestReexecServeForwardsSignals(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Process.Signal(SIGTERM) is not supported on Windows")
+	}
+	ready := filepath.Join(t.TempDir(), "ready")
+	t.Setenv("NULLWIRE_PROTECT_HELPER", "wait")
+	t.Setenv("NULLWIRE_PROTECT_READY", ready)
+
+	done := make(chan int, 1)
+	go func() { done <- reexecServe([]string{"-port", "1"}) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the child never became ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	self, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := self.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-done:
+		if code != 7 {
+			t.Errorf("reexecServe returned %d, want 7 (the child got the forwarded SIGTERM)", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the signal was not forwarded to the child")
 	}
 }

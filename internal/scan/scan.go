@@ -76,7 +76,21 @@ func scanByType(s Scrubber, path string, report *strings.Builder) (bool, int, in
 func scanKV(s Scrubber, key, sep, val string) (shown string, n int, found bool) {
 	scrubbed, n := s.ScrubText(key + sep + val)
 	if n > 0 {
-		return strings.TrimPrefix(scrubbed, key+sep), n, true
+		if strings.HasPrefix(scrubbed, key+sep) {
+			return strings.TrimPrefix(scrubbed, key+sep), n, true
+		}
+		// The key itself was rewritten (it held an IP or a token). Report a finding only
+		// when the value part changed too; otherwise the key's own redaction is not a
+		// secret value.
+		if i := strings.Index(scrubbed, sep); i >= 0 {
+			if rest := scrubbed[i+len(sep):]; rest != val {
+				return rest, n, true
+			}
+		}
+		if envSecretNames.MatchString(lastSegment(key)) {
+			return HiddenValue, 0, true
+		}
+		return "", 0, false
 	}
 	if envSecretNames.MatchString(lastSegment(key)) {
 		return HiddenValue, 0, true
@@ -326,13 +340,15 @@ func ScanFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, 
 	ipBefore := s.IPCount()
 	walkJSON(doc, "", func(jsonPath, value string) string {
 		scrubbed, n := s.ScrubText(value)
-		switch {
-		case n > 0 && scrubbed != value:
+		if n > 0 && scrubbed != value {
 			fmt.Fprintf(report, "   %-50s  →  %s\n", trimPath(jsonPath), scrubbed)
 			hits++
-		case value != "" && envSecretNames.MatchString(lastSegment(jsonPath)):
-			fmt.Fprintf(report, "   %-50s  →  (name looks secret; value hidden)\n", trimPath(jsonPath))
-			hits++
+		} else if value != "" {
+			// Scrub again with the key in front so the field-name rules (and the name check) apply.
+			if shown, _, found := scanKV(s, lastSegment(jsonPath), ": ", value); found {
+				fmt.Fprintf(report, "   %-50s  →  %s\n", trimPath(jsonPath), shown)
+				hits++
+			}
 		}
 		return value
 	})

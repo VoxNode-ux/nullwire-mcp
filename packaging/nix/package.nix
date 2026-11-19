@@ -34,7 +34,7 @@ builder {
   meta = {
     description = "RAM-only traffic inspector for AI assistants that scrubs secrets first";
     homepage = "https://github.com/VoxNode-ux/nullwire-mcp";
-    license = lib.licenses.mit;
+    license = lib.licenses.asl20;
     mainProgram = "nullwire-mcp";
     maintainers = [ ]; # add your nixpkgs maintainer handle before submitting
   };

@@ -50,3 +50,19 @@ func TestGateEmptyAndNil(t *testing.T) {
 		t.Error("a gate with no literals must match nothing")
 	}
 }
+// Match lower-cases as it reads, so mixed-case text needs no lower-cased copy
+// and the check allocates nothing.
+func TestGateIsCaseInsensitiveAndAllocFree(t *testing.T) {
+	g := NewGate(DefaultVendorPrefixes, DefaultDSNPrefixes)
+	for _, text := range []string{"found AKIA in text", "Postgres://User@Host/db", "XOXB-1234 here", "V4.LOCAL.abc"} {
+		if !g.Match(text) {
+			t.Errorf("gate should match %q regardless of case", text)
+		}
+	}
+	if g.Match("nothing that looks like a prefix") {
+		t.Error("unexpected match")
+	}
+	if n := testing.AllocsPerRun(100, func() { g.Match("Some MIXED Case text with AKIA inside it") }); n != 0 {
+		t.Errorf("Match allocated %v times, want 0", n)
+	}
+}

@@ -21,8 +21,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download --repo modelcontextprotocol/registry \
+          # Pinned to v1.8.9 (commit ba94f657e1ecd4ddff11baa25ad84cda26c2b854);
+          # the download must match this checksum or the job stops.
+          gh release download v1.8.9 --repo modelcontextprotocol/registry \
             --pattern 'mcp-publisher_linux_amd64.tar.gz' --dir publisher-download --clobber
+          echo "4d527ca8f1ced0394c962dc925c2a4a4addef441cbefd62501c875e9481823a8  publisher-download/mcp-publisher_linux_amd64.tar.gz" | sha256sum -c -
           tar xzf publisher-download/mcp-publisher_linux_amd64.tar.gz -C publisher-download
           cp publisher-download/mcp-publisher ./mcp-publisher
           chmod +x mcp-publisher
