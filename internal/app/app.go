@@ -548,6 +548,11 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 		})
 	}
 
+	// Structural pass: on a complete JSON document, a string under a
+	// secret-looking key is redacted by the key that owns it. Anything that is
+	// not a whole JSON document is left to the rules below.
+	out = s.scrubJSONTree(out, &count)
+
 	if preSecretKey {
 		// gateSecretKey is coarse; secretKeyGate says which of the three regexps
 		// below can match at all (see gatemask.go).
@@ -573,6 +578,12 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 				return m
 			}
 			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) {
+				return m
+			}
+			// A DSN whose password is only template words or <angle brackets>
+			// is documentation, not a credential. A password with an
+			// explicit secret prefix is never treated that way.
+			if !hasStructuredPrefix(g[2]) && dsnPasswordIsPlaceholder("x"+m+"h") {
 				return m
 			}
 			count++
@@ -807,6 +818,12 @@ var nonSecretFields = map[string]bool{
 	"s3_key": true, "s3-key": true, "s3key": true,
 	"shard_key": true, "shard-key": true, "shardkey": true,
 	"project_key": true, "project-key": true, "projectkey": true,
+	// Pagination cursors: opaque, but they page through results, not log in.
+	"next_page_token": true, "next-page-token": true, "nextpagetoken": true,
+	"page_token": true, "page-token": true, "pagetoken": true,
+	"next_token": true, "next-token": true, "nexttoken": true,
+	"continuation_token": true, "continuation-token": true, "continuationtoken": true,
+	"pagination_token": true, "pagination-token": true, "paginationtoken": true,
 }
 
 func secretishKey(key string) bool {
@@ -3536,6 +3553,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		app.ring.Clear()
 		app.scrub.taint.clear()
 		_ = srv.Close()
+		// The tag key is wiped only here, at shutdown: ResetCounters and
+		// clear_ram_buffer must keep it, or tags would change mid-session.
+		clear(app.scrub.nonce)
+		runtime.KeepAlive(app.scrub.nonce)
 		os.Exit(0)
 	}()
 

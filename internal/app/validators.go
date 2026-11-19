@@ -137,6 +137,28 @@ func pemKeyParses(block string) bool {
 	return err == nil
 }
 
+// derKeyParses reports whether b64 is standard base64 of a private key that
+// crypto/x509 parses (the body of a PEM block without its header lines). It
+// is a CONFIRMATION only: true promotes a value past the weak-key filters,
+// false never clears one.
+func derKeyParses(b64 string) bool {
+	if len(b64) < 64 || len(b64) > 16<<10 {
+		return false
+	}
+	der, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return false
+	}
+	if _, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+		return true
+	}
+	if _, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return true
+	}
+	_, err = x509.ParseECPrivateKey(der)
+	return err == nil
+}
+
 // dsnPasswordIsPlaceholder reports whether dsn is a URL whose password is an
 // obvious template value (changeme, <password>, ${DB_PASS}, xxxx ...).
 func dsnPasswordIsPlaceholder(dsn string) bool {

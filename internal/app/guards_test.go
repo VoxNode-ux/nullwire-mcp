@@ -188,6 +188,8 @@ func TestBenignResourceIDsAndULIDs(t *testing.T) {
 		"01ARZ3NDEKTSV4RRFFQ69G5FAO",  // O
 		"01ARZ3NDEKTSV4RRFFQ69G5FAU",  // U
 		"01arz3ndektsv4rrffq69g5fav",  // lower case
+		"7ZZZZZZZZZZZZZZZZZZZZZZZZZ",  // timestamp far past 2040
+		"00000000000000000000000000", // timestamp 1970
 		"01ARZ3NDEKTSV4RRFFQ69G5FA",   // 25 characters
 		"01ARZ3NDEKTSV4RRFFQ69G5FAVX", // 27 characters
 		"01ARZ3NDEKTSV4RRFFQ69G5FA-",  // a symbol
@@ -196,8 +198,29 @@ func TestBenignResourceIDsAndULIDs(t *testing.T) {
 			t.Errorf("%q must not be a benign resource id", s)
 		}
 	}
-	if isULID("") || !isULID("7ZZZZZZZZZZZZZZZZZZZZZZZZZ") || isULID("8ZZZZZZZZZZZZZZZZZZZZZZZZZ") {
+	if isULID("") || !isULID("01ARZ3NDEKTSV4RRFFQ69G5FAV") || isULID("01arz3ndektsv4rrffq69g5fav") ||
+		isULID("7ZZZZZZZZZZZZZZZZZZZZZZZZZ") || isULID("8ZZZZZZZZZZZZZZZZZZZZZZZZZ") {
 		t.Error("isULID boundaries")
+	}
+	// The window edges: 2015-01-01T00:00:00Z and 2040-01-01T00:00:00Z.
+	for ms, want := range map[uint64]bool{ulidMinMs - 1: false, ulidMinMs: true, ulidMaxMs: true, ulidMaxMs + 1: false} {
+		const al = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+		var b [26]byte
+		for i := 9; i >= 0; i-- {
+			b[i] = al[ms&31]
+			ms >>= 5
+		}
+		for i := 10; i < 26; i++ {
+			b[i] = '0'
+		}
+		if isULID(string(b[:])) != want {
+			t.Errorf("isULID(%s) = %v, want %v", b[:], !want, want)
+		}
+	}
+	// A modern ULID is not tagged by the entropy pass; the same text with a
+	// prefix that is not a timestamp still is.
+	if looksLikeTokenMax("01ARZ3NDEKTSV4RRFFQ69G5FAV", 256) {
+		t.Error("a modern ULID must pass through the entropy pass")
 	}
 }
 

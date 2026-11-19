@@ -62,21 +62,47 @@ func benignResourceID(s string) bool {
 	return isULID(s)
 }
 
-// isULID reports a 26-character Crockford base32 ULID (uppercase, no I L O U).
-func isULID(s string) bool {
-	if len(s) != 26 || s[0] < '0' || s[0] > '7' {
-		return false
+// ULID timestamp window, in milliseconds since the Unix epoch: 2015-01-01 to
+// 2040-01-01 (UTC). A random 26-character Crockford string is only a ULID
+// here when its 48-bit time prefix lands in this range.
+const (
+	ulidMinMs uint64 = 1420070400000
+	ulidMaxMs uint64 = 2208988800000
+)
+
+// crockfordVal returns the value of one upper-case Crockford base32 digit
+// (0-9 and A-Z without I, L, O, U), or -1. Lower case is not accepted: a
+// lower-case 26-character run is far more likely to be something else.
+func crockfordVal(c byte) int {
+	if c >= '0' && c <= '9' {
+		return int(c - '0')
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= '0' && c <= '9':
-		case c >= 'A' && c <= 'Z' && c != 'I' && c != 'L' && c != 'O' && c != 'U':
-		default:
-			return false
+	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	if c >= 'A' && c <= 'Z' {
+		if i := strings.IndexByte(alphabet, c); i >= 0 {
+			return i
 		}
 	}
-	return true
+	return -1
+}
+
+// isULID reports a 26-character upper-case Crockford base32 ULID (no I L O U) whose 10-character timestamp prefix decodes to a date between 2015 and
+// 2040. It allocates nothing.
+func isULID(s string) bool {
+	if len(s) != 26 {
+		return false
+	}
+	var ms uint64
+	for i := 0; i < len(s); i++ {
+		v := crockfordVal(s[i])
+		if v < 0 {
+			return false
+		}
+		if i < 10 {
+			ms = ms<<5 | uint64(v)
+		}
+	}
+	return ms >= ulidMinMs && ms <= ulidMaxMs
 }
 
 // replaceIPv4 redacts IPv4 addresses, leaving version numbers that follow a
