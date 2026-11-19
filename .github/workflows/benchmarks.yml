@@ -464,8 +464,12 @@ jobs:
           echo $! > upstream.pid
           ./nullwire-mcp -port 18080 -target http://127.0.0.1:18081 < <(sleep 3000) > nw.out 2> nw.err &
           echo $! > nw.pid
-          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:18080/ && break; sleep 1; done
-          curl -sf http://127.0.0.1:18080/ >/dev/null
+          # Wait for the upstream first, then for the proxy to answer 2xx. A bare
+          # `curl -s` succeeds on a 502 from a proxy whose upstream is not up yet,
+          # and the final `curl -f` then fails with exit code 22.
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:18081/ && break; sleep 1; done
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:18080/ && break; sleep 1; done
+          curl -sf http://127.0.0.1:18080/ >/dev/null || { echo "proxy not healthy"; cat nw.err nw.out upstream.log; exit 1; }
       - name: Soak (24 rounds of 10 s, secrets in every body; VmRSS after each round)
         id: soak
         run: |
