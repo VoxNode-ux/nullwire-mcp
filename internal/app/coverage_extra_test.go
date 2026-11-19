@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -9,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -23,21 +23,20 @@ func xcovLines(out string) []string {
 	return strings.Split(out, "\n")
 }
 
-func xcovCaptureStderr(t *testing.T, fn func()) string {
+// xcovCaptureStderr routes the App's stderr into a buffer via the injectable
+// field. It must not swap the global os.Stderr: capture goroutines left over
+// from other tests read it concurrently, which the race detector flags.
+func xcovCaptureStderr(t *testing.T, app *App, fn func()) string {
 	t.Helper()
-	orig := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w
-	done := make(chan string, 1)
-	go func() { b, _ := io.ReadAll(r); done <- string(b) }()
-	func() { defer func() { os.Stderr = orig }(); fn() }()
-	_ = w.Close()
-	out := <-done
-	_ = r.Close()
-	return out
+	var buf bytes.Buffer
+	app.barMu.Lock()
+	app.stderr = &buf
+	app.barMu.Unlock()
+	fn()
+	app.barMu.Lock()
+	app.stderr = nil
+	app.barMu.Unlock()
+	return buf.String()
 }
 
 func xcovErrCode(t *testing.T, line string) float64 {
@@ -437,7 +436,7 @@ func TestXcovDrawBarAndLogf(t *testing.T) {
 	app := newTestApp(t)
 	app.port = 4321
 	app.scrub.Tokens.Add(2)
-	out := xcovCaptureStderr(t, func() { app.drawBar(); app.Bar(); app.Logf("hello %d", 5) })
+	out := xcovCaptureStderr(t, app, func() { app.drawBar(); app.Bar(); app.Logf("hello %d", 5) })
 	for _, want := range []string{"127.0.0.1:4321", "RAM Ring: 0/", "2 Tokens", "hello 5"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stderr missing %q: %q", want, out)
