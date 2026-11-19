@@ -1,7 +1,6 @@
 package app
 
 import (
-	"regexp"
 	"strings"
 )
 
@@ -237,7 +236,7 @@ type secretSpan struct {
 // reUserInfoWide is reUserInfo for decoded text: the password may hold a
 // decoded "@" ("p%40ss" becomes "p@ss"), so it runs to the LAST "@" before the
 // first "/", "?", "#" or space.
-var reUserInfoWide = regexp.MustCompile(`(://[^/\s:@]+:)([^/\s"'<>?#]+)(@)`)
+var reUserInfoWide = lazyRe(`(://[^/\s:@]+:)([^/\s"'<>?#]+)(@)`)
 
 // scrubUnwrapped finds secrets that are hidden by URL-encoding or by escaped
 // JSON quotes. It decodes a read-only copy, runs the deterministic rules on

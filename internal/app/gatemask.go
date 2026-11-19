@@ -126,7 +126,7 @@ func (g *maskGate) Match(text string) uint32 {
 }
 
 // scrubGate replaces strings.ToLower(in) plus six containsAny scans.
-var scrubGate = newMaskGate(
+var scrubGate = lazyGate(
 	maskGroup{gateJWT, []string{"eyj"}},
 	maskGroup{gateAPIKey, []string{"sk-", "ghp_", "github_pat_", "aiza", "xox", "akia"}},
 	maskGroup{gateBearer, []string{"bearer", "basic", "token"}},
@@ -152,7 +152,7 @@ const (
 
 // secretKeyGate is kept separate from scrubGate so scrubGate's bit set stays
 // the one TestScrubGateMatchesLegacyChecks pins down.
-var secretKeyGate = newMaskGate(
+var secretKeyGate = lazyGate(
 	maskGroup{jsonKeyBit, []string{
 		`"access_token"`, `"refresh_token"`, `"id_token"`, `"api_key"`, `"apikey"`,
 		`"secret"`, `"client_secret"`, `"password"`, `"passwd"`, `"session_id"`,

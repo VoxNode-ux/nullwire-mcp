@@ -1,7 +1,6 @@
 package app
 
 import (
-	"regexp"
 	"strings"
 )
 
@@ -44,18 +43,18 @@ var (
 	// keys and Azure account keys are made of. It stops at ";", quotes and
 	// spaces, so connection strings keep their other parts. A value that is
 	// already a [REDACTED_...] tag cannot match (it starts with "[").
-	reCloudNamedSecret = regexp.MustCompile(`(?i)((?:aws[_-]?secret[_-]?(?:access[_-]?)?key|secret[_-]?access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|shared[_-]?access[_-]?signature|sas[_-]?token|client[_-]?secret|session[_-]?token|security[_-]?token)["']?\s*[:=]\s*["']?)([A-Za-z0-9/+=_.~-]{16,})`)
+	reCloudNamedSecret = lazyRe(`(?i)((?:aws[_-]?secret[_-]?(?:access[_-]?)?key|secret[_-]?access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|shared[_-]?access[_-]?signature|sas[_-]?token|client[_-]?secret|session[_-]?token|security[_-]?token)["']?\s*[:=]\s*["']?)([A-Za-z0-9/+=_.~-]{16,})`)
 
 	// A password inside a connection string ("...;Password=hunter2;...").
 	// Passwords can be short, so no minimum length beyond one character.
-	reCloudConnPassword = regexp.MustCompile(`(?i)((?:^|[;\s"'])(?:password|pwd)\s*=\s*)([^;&"'\s]+)`)
+	reCloudConnPassword = lazyRe(`(?i)((?:^|[;\s"'])(?:password|pwd)\s*=\s*)([^;&"'\s]+)`)
 
 	// Azure AD (Entra ID) client secrets: 3 characters, "8Q~", then 30+ more.
-	reAzureADSecret = regexp.MustCompile(`[A-Za-z0-9_.~-]{3}8Q~[A-Za-z0-9_.~-]{30,}`)
+	reAzureADSecret = lazyRe(`[A-Za-z0-9_.~-]{3}8Q~[A-Za-z0-9_.~-]{30,}`)
 
 	// Cloudflare Origin CA key: "v1.0-", hex, "-", more hex. A bare "v1.0-"
 	// vendor prefix would also match release tags like v1.0-linux-amd64-musl.
-	reCloudflareOriginCA = regexp.MustCompile(`\bv1\.0-[0-9a-fA-F]{16,}-[0-9a-fA-F]{32,}\b`)
+	reCloudflareOriginCA = lazyRe(`\bv1\.0-[0-9a-fA-F]{16,}-[0-9a-fA-F]{32,}\b`)
 )
 
 // scrubCloudSecrets runs the cloud rules. gm is the scrubGate result for the

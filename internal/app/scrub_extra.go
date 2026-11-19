@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"math/big"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -13,10 +12,10 @@ import (
 // Extra redaction layers: JSON arrays of secrets, XML elements, and secrets
 // hidden inside base64.
 
-var reQuotedString = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+var reQuotedString = lazyRe(`"(?:[^"\\]|\\.)*"`)
 
 // reB64Candidate finds runs that could be base64 (standard or URL-safe).
-var reB64Candidate = regexp.MustCompile(`[A-Za-z0-9+/_-]{24,}={0,2}`)
+var reB64Candidate = lazyRe(`[A-Za-z0-9+/_-]{24,}={0,2}`)
 
 // xmlSecretHints are cheap keywords: XML scrubbing only runs when one of them
 // appears in the text.
@@ -167,11 +166,11 @@ func (s *Scrubber) scrubBase64(in string, count *int) string {
 
 var (
 	// an even number of hex digits, at least 12 bytes
-	reHexCandidate = regexp.MustCompile(`\b(?:[0-9A-Fa-f]{2}){12,}\b`)
+	reHexCandidate = lazyRe(`\b(?:[0-9A-Fa-f]{2}){12,}\b`)
 	// RFC 4648 Base32 in upper case, padded or not
-	reB32Candidate = regexp.MustCompile(`\b[A-Z2-7]{24,}={0,6}`)
+	reB32Candidate = lazyRe(`\b[A-Z2-7]{24,}={0,6}`)
 	// Bitcoin-style Base58: no 0, O, I or l
-	reB58Candidate = regexp.MustCompile(`\b[1-9A-HJ-NP-Za-km-z]{20,}\b`)
+	reB58Candidate = lazyRe(`\b[1-9A-HJ-NP-Za-km-z]{20,}\b`)
 )
 
 const (
@@ -244,7 +243,7 @@ func decodeBase58Text(s string) ([]byte, bool) {
 }
 
 type encodedTextDecoder struct {
-	re     *regexp.Regexp
+	re     *lazyRegexp
 	maxLen int
 	decode func(string) ([]byte, bool)
 }

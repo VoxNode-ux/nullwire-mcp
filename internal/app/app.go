@@ -268,22 +268,22 @@ type Scrubber struct {
 	extraSensitive map[string]bool
 	ignoreHeaders  map[string]bool
 	extraPatterns  []*regexp.Regexp
-	vendorGate     *vendors.Gate // Aho-Corasick pre-check over every prefix (run on lower-cased text)
+	vendorGate     *lazyVendorGate // Aho-Corasick pre-check over every prefix (run on lower-cased text); built on first use
 	vendorRules    []vendorRule // strong, weak, DSN and custom prefix rules
 	allow          *allowlist   // body exemptions from the user's config; nil when none are set
 	presets        presetSet    // -preset: pci-dss, hipaa, gdpr (all off by default)
 
-	reBearer          *regexp.Regexp
-	reSensitiveHeader *regexp.Regexp
-	reJWT             *regexp.Regexp
-	reAPIKey          *regexp.Regexp
-	reJSONSecret      *regexp.Regexp
-	reQuerySecret     *regexp.Regexp
-	reUserInfo        *regexp.Regexp
-	reIPv4            *regexp.Regexp
-	rePEM             *regexp.Regexp
-	reXML             *regexp.Regexp
-	reJSONSecretArr   *regexp.Regexp
+	reBearer          *lazyRegexp
+	reSensitiveHeader *lazyRegexp
+	reJWT             *lazyRegexp
+	reAPIKey          *lazyRegexp
+	reJSONSecret      *lazyRegexp
+	reQuerySecret     *lazyRegexp
+	reUserInfo        *lazyRegexp
+	reIPv4            *lazyRegexp
+	rePEM             *lazyRegexp
+	reXML             *lazyRegexp
+	reJSONSecretArr   *lazyRegexp
 
 	// Counters are pointers so detached() can give a live refresh its own set.
 	Tokens  *atomic.Uint64
@@ -399,24 +399,21 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		extraSensitive: extra,
 		ignoreHeaders:  ignore,
 		extraPatterns:  extras,
-		vendorGate:     vendors.NewGate(gate),
+		vendorGate:     lazyVendors(gate),
 		vendorRules:    rules,
-		reBearer:       regexp.MustCompile(`(?i)(Bearer|Basic|Token)\s+([A-Za-z0-9._~+/=-]{8,})`),
-		reSensitiveHeader: regexp.MustCompile(`(?i)^(authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|proxy-authorization)$`),
-		reJWT:             regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
-		reAPIKey:          regexp.MustCompile(`(?i)\b((?-i:sk-[A-Za-z0-9]{20,})|ghp_[a-zA-Z0-9]{30,}|github_pat_[a-zA-Z0-9_]{30,}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[0-9a-zA-Z-]+|AKIA[0-9A-Z]{16})\b`),
-		reJSONSecret:      regexp.MustCompile(`(?i)("(?:access_token|refresh_token|id_token|api_key|apikey|secret|client_secret|password|passwd|session_id|auth_token|key)"\s*:\s*")((?:[^"\\]|\\.)+)(")`),
-		reQuerySecret:     regexp.MustCompile(`(?i)((?:^|[?&])(?:api_key|apikey|token|access_token|refresh_token|id_token|secret|client_secret|password|passwd|key)=)([^&\s#]+)`),
-		reUserInfo:        regexp.MustCompile(`(://[^/\s:@]+:)([^@/\s]+)(@)`),
-		reIPv4:            regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`),
-		// A private key block, from BEGIN to END; a block cut off by the capture limit is redacted to the end of the text.
-		rePEM: regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----(?:.*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|.*)`),
-		// The text of an XML element whose name suggests a secret. Only the opening "</" is part of the match, so the rest of the closing tag is
-		// left in place; a body cut off before the closing tag is redacted to the end of the text. RE2 has no backreferences, so the closing
-		// tag name is not compared with the opening one.
-		reXML: regexp.MustCompile(`(?is)(<(?:[A-Za-z0-9_.-]+:)?[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|apikey|api_key|api-key|authorization|credential|privatekey|private_key|accesskey|access_key|sessionid|session_id)[A-Za-z0-9_.-]*(?:\s(?:[^<>]*[^/<>])?)?>)(<!\[CDATA\[.*?\]\]>|[^<]+)(</|\z)`),
-		// "password": ["a", "b"]
-		reJSONSecretArr: regexp.MustCompile(`(?i)("(?:access_token|refresh_token|id_token|api_key|apikey|secret|client_secret|password|passwd|session_id|auth_token|key)"\s*:\s*\[)((?:\s*"(?:[^"\\]|\\.)*"\s*,?)+)(\s*\])`),
+		// The DLP regular expressions are shared and compiled on first use (see
+		// lazyinit.go), so building a Scrubber compiles none of them.
+		reBearer:          reBearerShared,
+		reSensitiveHeader: reSensitiveHeaderShared,
+		reJWT:             reJWTShared,
+		reAPIKey:          reAPIKeyShared,
+		reJSONSecret:      reJSONSecretShared,
+		reQuerySecret:     reQuerySecretShared,
+		reUserInfo:        reUserInfoShared,
+		reIPv4:            reIPv4Shared,
+		rePEM:             rePEMShared,
+		reXML:             reXMLShared,
+		reJSONSecretArr:   reJSONSecretArrShared,
 	}, nil
 }
 
@@ -460,7 +457,7 @@ const (
 // vendorRule redacts "<prefix><at least min class characters>". A weak rule
 // only redacts when the part after the prefix also looks like a key.
 type vendorRule struct {
-	re       *regexp.Regexp
+	re       *lazyRegexp
 	prefixes []string
 	weak     bool
 }
@@ -480,7 +477,7 @@ func buildVendorRule(prefixes []string, class string, minLen int, weak bool) (ve
 	b.WriteString(`)`)
 	b.WriteString(class)
 	fmt.Fprintf(&b, "{%d,}", minLen)
-	return vendorRule{re: regexp.MustCompile(b.String()), prefixes: prefixes, weak: weak}, true
+	return vendorRule{re: lazyRe(b.String()), prefixes: prefixes, weak: weak}, true
 }
 
 // weakVendorMatchOK checks the text after the matched prefix.
@@ -930,9 +927,9 @@ func strictFieldRanges(in string, maxVal int) [][2]int {
 }
 
 var (
-	reStrictDate    = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(?:[Tt][0-9:.+Zz-]*)?$`)
-	reStrictVersion = regexp.MustCompile(`^[vV]?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?$`)
-	reStrictPath    = regexp.MustCompile(`^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+/?$`)
+	reStrictDate    = lazyRe(`^\d{4}-\d{2}-\d{2}(?:[Tt][0-9:.+Zz-]*)?$`)
+	reStrictVersion = lazyRe(`^[vV]?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?$`)
+	reStrictPath    = lazyRe(`^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+/?$`)
 )
 
 // isSignatureKey reports whether k names a signature field: sig, signature, x-amz-signature.
@@ -1447,6 +1444,13 @@ type capBuffer struct {
 	max  int
 	done bool // release was called: later writes are dropped
 	solo bool // only one goroutine ever touches it, so the mutex is skipped
+
+	// full is set, under the lock, once buf holds max bytes. From then on Write
+	// answers with one atomic load: no lock, no copy, no allocation, however
+	// much more of the body goes by. truncated is set once a byte has actually
+	// been dropped because of the cap.
+	full      atomic.Bool
+	truncated atomic.Bool
 }
 
 // capBufPool recycles the backing arrays of capBuffer. Every array in it is
@@ -1505,7 +1509,18 @@ func (c *capBuffer) release() {
 	}
 }
 
+// Truncated reports that more bytes were written than the buffer holds, so the
+// capture is a prefix of the body.
+func (c *capBuffer) Truncated() bool { return c.truncated.Load() }
+
 func (c *capBuffer) Write(p []byte) (int, error) {
+	// Capture limit already reached: swallow the rest of the body untouched.
+	if c.full.Load() {
+		if len(p) > 0 {
+			c.truncated.Store(true)
+		}
+		return len(p), nil
+	}
 	c.lock()
 	defer c.unlock()
 	if c.done {
@@ -1513,11 +1528,16 @@ func (c *capBuffer) Write(p []byte) (int, error) {
 	}
 	room := c.max - len(c.buf)
 	if room <= 0 {
+		c.full.Store(true)
+		if len(p) > 0 {
+			c.truncated.Store(true)
+		}
 		return len(p), nil
 	}
 	q := p
 	if len(q) > room {
 		q = q[:room]
+		c.truncated.Store(true)
 	}
 	if len(q) == 0 {
 		return len(p), nil
@@ -1540,6 +1560,9 @@ func (c *capBuffer) Write(p []byte) (int, error) {
 		c.buf = nb
 	}
 	c.buf = append(c.buf, q...)
+	if len(c.buf) >= c.max {
+		c.full.Store(true)
+	}
 	return len(p), nil
 }
 
@@ -1610,9 +1633,10 @@ var hopByHopSet = func() map[string]struct{} {
 	return m
 }()
 
-func copyHeaders(src http.Header, extraDrop ...string) http.Header {
-	// Only the header names that this message's own Connection header lists need
-	// a per-call set; most messages list none, so nothing is allocated for it.
+// connectionNamed returns the header names that src's own Connection header
+// lists (they are hop-by-hop for this message). Most messages list none, so
+// nothing is allocated for them and the result is nil, which reads as empty.
+func connectionNamed(src http.Header) map[string]struct{} {
 	var named map[string]struct{}
 	for _, v := range src.Values("Connection") {
 		for _, f := range strings.Split(v, ",") {
@@ -1624,6 +1648,59 @@ func copyHeaders(src http.Header, extraDrop ...string) http.Header {
 			}
 		}
 	}
+	return named
+}
+
+// copyHeadersInto adds the end-to-end headers of src to dst without building
+// an intermediate map: the response path used to copy src into a new
+// http.Header and then copy that again into the ResponseWriter's.
+// The value slices are shared with src (capped, so an append to one cannot
+// write into src); neither side changes them in place.
+func copyHeadersInto(dst, src http.Header) {
+	named := connectionNamed(src)
+	for k, vs := range src {
+		ck := http.CanonicalHeaderKey(k)
+		if _, drop := hopByHopSet[ck]; drop {
+			continue
+		}
+		if _, drop := named[ck]; drop {
+			continue
+		}
+		dst[ck] = vs[:len(vs):len(vs)]
+	}
+}
+
+// Headers the request path drops whatever else it forwards.
+var (
+	dropForward        = []string{"Accept-Encoding"}
+	dropForwardReverse = []string{"X-Target-URL", "Accept-Encoding"}
+)
+
+// headersForwardable reports whether copyHeaders(h, drop...) would return h
+// unchanged: every key is already canonical, none is hop-by-hop (which also
+// rules out a Connection header, and so any names it lists) and none is in
+// drop. It allocates nothing. When it is true the request can be forwarded with
+// h itself, and the map is copied only if something has to change it later.
+func headersForwardable(h http.Header, drop []string) bool {
+	for k := range h {
+		ck := http.CanonicalHeaderKey(k)
+		if ck != k {
+			return false
+		}
+		if _, hop := hopByHopSet[ck]; hop {
+			return false
+		}
+		for _, e := range drop {
+			if strings.EqualFold(ck, e) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func copyHeaders(src http.Header, extraDrop ...string) http.Header {
+	named := connectionNamed(src)
 	// One backing array holds every kept value slice, instead of one small
 	// allocation per header. The three-index slices stop a later append to one
 	// header from running into its neighbour.
@@ -1699,7 +1776,7 @@ func (a *App) isSelf(hostport string) bool {
 	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
-var reUpstreamName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`)
+var reUpstreamName = lazyRe(`^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`)
 
 func parseTargets(spec string) (def *url.URL, named map[string]*url.URL, err error) {
 	named = map[string]*url.URL{}
@@ -1862,6 +1939,10 @@ type rawFlow struct {
 	note        string
 
 	respTrailers http.Header // read after the body; gRPC puts its status here
+
+	// hdrBorrowed means reqHeaders and respHeaders are the live maps of the
+	// request and response, not copies. capture() clones them on its worker.
+	hdrBorrowed bool
 }
 
 // upgradeTransport returns a transport that never negotiates HTTP/2. An
@@ -1929,19 +2010,35 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		outReq.ContentLength = 0
 	}
+	drop := dropForward
 	if reverse {
-		outReq.Header = copyHeaders(r.Header, "X-Target-URL", "Accept-Encoding")
+		drop = dropForwardReverse
+	}
+	// Fast path: a request with no hop-by-hop header (and nothing else to drop)
+	// is forwarded with its own header map, which the transport only reads, so
+	// no new map is built. own() makes a private copy at the first change.
+	hdrShared := headersForwardable(r.Header, drop)
+	if hdrShared {
+		outReq.Header = r.Header
 	} else {
-		outReq.Header = copyHeaders(r.Header, "Accept-Encoding")
+		outReq.Header = copyHeaders(r.Header, drop...)
+	}
+	own := func() {
+		if hdrShared {
+			outReq.Header = r.Header.Clone()
+			hdrShared = false
+		}
 	}
 	// gRPC servers look for "TE: trailers", so this one hop-by-hop value travels on.
 	if acceptsTrailers(r.Header) {
+		own()
 		outReq.Header.Set("Te", "trailers")
 	}
 	// Response shield: never ask the server for an encoding NullWire cannot read.
 	restrictAcceptEncoding(outReq.Header, r.Header)
 	upgrade := isUpgradeRequest(r.Header)
 	if upgrade {
+		own()
 		outReq.Header.Set("Connection", "Upgrade")
 		outReq.Header.Set("Upgrade", r.Header.Get("Upgrade"))
 		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
@@ -1955,9 +2052,13 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if _, ok := outReq.Header["User-Agent"]; !ok {
+		own()
 		outReq.Header["User-Agent"] = []string{""}
 	}
-	flow := rawFlow{started: start, method: r.Method, url: outURL.String(), reqHeaders: r.Header.Clone()}
+	// The flow borrows the request's headers: nothing in ServeHTTP changes
+	// r.Header from here on, and capture() takes its own copy on a worker, off
+	// the forwarding path (hdrBorrowed).
+	flow := rawFlow{started: start, method: r.Method, url: outURL.String(), reqHeaders: r.Header, hdrBorrowed: true}
 	outReq.Host = outURL.Host
 	rt := a.roundTripperFor(r, outURL)
 	if upgrade {
@@ -1994,10 +2095,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	respCap := newSoloCapBuffer(a.limits().respCap)
 	defer respCap.release()
-	dst := w.Header()
-	for k, vs := range copyHeaders(resp.Header) {
-		dst[k] = vs
-	}
+	copyHeadersInto(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if resp.ContentLength < 0 {
 		// A stream of unknown length (server-sent events, gRPC): the client
@@ -2022,8 +2120,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	flow.reqBody = reqCap.Bytes()
 	flow.status = resp.StatusCode
-	flow.respHeaders = resp.Header.Clone()
-	flow.respTrailers = resp.Trailer.Clone()
+	flow.respHeaders = resp.Header // borrowed, like reqHeaders; capture() copies it
+	flow.respTrailers = resp.Trailer.Clone() // trailers may still be filled in by the transport until the body ends, so copy now
 	flow.respBody = respCap.Bytes()
 	flow.latencyMs = time.Since(start).Milliseconds()
 	a.dispatchCapture(flow)
@@ -2606,6 +2704,11 @@ const truncTagLookback = 40
 func (a *App) capture(f rawFlow) {
 	defer func() { _ = recover() }()
 	defer f.wipe()
+	if f.hdrBorrowed {
+		f.reqHeaders = f.reqHeaders.Clone()
+		f.respHeaders = f.respHeaders.Clone()
+		f.hdrBorrowed = false
+	}
 	if e, ok := a.buildEntry(f); ok {
 		a.ring.Push(e)
 		a.markBar()
@@ -2885,7 +2988,7 @@ func (a *App) toolInspect(args json.RawMessage) map[string]any {
 	return toolResult(text, false)
 }
 
-var reTag = regexp.MustCompile(`\[REDACTED_(TOKEN|COOKIE|IP|KEY|PAN)#[0-9a-f]{6}\]`)
+var reTag = lazyRe(`\[REDACTED_(TOKEN|COOKIE|IP|KEY|PAN)#[0-9a-f]{6}\]`)
 
 func envFor(kind string) string {
 	switch kind {
@@ -3163,13 +3266,6 @@ func Main() {
 		os.Exit(RunPolicy(os.Args[2:], os.Stdout, os.Stderr))
 	}
 
-	// A soft heap target keeps resident memory near 32 MiB under large-body
-	// floods. It is a GC target, not a hard cap, and an explicit GOMEMLIMIT
-	// from the operator wins.
-	if os.Getenv("GOMEMLIMIT") == "" {
-		debug.SetMemoryLimit(32 << 20)
-	}
-
 	err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
 	switch {
 	case err == nil:
@@ -3182,6 +3278,9 @@ func Main() {
 	}
 }
 
+// proxyMemoryLimit is the soft heap target of the proxy (see run).
+const proxyMemoryLimit = 48 << 20
+
 // flagParseError marks a command-line parse failure (already reported by the flag set).
 type flagParseError struct{ error }
 
@@ -3190,6 +3289,14 @@ func (e flagParseError) Unwrap() error { return e.error }
 // run is the proxy + MCP stdio server behind Main. It returns when stdin
 // reaches EOF (nil) or when startup validation fails (a non-nil error).
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	// A soft heap target keeps resident memory low under large-body floods
+	// (the capture buffers stop at their cap, see capBuffer). It is a GC
+	// target, not a hard cap, and an explicit GOMEMLIMIT from the operator
+	// wins. The previous value comes back when run returns, so a test that
+	// calls run does not leave the limit set for the rest of the process.
+	if os.Getenv("GOMEMLIMIT") == "" {
+		defer debug.SetMemoryLimit(debug.SetMemoryLimit(proxyMemoryLimit))
+	}
 	fs := flag.NewFlagSet("nullwire-mcp", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	port := fs.Int("port", 8080, "TCP port for the diagnostic proxy (always bound to 127.0.0.1)")
@@ -3304,7 +3411,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 
 	app := &App{
 		ring: NewRingBuffer(), scrub: scrub, egress: egress, disabledTools: disabled, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable, maxBody: maxBody, wsDeflate: *wsDeflate,
-		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 256, MaxIdleConnsPerHost: 128, ReadBufferSize: 32 << 10, WriteBufferSize: 32 << 10, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true},
+		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 256, MaxIdleConnsPerHost: 128, ReadBufferSize: 32 << 10, WriteBufferSize: 32 << 10, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true, HTTP2: transportHTTP2Config()},
 	}
 	app.stdout, app.stderr = stdout, stderr
 	app.setProxyToken(tok)
@@ -3376,7 +3483,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		app.stopBarTicker()
 	}
 
-	srv := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, Protocols: serverProtocols()}
+	srv := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, Protocols: serverProtocols(), HTTP2: serverHTTP2Config()}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			app.Logf("proxy server stopped: %v", err)

@@ -68,7 +68,10 @@ func bgClass(c byte) int {
 	return 4
 }
 
-func init() {
+// initTokenScore fills the entropy table and the bigram matrix. It runs once,
+// on first use (ensureTokenScore), not in package init, so a process that never
+// scores a token does not pay for the 16 K-entry matrix.
+func initTokenScore() {
 	for c := 1; c <= entropyWindow; c++ {
 		plogp[c] = float64(c) * math.Log2(float64(c))
 	}
@@ -116,6 +119,7 @@ func bigramMean(s string) float64 {
 	if len(s) < 2 {
 		return 0
 	}
+	ensureTokenScore()
 	sum := 0
 	for i := 1; i < len(s); i++ {
 		a, b := s[i-1], s[i]
@@ -137,6 +141,7 @@ func maxWindowEntropy(s string) float64 {
 	if n <= entropyWindow {
 		return shannonEntropyBits(s)
 	}
+	ensureTokenScore()
 	var cnt [256]int
 	sum := 0.0 // sum of c*log2(c) over the window
 	add := func(c byte) {

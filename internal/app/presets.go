@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 )
@@ -97,13 +96,13 @@ func newPresetSet(names []string) presetSet {
 // reCardKey finds a card-security field name followed by ':' or '='. The
 // value is read by hand after the match. The left boundary is checked in code
 // (RE2 has no lookbehind), so "lcid" or "acidity" never count.
-var reCardKey = regexp.MustCompile(`(?i)(?:cvv|cvc|cid|csc|cvn)(?:2|_?code|_?value|_?number)?|track[_-]?[12](?:[_-]?data)?`)
+var reCardKey = lazyRe(`(?i)(?:cvv|cvc|cid|csc|cvn)(?:2|_?code|_?value|_?number)?|track[_-]?[12](?:[_-]?data)?`)
 
-var reCardKeyAssign = regexp.MustCompile(`^["'\\]*\s*[:=]\s*["'\\]*`)
+var reCardKeyAssign = lazyRe(`^["'\\]*\s*[:=]\s*["'\\]*`)
 
 // reTrackValue matches track 1 (%B...^NAME^...?), track 2 (;PAN=...?) or any
 // other run of 8+ characters up to a delimiter.
-var reTrackValue = regexp.MustCompile(`^(?:%?[A-Za-z][0-9]{1,19}\^[^^"'\n]{2,26}\^[^"'\n?]*\??|;?[0-9]{12,19}=[^"'\s,&}?]*\??|[^"'\s,&}\\]{8,})`)
+var reTrackValue = lazyRe(`^(?:%?[A-Za-z][0-9]{1,19}\^[^^"'\n]{2,26}\^[^"'\n?]*\??|;?[0-9]{12,19}=[^"'\s,&}?]*\??|[^"'\s,&}\\]{8,})`)
 
 func isLetterByte(c byte) bool { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') }
 
