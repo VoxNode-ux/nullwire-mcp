@@ -127,7 +127,8 @@ var DefaultDSNPrefixes = []string{
 type Gate struct {
 	class [256]uint8 // byte -> class; every byte no literal uses shares class 0
 	width int        // number of classes
-	next  []int32    // flat transition table: next[state*width+class]
+	next  []uint16   // flat transition table: next[state*width+class]
+	wide  []int32    // used instead of next only when the automaton has > 65535 states
 	hit   []bool     // state is the end of a literal, or links to one
 }
 
@@ -155,8 +156,11 @@ func NewGate(literals ...[]string) *Gate {
 			n++
 		}
 	}
+	for c := byte('A'); c <= 'Z'; c++ {
+		g.class[c] = g.class[c+'a'-'A'] // fold case here so Match need not
+	}
 	g.width = n
-	g.next = make([]int32, n)
+	next := make([]int32, n) // built wide, narrowed to uint16 below when it fits
 	g.hit = []bool{false}
 
 	// Trie.
@@ -164,12 +168,12 @@ func NewGate(literals ...[]string) *Gate {
 		s := 0
 		for i := 0; i < len(lit); i++ {
 			c := int(g.class[lit[i]])
-			t := int(g.next[s*n+c])
+			t := int(next[s*n+c])
 			if t == 0 {
 				t = len(g.hit)
 				g.hit = append(g.hit, false)
-				g.next = append(g.next, make([]int32, n)...)
-				g.next[s*n+c] = int32(t)
+				next = append(next, make([]int32, n)...)
+				next[s*n+c] = int32(t)
 			}
 			s = t
 		}
@@ -180,7 +184,7 @@ func NewGate(literals ...[]string) *Gate {
 	fail := make([]int, len(g.hit))
 	queue := make([]int, 0, len(g.hit))
 	for c := 0; c < n; c++ {
-		if t := int(g.next[c]); t != 0 {
+		if t := int(next[c]); t != 0 {
 			queue = append(queue, t)
 		}
 	}
@@ -191,34 +195,48 @@ func NewGate(literals ...[]string) *Gate {
 			g.hit[s] = true
 		}
 		for c := 0; c < n; c++ {
-			t := int(g.next[s*n+c])
-			f := g.next[fail[s]*n+c]
+			t := int(next[s*n+c])
+			f := next[fail[s]*n+c]
 			if t != 0 {
 				fail[t] = int(f)
 				queue = append(queue, t)
 			} else {
-				g.next[s*n+c] = f
+				next[s*n+c] = f
 			}
 		}
+	}
+	if len(g.hit) > 1<<16-1 {
+		g.wide = next // rare: keep the wide table and a slower path
+		return g
+	}
+	g.next = make([]uint16, len(next))
+	for i, t := range next {
+		g.next[i] = uint16(t) // #nosec G115 -- len(g.hit) <= 65535 checked above
 	}
 	return g
 }
 
 // Match reports whether text contains any of the gate's literals, ignoring
-// ASCII case. It does not allocate.
+// ASCII case (folded into class at build time). It does not allocate.
 func (g *Gate) Match(text string) bool {
 	if g == nil || len(g.hit) <= 1 {
 		return false
 	}
-	n := g.width
-	s := 0
-	for i := 0; i < len(text); i++ {
-		c := text[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
+	hit, class, n := g.hit, &g.class, g.width
+	if g.wide != nil {
+		wide, s := g.wide, 0
+		for i := 0; i < len(text); i++ {
+			s = int(wide[s*n+int(class[text[i]])])
+			if hit[s] {
+				return true
+			}
 		}
-		s = int(g.next[s*n+int(g.class[c])])
-		if g.hit[s] {
+		return false
+	}
+	next, s := g.next, 0
+	for i := 0; i < len(text); i++ {
+		s = int(next[s*n+int(class[text[i]])])
+		if hit[s] {
 			return true
 		}
 	}
