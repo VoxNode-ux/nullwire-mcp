@@ -30,6 +30,7 @@ import (
 	"os/signal"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -1445,27 +1446,48 @@ type capBuffer struct {
 	buf  []byte
 	max  int
 	done bool // release was called: later writes are dropped
+	solo bool // only one goroutine ever touches it, so the mutex is skipped
 }
 
-// capBufPool recycles the backing arrays of capBuffer. Every array is zeroed
-// before it goes back, so one request's bytes are never visible to the next.
+// capBufPool recycles the backing arrays of capBuffer. Every array in it is
+// all zero: release clears what was written (the only part ever written)
+// before the array goes back, so one request's bytes are never visible to the
+// next.
 var capBufPool = sync.Pool{New: func() any { b := make([]byte, 0, 8<<10); return &b }}
 
 // capBufPoolMax is the largest array kept for reuse; bigger ones are zeroed
 // and left to the garbage collector so one huge body does not pin memory.
 const capBufPoolMax = 1 << 20
 
-func newCapBuffer(max int) *capBuffer {
-	bp := capBufPool.Get().(*[]byte)
-	return &capBuffer{buf: (*bp)[:0], max: max}
+// newCapBuffer makes a capture buffer that several goroutines may touch (the
+// request body is read by the transport's own goroutine). No array is taken
+// from the pool until the first byte is written, so a request without a body
+// costs nothing.
+func newCapBuffer(max int) *capBuffer { return &capBuffer{max: max} }
+
+// newSoloCapBuffer is newCapBuffer for a buffer used by one goroutine only.
+func newSoloCapBuffer(max int) *capBuffer { return &capBuffer{max: max, solo: true} }
+
+func (c *capBuffer) lock() {
+	if !c.solo {
+		c.mu.Lock()
+	}
 }
 
-// release zeroes the whole backing array (not just the used part) and returns
-// it to the pool. Bytes() hands out a copy, so flows already built are not
-// affected. Safe to call twice and on a capBuffer made without newCapBuffer.
+func (c *capBuffer) unlock() {
+	if !c.solo {
+		c.mu.Unlock()
+	}
+}
+
+// release zeroes the bytes that were written and returns the array to the
+// pool. Only buf[:len(buf)] was ever written, so clearing that is the same as
+// clearing the whole array, without touching the unused tail. Bytes() hands
+// out a copy, so flows already built are not affected. Safe to call twice and
+// on a capBuffer that never held a byte.
 func (c *capBuffer) release() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.lock()
+	defer c.unlock()
 	if c.done {
 		return
 	}
@@ -1475,7 +1497,7 @@ func (c *capBuffer) release() {
 	if cap(buf) == 0 {
 		return
 	}
-	clear(buf[:cap(buf)])
+	clear(buf)
 	runtime.KeepAlive(buf)
 	if cap(buf) <= capBufPoolMax {
 		buf = buf[:0]
@@ -1484,21 +1506,87 @@ func (c *capBuffer) release() {
 }
 
 func (c *capBuffer) Write(p []byte) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.lock()
+	defer c.unlock()
 	if c.done {
 		return len(p), nil
 	}
-	if room := c.max - len(c.buf); room > 0 {
-		if len(p) > room {
-			c.buf = append(c.buf, p[:room]...)
-		} else {
-			c.buf = append(c.buf, p...)
-		}
+	room := c.max - len(c.buf)
+	if room <= 0 {
+		return len(p), nil
 	}
+	q := p
+	if len(q) > room {
+		q = q[:room]
+	}
+	if len(q) == 0 {
+		return len(p), nil
+	}
+	if c.buf == nil {
+		bp := capBufPool.Get().(*[]byte)
+		c.buf = (*bp)[:0]
+	}
+	if need := len(c.buf) + len(q); need > cap(c.buf) {
+		// Grow by hand so the array being left behind can be zeroed; append
+		// would drop it with the captured bytes still in it.
+		newCap := 2 * cap(c.buf)
+		if newCap < need {
+			newCap = need
+		}
+		nb := make([]byte, len(c.buf), newCap)
+		copy(nb, c.buf)
+		clear(c.buf)
+		runtime.KeepAlive(c.buf)
+		c.buf = nb
+	}
+	c.buf = append(c.buf, q...)
 	return len(p), nil
 }
-func (c *capBuffer) Bytes() []byte { c.mu.Lock(); defer c.mu.Unlock(); return append([]byte(nil), c.buf...) }
+
+func (c *capBuffer) Bytes() []byte {
+	c.lock()
+	defer c.unlock()
+	return append([]byte(nil), c.buf...)
+}
+
+// copyBufSize is the size of the pooled buffer that copies a response body.
+const copyBufSize = 32 << 10
+
+// smallBodyMax is the largest known-length response copied without a flush
+// after every write. Such a body ends quickly, and the server sends it with
+// the headers in one go; a larger one keeps the per-write flush so a slow
+// download still reaches the client as it arrives.
+const smallBodyMax = 64 << 10
+
+var copyBufPool = sync.Pool{New: func() any { b := make([]byte, copyBufSize); return &b }}
+
+// copyBuffered copies src to w with a pooled buffer, teeing every byte into
+// capture first (as io.TeeReader did), and never flushes. Only the part of the
+// buffer that was actually filled is zeroed before it goes back to the pool,
+// so the pooled buffers hold no response bytes.
+func copyBuffered(w io.Writer, src io.Reader, capture io.Writer) {
+	bp := copyBufPool.Get().(*[]byte)
+	buf := *bp
+	used := 0
+	for {
+		n, err := src.Read(buf)
+		if n > used {
+			used = n
+		}
+		if n > 0 {
+			_, _ = capture.Write(buf[:n])
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	clear(buf[:used])
+	runtime.KeepAlive(buf)
+	copyBufPool.Put(bp)
+}
 
 type flushWriter struct{ w http.ResponseWriter }
 
@@ -1512,28 +1600,62 @@ func (f *flushWriter) Write(p []byte) (int, error) {
 
 var hopByHop = []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade"}
 
-func copyHeaders(src http.Header, extraDrop ...string) http.Header {
-	drop := make(map[string]bool, len(hopByHop)+len(extraDrop))
+// hopByHopSet is hopByHop as a read-only set, built once. Every key in it is
+// already in canonical form.
+var hopByHopSet = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(hopByHop))
 	for _, h := range hopByHop {
-		drop[h] = true
+		m[http.CanonicalHeaderKey(h)] = struct{}{}
 	}
+	return m
+}()
+
+func copyHeaders(src http.Header, extraDrop ...string) http.Header {
+	// Only the header names that this message's own Connection header lists need
+	// a per-call set; most messages list none, so nothing is allocated for it.
+	var named map[string]struct{}
 	for _, v := range src.Values("Connection") {
 		for _, f := range strings.Split(v, ",") {
 			if f = strings.TrimSpace(f); f != "" {
-				drop[http.CanonicalHeaderKey(f)] = true
+				if named == nil {
+					named = make(map[string]struct{}, 2)
+				}
+				named[http.CanonicalHeaderKey(f)] = struct{}{}
 			}
 		}
 	}
-	for _, e := range extraDrop {
-		drop[http.CanonicalHeaderKey(e)] = true
+	// One backing array holds every kept value slice, instead of one small
+	// allocation per header. The three-index slices stop a later append to one
+	// header from running into its neighbour.
+	total := 0
+	for _, vs := range src {
+		total += len(vs)
 	}
+	backing := make([]string, 0, total)
 	dst := make(http.Header, len(src))
 	for k, vs := range src {
 		ck := http.CanonicalHeaderKey(k)
-		if drop[ck] {
+		if _, drop := hopByHopSet[ck]; drop {
 			continue
 		}
-		dst[ck] = append([]string(nil), vs...)
+		if _, drop := named[ck]; drop {
+			continue
+		}
+		skip := false
+		for _, e := range extraDrop {
+			// Canonical names differ only in letter case, so EqualFold is the
+			// same test as comparing with CanonicalHeaderKey(e).
+			if strings.EqualFold(ck, e) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		start := len(backing)
+		backing = append(backing, vs...)
+		dst[ck] = backing[start:len(backing):len(backing)]
 	}
 	return dst
 }
@@ -1792,11 +1914,16 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if hasBody {
 		outBody = io.TeeReader(r.Body, reqCap)
 	}
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), outBody) // #nosec G704 -- a proxy forwards the client's own request by design; it listens on loopback only and resolveUpstream picks the destination
+	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, "", outBody) // #nosec G704 -- a proxy forwards the client's own request by design; it listens on loopback only and resolveUpstream picks the destination
 	if err != nil {
 		http.Error(w, "nullwire-mcp: cannot build upstream request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The URL was already parsed (and checked) by resolveUpstream. Giving
+	// NewRequest an empty string and setting the URL here skips the
+	// String()-then-Parse round trip; the copy keeps the request's URL its own.
+	outURLCopy := *outURL
+	outReq.URL = &outURLCopy
 	if hasBody {
 		outReq.ContentLength = r.ContentLength
 	} else {
@@ -1865,7 +1992,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.streamSSE(w, r, resp, flow, reqCap, start)
 		return
 	}
-	respCap := newCapBuffer(a.limits().respCap)
+	respCap := newSoloCapBuffer(a.limits().respCap)
 	defer respCap.release()
 	dst := w.Header()
 	for k, vs := range copyHeaders(resp.Header) {
@@ -1879,7 +2006,14 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fl.Flush()
 		}
 	}
-	_, _ = io.Copy(&flushWriter{w: w}, io.TeeReader(resp.Body, respCap))
+	if resp.ContentLength >= 0 && resp.ContentLength <= smallBodyMax && len(resp.Trailer) == 0 {
+		// A short body of known length: no flush per write, so the headers, the
+		// body and the end of the stream can leave in one go (one HTTP/2 frame
+		// write instead of several).
+		copyBuffered(w, resp.Body, respCap)
+	} else {
+		_, _ = io.Copy(&flushWriter{w: w}, io.TeeReader(resp.Body, respCap))
+	}
 	// Trailers are only known once the body has been read.
 	for k, vs := range resp.Trailer {
 		if len(vs) > 0 { // a declared trailer the server never sent has no value
@@ -3027,6 +3161,13 @@ func Main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "policy" {
 		os.Exit(RunPolicy(os.Args[2:], os.Stdout, os.Stderr))
+	}
+
+	// A soft heap target keeps resident memory near 32 MiB under large-body
+	// floods. It is a GC target, not a hard cap, and an explicit GOMEMLIMIT
+	// from the operator wins.
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(32 << 20)
 	}
 
 	err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
