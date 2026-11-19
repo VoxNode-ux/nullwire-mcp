@@ -114,7 +114,7 @@ def _ensure_binary():
     fd, tmp = tempfile.mkstemp(dir=folder, suffix=".tmp")
     with os.fdopen(fd, "wb") as fh:
         fh.write(data)
-    os.chmod(tmp, 0o755)
+    os.chmod(tmp, 0o755)  # NOSONAR -- the downloaded binary must be executable; its folder is the per-user cache
     os.replace(tmp, binary)
     with open(sidecar, "w") as fh:
         fh.write(got + "\n")
@@ -130,7 +130,7 @@ def main():
         return 0
     env = dict(os.environ, NULLWIRE_VIA_PYTHON="1")
     try:
-        proc = subprocess.Popen([binary] + args, env=env)
+        proc = subprocess.Popen([binary] + args, env=env)  # NOSONAR -- launcher: absolute, hash-verified binary, no shell, arguments passed through unchanged
     except OSError as exc:
         _fail("could not start %s: %s" % (binary, exc))
     for name in ("SIGINT", "SIGTERM", "SIGHUP"):
