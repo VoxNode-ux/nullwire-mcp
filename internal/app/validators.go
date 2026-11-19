@@ -154,6 +154,22 @@ func dsnPasswordIsPlaceholder(dsn string) bool {
 	return stage3Placeholder(pw)
 }
 
+// dsnMatchIsTemplate reports whether m is a whole DSN (scheme, user, password,
+// host) whose password is only template words or <angle brackets>, such as
+// postgres://app:your_password@db/x. A password with an explicit secret
+// prefix is never a template, and a DSN without a password returns false.
+func dsnMatchIsTemplate(m string) bool {
+	u, err := url.Parse(m)
+	if err != nil || u.User == nil {
+		return false
+	}
+	pw, ok := u.User.Password()
+	if !ok || pw == "" || hasStructuredPrefix(pw) {
+		return false
+	}
+	return dsnPasswordIsPlaceholder(m)
+}
+
 // validatedSecret is true only when a format validator AFFIRMS s. It is used
 // to promote a candidate past the entropy and bigram penalties; false means
 // "no opinion", never "not a secret".

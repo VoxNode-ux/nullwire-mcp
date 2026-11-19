@@ -626,6 +626,10 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 				if vr.weak && !weakVendorMatchOK(m, vr.prefixes) {
 					return m
 				}
+				// A DSN whose password is only template words is documentation.
+				if strings.Contains(m, "://") && dsnMatchIsTemplate(m) {
+					return m
+				}
 				count++
 				s.Tokens.Add(1)
 				return s.tag("TOKEN", m)
