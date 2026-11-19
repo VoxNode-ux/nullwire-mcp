@@ -2113,7 +2113,7 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 	}
 	flow.latencyMs = time.Since(flow.started).Milliseconds()
 	note := fmt.Sprintf("upgraded connection (%s): %d B client->upstream, %d B upstream->client", resp.Header.Get("Upgrade"), sent, recv)
-	if isWS {
+	if wsUp != nil && wsDown != nil {
 		flow.reqBody = wsUp.Bytes()
 		flow.respBody = wsDown.Bytes()
 		note += fmt.Sprintf("; WebSocket text messages are captured and scrubbed (refreshed live while open, final on close) (client->server: %s; server->client: %s); live frames are forwarded unmodified", wsUp.Summary(), wsDown.Summary())

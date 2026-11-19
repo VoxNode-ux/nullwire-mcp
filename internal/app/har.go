@@ -195,7 +195,7 @@ func harFit(e FlowEntry, withBodies bool, budget int) (raw []byte, cut, ok bool)
 	he.NullWire.BodiesCut = withBodies
 	s, err := marshalJSON(he, false)
 	if err != nil || len(s) > budget {
-		return nil, false, false
+		return []byte{}, false, false
 	}
 	return []byte(s), withBodies, true
 }
