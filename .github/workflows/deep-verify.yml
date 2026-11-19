@@ -264,7 +264,7 @@ jobs:
         run: CGO_ENABLED=0 go build -trimpath -o nullwire-mcp .
       - name: Write an SBOM (CycloneDX, from the Go build info)
         run: |
-          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
           "$(go env GOPATH)/bin/cyclonedx-gomod" app -json -output sbom.cdx.json -main . .
       - name: Scan the SBOM and the binary (fail on high or critical)
         run: |
