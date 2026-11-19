@@ -34,12 +34,12 @@ func checkTail(t *testing.T, s *Scrubber, in string) {
 		gotOut, gotN := s.scrubTail(in, skipIP)
 		if gotOut != wantOut || gotN != wantN {
 			t.Fatalf("scrubTail differs from the ungated rules (skipIP=%v)\n in:   %q\n want: %q (%d)\n got:  %q (%d)",
-				skipIP, clip(in), clip(wantOut), wantN, clip(gotOut), gotN)
+				skipIP, clipTail(in), clipTail(wantOut), wantN, clipTail(gotOut), gotN)
 		}
 	}
 	// The gate on its own: it may never be false where panSpans matches.
 	if len(panSpans(in)) > 0 && !hasPANChain(in) {
-		t.Fatalf("hasPANChain false but panSpans matches %q", clip(in))
+		t.Fatalf("hasPANChain false but panSpans matches %q", clipTail(in))
 	}
 }
 
