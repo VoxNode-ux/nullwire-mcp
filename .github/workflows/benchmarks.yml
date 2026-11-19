@@ -350,6 +350,9 @@ jobs:
                           rows.append((label, val))
               if len(rows) > 20000: break
           rows = rows[:20000]
+          with open("work/cred.tsv", "w") as f:
+              for (l, v) in rows:
+                  f.write("%s\t%s\n" % (l, v.replace("\r", "")))
           with open("work/cred.env", "w") as f:
               for i, (_, v) in enumerate(rows):
                   f.write("CRED_%d=%s\n" % (i, v.replace("\r", "")))
@@ -370,6 +373,11 @@ jobs:
                   s.write("_No labelled CredData samples were available on the runner._\n")
           PY
           python3 score.py
+      - name: CredData FPR by rule stage (diagnostic)
+        if: always()
+        run: |
+          CREDDATA_TSV="$PWD/work/cred.tsv" go test -run TestCredDataFPRByStage -count=1 -v ./internal/app | tee stage-breakdown.txt
+          { echo "## CredData FPR by stage"; echo '```'; grep -E '^==|^  ' stage-breakdown.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: SecretBench inventory
         id: sb
         run: |
