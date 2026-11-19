@@ -5,7 +5,6 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"hash/crc32"
 	"net/url"
 	"strings"
@@ -112,28 +111,6 @@ func awsKeyIDValid(tok string) bool {
 		return false
 	}
 	_, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(tok[4:])
-	return err == nil
-}
-
-// pemKeyParses reports whether block holds a private key that crypto/x509
-// can parse (PKCS#1, PKCS#8 or SEC 1). A truncated or damaged block returns
-// false; callers must not use that to skip a redaction.
-func pemKeyParses(block string) bool {
-	b, _ := pem.Decode([]byte(block))
-	if b == nil {
-		return false
-	}
-	var err error
-	switch b.Type {
-	case "RSA PRIVATE KEY":
-		_, err = x509.ParsePKCS1PrivateKey(b.Bytes)
-	case "PRIVATE KEY":
-		_, err = x509.ParsePKCS8PrivateKey(b.Bytes)
-	case "EC PRIVATE KEY":
-		_, err = x509.ParseECPrivateKey(b.Bytes)
-	default:
-		return false
-	}
 	return err == nil
 }
 

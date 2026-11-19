@@ -120,8 +120,8 @@ func TestDSNPlaceholderWiring(t *testing.T) {
 	if out, _ := s.ScrubText("dsn " + keep); !strings.Contains(out, "your_password") {
 		t.Errorf("template DSN password was redacted: %s", out)
 	}
-	real := "postgres://app:Zx9Qw3Lp7Mn2@db.example.com/x"
-	if out, _ := s.ScrubText("dsn " + real); strings.Contains(out, "Zx9Qw3Lp7Mn2") {
+	genuine := "postgres://app:Zx9Qw3Lp7Mn2@db.example.com/x"
+	if out, _ := s.ScrubText("dsn " + genuine); strings.Contains(out, "Zx9Qw3Lp7Mn2") {
 		t.Errorf("real DSN password leaked: %s", out)
 	}
 	prefixed := "postgres://app:ghp_abcdefghijklmnopqrstuvwxyz0123456789@db/x"

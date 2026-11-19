@@ -1510,10 +1510,10 @@ const capBufPoolMax = 1 << 20
 // request body is read by the transport's own goroutine). No array is taken
 // from the pool until the first byte is written, so a request without a body
 // costs nothing.
-func newCapBuffer(max int) *capBuffer { return &capBuffer{max: max} }
+func newCapBuffer(limit int) *capBuffer { return &capBuffer{max: limit} }
 
 // newSoloCapBuffer is newCapBuffer for a buffer used by one goroutine only.
-func newSoloCapBuffer(max int) *capBuffer { return &capBuffer{max: max, solo: true} }
+func newSoloCapBuffer(limit int) *capBuffer { return &capBuffer{max: limit, solo: true} }
 
 func (c *capBuffer) lock() {
 	if !c.solo {
@@ -1657,16 +1657,6 @@ func copyBuffered(w io.Writer, src io.Reader, capture io.Writer, fl http.Flusher
 	clear(buf[:used])
 	runtime.KeepAlive(buf)
 	copyBufPool.Put(bp)
-}
-
-type flushWriter struct{ w http.ResponseWriter }
-
-func (f *flushWriter) Write(p []byte) (int, error) {
-	n, err := f.w.Write(p)
-	if fl, ok := f.w.(http.Flusher); ok {
-		fl.Flush()
-	}
-	return n, err
 }
 
 var hopByHop = []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade"}

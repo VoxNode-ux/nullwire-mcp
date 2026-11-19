@@ -21,7 +21,10 @@ var benchSink string
 
 func benchScrubber(b *testing.B) *Scrubber {
 	b.Helper()
-	s := mustScrubber()
+	s, err := NewScrubber()
+	if err != nil {
+		b.Fatal(err)
+	}
 	return s
 }
 
