@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 )
@@ -118,7 +119,22 @@ func walkTree(root string, visit func(path string, d fs.DirEntry)) {
 	})
 }
 
-func Run(args []string) int { return RunTo(os.Stdout, os.Stderr, args) }
+func Run(args []string) int {
+	// A one-shot scan reads its files, prints, and exits, so the collector has
+	// nothing worth reclaiming: GC is switched off for the run. The memory
+	// limit keeps that safe on a very large tree (--deep, --history): near the
+	// limit the collector runs anyway, so memory stays bounded. An explicit
+	// GOMEMLIMIT from the operator wins. Both settings are put back on return
+	// (Run is only the process entry point, RunTo is what tests call).
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	if os.Getenv("GOMEMLIMIT") == "" {
+		defer debug.SetMemoryLimit(debug.SetMemoryLimit(scanMemoryLimit))
+	}
+	return RunTo(os.Stdout, os.Stderr, args)
+}
+
+// scanMemoryLimit is the soft heap ceiling of a one-shot scan with GC off.
+const scanMemoryLimit = 256 << 20
 
 // RunTo is Run with explicit output writers, so callers (and tests)
 // never have to swap the process-wide os.Stdout.
