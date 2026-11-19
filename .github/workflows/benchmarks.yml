@@ -142,6 +142,32 @@ jobs:
           }
           JS
           k6 run --summary-export=k6-sse.json sse.js 2>&1 | tee k6-sse.txt
+      - name: SSE overhead (direct vs through NullWire; upstream floor is 20 x 10 ms)
+        id: ssedirect
+        run: |
+          python3 - <<'PY'
+          import time, urllib.request, json
+          def run(url, n=100):
+              ts = []
+              for _ in range(n):
+                  t = time.perf_counter()
+                  with urllib.request.urlopen(url) as r:
+                      body = r.read()
+                  assert body.count(b"data:") == 20
+                  ts.append((time.perf_counter() - t) * 1000)
+              ts.sort()
+              return sum(ts) / len(ts), ts[len(ts) // 2]
+          run("http://127.0.0.1:18081/sse", 5)  # warm-up
+          run("http://127.0.0.1:18080/sse", 5)
+          d_avg, d_med = run("http://127.0.0.1:18081/sse")
+          p_avg, p_med = run("http://127.0.0.1:18080/sse")
+          res = {"sse_direct_ms": round(d_avg, 2), "sse_proxy_ms": round(p_avg, 2),
+                 "sse_overhead_ms": round(p_avg - d_avg, 2),
+                 "sse_direct_median_ms": round(d_med, 2), "sse_proxy_median_ms": round(p_med, 2),
+                 "sse_overhead_median_ms": round(p_med - d_med, 2)}
+          json.dump(res, open("sse-overhead.json", "w"), indent=2)
+          print(res)
+          PY
       - name: hyperfine (startup, tools/list and scan)
         id: hyperfine
         run: |
@@ -209,6 +235,7 @@ jobs:
               echo "### $f"; grep -E "^finished in|^requests:|^status codes|^time for request" $f.txt 2>/dev/null | sed 's/^/    /'
             done
             echo "### k6 SSE"; grep -E "checks|http_req_duration|iterations" k6-sse.txt 2>/dev/null | sed 's/^/    /'
+            echo "### SSE overhead (proxy minus direct, one 20-event stream)"; sed 's/^/    /' sse-overhead.json 2>/dev/null
             echo "### hyperfine"; cat hyperfine.md 2>/dev/null
             cat binsize.md 2>/dev/null
             echo "### Scrubber CPU (go test -bench)"; grep -E "^Benchmark" scrub-bench.txt 2>/dev/null | sed 's/^/    /'
@@ -231,6 +258,7 @@ jobs:
             echo "| hey (HTTP/1.1) | ${{ steps.hey.outcome }} |"
             echo "| h2load (HTTP/2) | ${{ steps.h2load.outcome }} |"
             echo "| k6 (SSE) | ${{ steps.k6.outcome }} |"
+            echo "| SSE overhead (direct vs proxy) | ${{ steps.ssedirect.outcome }} |"
             echo "| hyperfine | ${{ steps.hyperfine.outcome }} |"
             echo "| binary size | ${{ steps.binsize.outcome }} |"
             echo "| scrubber CPU (go test -bench) | ${{ steps.scrubbench.outcome }} |"
@@ -250,6 +278,7 @@ jobs:
             hey-*.txt
             h2-*.txt
             k6-sse.*
+            sse-overhead.json
             hyperfine.md
             binsize.md
             scrub-bench.txt
