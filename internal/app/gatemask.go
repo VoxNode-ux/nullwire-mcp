@@ -162,57 +162,34 @@ var secretKeyGate = lazyGate(
 	maskGroup{queryKeyBit, []string{"key=", "token=", "secret=", "password=", "passwd="}},
 )
 
-// tailFeatures are the cheap structural facts that the last three rules of
-// scrubLayersOpts (IPv6, IPv4 and payment-card numbers) each need before they
-// can match anything at all. One byte pass reads them all, in place of three
-// separate scans of the text. Every flag is a NECESSARY condition: when it is
-// false the rule cannot match, so skipping the rule loses nothing; when it is
-// true the rule runs as before and still decides on its own.
-type tailFeatures struct {
-	colons   bool // at least two ':' (an IPv6 address has two or more)
-	dotDigit bool // a digit, '.', digit in a row (every IPv4 address has one)
-	panChain bool // 13 or more digits, each pair at most one ' ' or '-' apart
-}
-
-// scanTailFeatures reads in once. It allocates nothing and keeps no part of
-// in. panChain follows panSpans' own rules: a card number is digits with a
-// single space or hyphen allowed between two digits, so a chain is broken by
-// any other byte or by two separators in a row. (A longest-digit-run test
-// would be wrong here: "4111 1111 1111 1111" has runs of four.)
-func scanTailFeatures(in string) tailFeatures {
-	var f tailFeatures
-	colons, chain := 0, 0
+// hasPANChain reports whether in holds 13 or more digits in a row, where each
+// pair of digits may be one ' ' or '-' apart. It is a NECESSARY condition for
+// panSpans to match anything (a card number is digits with a single space or
+// hyphen allowed between two digits), so when it is false scrubPANs can be
+// skipped and nothing is lost; when it is true scrubPANs still decides alone.
+// It allocates nothing, stops at the first chain, and is portable Go (no
+// assembly), so it behaves the same on every GOOS/GOARCH. (A longest-digit-run
+// test would be wrong: "4111 1111 1111 1111" has runs of four.)
+func hasPANChain(in string) bool {
+	if len(in) < 13 {
+		return false
+	}
+	chain := 0
 	prevDigit := false
 	for i := 0; i < len(in); i++ {
 		c := in[i]
-		switch {
-		case c >= '0' && c <= '9':
-			chain++
-			if chain >= 13 {
-				f.panChain = true
+		if c >= '0' && c <= '9' {
+			if chain++; chain >= 13 {
+				return true
 			}
 			prevDigit = true
 			continue
-		case c == ' ' || c == '-':
-			if prevDigit {
-				prevDigit = false // chain survives one separator
-				continue
-			}
-			chain = 0
-		case c == '.':
-			if prevDigit && i+1 < len(in) && in[i+1] >= '0' && in[i+1] <= '9' {
-				f.dotDigit = true
-			}
-			chain = 0
-		case c == ':':
-			if colons++; colons >= 2 {
-				f.colons = true
-			}
-			chain = 0
-		default:
-			chain = 0
 		}
-		prevDigit = false
+		if (c == ' ' || c == '-') && prevDigit {
+			prevDigit = false // the chain survives one separator
+			continue
+		}
+		chain, prevDigit = 0, false
 	}
-	return f
+	return false
 }

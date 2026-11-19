@@ -660,28 +660,9 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 		})
 	}
 
-	// One pass over the text as it stands now tells which of the three rules
-	// below can possibly match (see tailFeatures); the others are skipped.
-	tf := scanTailFeatures(out)
-
-	if !o.skipIP && tf.colons {
-		var n6 int
-		out, n6 = s.scrubIPv6(out)
-		count += n6
-	}
-
-	// IPv6 may have replaced text, but only with a tag, which holds no
-	// digit-dot-digit, so tf.dotDigit and tf.panChain still hold as upper
-	// bounds for what is left of the text.
-	if !o.skipIP && tf.dotDigit && maybeIPv4(out) {
-		out = replaceIPv4(s, out, &count)
-	}
-
-	if tf.panChain {
-		var nPAN int
-		out, nPAN = s.scrubPANs(out)
-		count += nPAN
-	}
+	var nTail int
+	out, nTail = s.scrubTail(out, o.skipIP)
+	count += nTail
 
 	if s.presets.enabled() {
 		var nPreset int
@@ -711,6 +692,30 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 		var nEntropy int
 		out, nEntropy = s.scrubHighEntropyMax(out, o.entropyMax())
 		count += nEntropy
+	}
+	return out, count
+}
+
+// scrubTail runs the last three rules of scrubLayersOpts: IPv6, IPv4 and
+// payment-card numbers. Each sits behind a gate that is a necessary condition
+// for the rule to match, so skipping it loses nothing. The gates read the text
+// as it stands when its rule runs, and use the SIMD-backed strings.Count and
+// strings.IndexByte where they can. TestScrubTailMatchesUngated holds this to
+// the ungated rules.
+func (s *Scrubber) scrubTail(out string, skipIP bool) (string, int) {
+	count := 0
+	if !skipIP && strings.Count(out, ":") >= 2 {
+		var n6 int
+		out, n6 = s.scrubIPv6(out)
+		count += n6
+	}
+	if !skipIP && strings.IndexByte(out, '.') >= 0 && maybeIPv4(out) {
+		out = replaceIPv4(s, out, &count)
+	}
+	if hasPANChain(out) {
+		var nPAN int
+		out, nPAN = s.scrubPANs(out)
+		count += nPAN
 	}
 	return out, count
 }
