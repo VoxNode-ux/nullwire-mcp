@@ -482,6 +482,9 @@ func buildVendorRule(prefixes []string, class string, minLen int, weak bool) (ve
 
 // weakVendorMatchOK checks the text after the matched prefix.
 func weakVendorMatchOK(m string, prefixes []string) bool {
+	if validatedSecret(m) { // a format validator affirms it: promote, never demote
+		return true
+	}
 	best := 0
 	for _, p := range prefixes {
 		if len(p) > best && strings.HasPrefix(m, p) {
@@ -642,19 +645,28 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 		})
 	}
 
-	if !o.skipIP {
+	// One pass over the text as it stands now tells which of the three rules
+	// below can possibly match (see tailFeatures); the others are skipped.
+	tf := scanTailFeatures(out)
+
+	if !o.skipIP && tf.colons {
 		var n6 int
 		out, n6 = s.scrubIPv6(out)
 		count += n6
 	}
 
-	if !o.skipIP && maybeIPv4(out) {
+	// IPv6 may have replaced text, but only with a tag, which holds no
+	// digit-dot-digit, so tf.dotDigit and tf.panChain still hold as upper
+	// bounds for what is left of the text.
+	if !o.skipIP && tf.dotDigit && maybeIPv4(out) {
 		out = replaceIPv4(s, out, &count)
 	}
 
-	var nPAN int
-	out, nPAN = s.scrubPANs(out)
-	count += nPAN
+	if tf.panChain {
+		var nPAN int
+		out, nPAN = s.scrubPANs(out)
+		count += nPAN
+	}
 
 	if s.presets.enabled() {
 		var nPreset int
@@ -920,6 +932,9 @@ func strictFieldRanges(in string, maxVal int) [][2]int {
 		if strings.ContainsAny(val, "/.") && !strictSlashDotOK(val) && (!isSignatureKey(kb) || !signatureValueOK(val)) {
 			continue
 		}
+		if !hasStructuredPrefix(val) && stage3Placeholder(val) {
+			continue // YOUR_API_KEY_HERE style template, no explicit prefix
+		}
 		out = append(out, [2]int{start, end})
 		i = end - 1
 	}
@@ -1108,6 +1123,17 @@ func isHexUUID(s string) bool {
 func looksLikeTokenMax(s string, maxLen int) bool {
 	n := len(s)
 	if n < entropyMinLen || n > maxLen {
+		return false
+	}
+
+	// A validator that affirms the format promotes the candidate past every
+	// penalty below. A heuristic-only candidate (no explicit prefix) made of
+	// template words is a placeholder. A candidate WITH an explicit prefix is
+	// never dropped by this test.
+	if validatedSecret(s) {
+		return true
+	}
+	if !hasStructuredPrefix(s) && stage3Placeholder(s) {
 		return false
 	}
 
@@ -1490,6 +1516,9 @@ func (c *capBuffer) unlock() {
 // out a copy, so flows already built are not affected. Safe to call twice and
 // on a capBuffer that never held a byte.
 func (c *capBuffer) release() {
+	if c == nil { // a request without a body never made one
+		return
+	}
 	c.lock()
 	defer c.unlock()
 	if c.done {
@@ -1511,7 +1540,7 @@ func (c *capBuffer) release() {
 
 // Truncated reports that more bytes were written than the buffer holds, so the
 // capture is a prefix of the body.
-func (c *capBuffer) Truncated() bool { return c.truncated.Load() }
+func (c *capBuffer) Truncated() bool { return c != nil && c.truncated.Load() }
 
 func (c *capBuffer) Write(p []byte) (int, error) {
 	// Capture limit already reached: swallow the rest of the body untouched.
@@ -1567,6 +1596,9 @@ func (c *capBuffer) Write(p []byte) (int, error) {
 }
 
 func (c *capBuffer) Bytes() []byte {
+	if c == nil {
+		return nil
+	}
 	c.lock()
 	defer c.unlock()
 	return append([]byte(nil), c.buf...)
@@ -1575,19 +1607,15 @@ func (c *capBuffer) Bytes() []byte {
 // copyBufSize is the size of the pooled buffer that copies a response body.
 const copyBufSize = 32 << 10
 
-// smallBodyMax is the largest known-length response copied without a flush
-// after every write. Such a body ends quickly, and the server sends it with
-// the headers in one go; a larger one keeps the per-write flush so a slow
-// download still reaches the client as it arrives.
-const smallBodyMax = 64 << 10
-
 var copyBufPool = sync.Pool{New: func() any { b := make([]byte, copyBufSize); return &b }}
 
 // copyBuffered copies src to w with a pooled buffer, teeing every byte into
-// capture first (as io.TeeReader did), and never flushes. Only the part of the
-// buffer that was actually filled is zeroed before it goes back to the pool,
-// so the pooled buffers hold no response bytes.
-func copyBuffered(w io.Writer, src io.Reader, capture io.Writer) {
+// capture first (as io.TeeReader did). It flushes after each write only when
+// fl is non-nil (a stream of unknown length); a body of known length passes
+// nil and is never flushed. Only the part of the buffer that was actually
+// filled is zeroed before it goes back to the pool, so the pooled buffers hold
+// no response bytes.
+func copyBuffered(w io.Writer, src io.Reader, capture io.Writer, fl http.Flusher) {
 	bp := copyBufPool.Get().(*[]byte)
 	buf := *bp
 	used := 0
@@ -1600,6 +1628,9 @@ func copyBuffered(w io.Writer, src io.Reader, capture io.Writer) {
 			_, _ = capture.Write(buf[:n])
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				break
+			}
+			if fl != nil {
+				fl.Flush()
 			}
 		}
 		if err != nil {
@@ -1988,11 +2019,13 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nullwire-mcp: "+err.Error(), status)
 		return
 	}
-	reqCap := newCapBuffer(a.limits().reqCap)
-	defer reqCap.release()
 	var outBody io.Reader = http.NoBody
 	hasBody := r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0
+	// No body, no capture buffer: reqCap stays nil, and its methods accept that.
+	var reqCap *capBuffer
 	if hasBody {
+		reqCap = newCapBuffer(a.limits().reqCap)
+		defer reqCap.release()
 		outBody = io.TeeReader(r.Body, reqCap)
 	}
 	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, "", outBody) // #nosec G704 -- a proxy forwards the client's own request by design; it listens on loopback only and resolveUpstream picks the destination
@@ -2097,21 +2130,17 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer respCap.release()
 	copyHeadersInto(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	if resp.ContentLength < 0 {
-		// A stream of unknown length (server-sent events, gRPC): the client
-		// sees the headers now, not together with the first chunk.
-		if fl, ok := w.(http.Flusher); ok {
+	// Streaming (unknown length, or trailers to come) flushes as data arrives;
+	// a body of known length is copied straight through without flushes.
+	var fl http.Flusher
+	if resp.ContentLength < 0 || len(resp.Trailer) > 0 {
+		// The client sees the headers now, not together with the first chunk.
+		fl, _ = w.(http.Flusher)
+		if fl != nil && resp.ContentLength < 0 {
 			fl.Flush()
 		}
 	}
-	if resp.ContentLength >= 0 && resp.ContentLength <= smallBodyMax && len(resp.Trailer) == 0 {
-		// A short body of known length: no flush per write, so the headers, the
-		// body and the end of the stream can leave in one go (one HTTP/2 frame
-		// write instead of several).
-		copyBuffered(w, resp.Body, respCap)
-	} else {
-		_, _ = io.Copy(&flushWriter{w: w}, io.TeeReader(resp.Body, respCap))
-	}
+	copyBuffered(w, resp.Body, respCap, fl)
 	// Trailers are only known once the body has been read.
 	for k, vs := range resp.Trailer {
 		if len(vs) > 0 { // a declared trailer the server never sent has no value

@@ -161,3 +161,58 @@ var secretKeyGate = lazyGate(
 	// api_key=, apikey= and the *_token= / *_secret= forms all end in one of these.
 	maskGroup{queryKeyBit, []string{"key=", "token=", "secret=", "password=", "passwd="}},
 )
+
+// tailFeatures are the cheap structural facts that the last three rules of
+// scrubLayersOpts (IPv6, IPv4 and payment-card numbers) each need before they
+// can match anything at all. One byte pass reads them all, in place of three
+// separate scans of the text. Every flag is a NECESSARY condition: when it is
+// false the rule cannot match, so skipping the rule loses nothing; when it is
+// true the rule runs as before and still decides on its own.
+type tailFeatures struct {
+	colons   bool // at least two ':' (an IPv6 address has two or more)
+	dotDigit bool // a digit, '.', digit in a row (every IPv4 address has one)
+	panChain bool // 13 or more digits, each pair at most one ' ' or '-' apart
+}
+
+// scanTailFeatures reads in once. It allocates nothing and keeps no part of
+// in. panChain follows panSpans' own rules: a card number is digits with a
+// single space or hyphen allowed between two digits, so a chain is broken by
+// any other byte or by two separators in a row. (A longest-digit-run test
+// would be wrong here: "4111 1111 1111 1111" has runs of four.)
+func scanTailFeatures(in string) tailFeatures {
+	var f tailFeatures
+	colons, chain := 0, 0
+	prevDigit := false
+	for i := 0; i < len(in); i++ {
+		c := in[i]
+		switch {
+		case c >= '0' && c <= '9':
+			chain++
+			if chain >= 13 {
+				f.panChain = true
+			}
+			prevDigit = true
+			continue
+		case c == ' ' || c == '-':
+			if prevDigit {
+				prevDigit = false // chain survives one separator
+				continue
+			}
+			chain = 0
+		case c == '.':
+			if prevDigit && i+1 < len(in) && in[i+1] >= '0' && in[i+1] <= '9' {
+				f.dotDigit = true
+			}
+			chain = 0
+		case c == ':':
+			if colons++; colons >= 2 {
+				f.colons = true
+			}
+			chain = 0
+		default:
+			chain = 0
+		}
+		prevDigit = false
+	}
+	return f
+}
