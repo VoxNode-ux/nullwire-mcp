@@ -1,0 +1,98 @@
+name: SonarQube (tests, coverage, code quality and security)
+
+# Runs the Go tests with a JSON report and a coverage profile, then uploads both
+# to SonarQube. Skipped (green) until the SONAR_TOKEN and SONAR_HOST_URL secrets exist.
+#   Versions: SonarSource/sonarqube-scan-action v8.5.0 (commit 59202af),
+#             SonarScanner CLI 8.4.0.16527 (commit c1d7e6f), SonarQube Server 2026.5 LTA.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      scanner:
+        description: "Scanner to use"
+        type: choice
+        options: [action, cli-docker]
+        default: action
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonarqube-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.27.2"
+  SONAR_SCANNER_CLI_IMAGE: "sonarsource/sonar-scanner-cli:8.4.0.16527"
+
+jobs:
+  sonarqube:
+    name: Test, coverage and scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0            # SonarQube needs full history for blame and new-code detection
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+
+      - name: Run all tests (JSON report + coverage profile for SonarQube)
+        run: |
+          set -o pipefail
+          go test -count=1 -json -coverpkg=./... -covermode=atomic -coverprofile=cover.out ./... > test-report.json
+      - name: Summarize the test report
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          c = {"pass": 0, "fail": 0, "skip": 0}
+          if os.path.exists("test-report.json"):
+              for line in open("test-report.json"):
+                  try: e = json.loads(line)
+                  except Exception: continue
+                  if e.get("Test") and e.get("Action") in c: c[e["Action"]] += 1
+          print("## Test report sent to SonarQube")
+          print(f"- **Passed:** {c['pass']}  **Failed:** {c['fail']}  **Skipped:** {c['skip']}")
+          PY
+      - name: Report that the scan is skipped without secrets
+        if: env.SONAR_TOKEN == '' || env.SONAR_HOST_URL == ''
+        run: |
+          echo "_SonarQube scan skipped - set the SONAR_TOKEN and SONAR_HOST_URL secrets._" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: SonarQube scan (official action, verifies the scanner's OpenPGP signature)
+        if: (env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '') && (github.event_name != 'workflow_dispatch' || inputs.scanner == 'action')
+        uses: SonarSource/sonarqube-scan-action@v8.5.0 # 59202af
+        with:
+          skipSignatureVerification: false
+          args: >
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
+      - name: SonarQube scan (standalone scanner CLI in Docker)
+        if: (env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '') && github.event_name == 'workflow_dispatch' && inputs.scanner == 'cli-docker'
+        run: |
+          docker run --rm \
+            -e SONAR_TOKEN -e SONAR_HOST_URL \
+            -v "$PWD:/usr/src" \
+            "$SONAR_SCANNER_CLI_IMAGE" -Dsonar.qualitygate.wait=true
+
+      - name: Save the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: sonar-inputs
+          path: |
+            test-report.json
+            cover.out
+          if-no-files-found: ignore
+          retention-days: 30

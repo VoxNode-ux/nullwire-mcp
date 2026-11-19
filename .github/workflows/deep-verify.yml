@@ -3,7 +3,9 @@ name: Deep verify (code, protocol and security hardening)
 # Workflow 1. Slow, strict checks that complement quality.yml and security.yml:
 #   race + shuffle + goroutine-leak guard, nilaway, gremlins (mutation testing),
 #   grype (CVE scan of the built binary), MCP Inspector, agent-scan (mcp-scan),
-#   and the Autobahn WebSocket conformance suite.
+#   the Autobahn WebSocket conformance suite, the named scrub-context unit tests
+#   (repeated under -race), gitleaks + trufflehog (repo scan and an independent
+#   cross-check of NullWire's own output) and a websocat end-to-end redaction check.
 # Nothing here changes the repository; everything is installed on the runner.
 
 on:
@@ -537,3 +539,187 @@ jobs:
             echo.log
           if-no-files-found: ignore
           retention-days: 30
+
+  # ------------------------------------------------------------------ 9
+  scrub-tests:
+    name: Scrub-context unit tests (repeated, race, shuffled) + fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Run the named scrub-context tests 20 times under -race
+        run: |
+          set -o pipefail
+          go test -race -shuffle=on -count=20 -v ./internal/app \
+            -run '^(TestUnwrapPercentEncodedSecret|TestUnwrapEncodedDigits|TestUnwrapEscapedJSONKeepsEscaping|TestNeedsUnwrap|TestContextEntropyLimit|TestContextHexWebhookSecrets|TestEntropyExemptHeaders|TestCheapChecksMatchTheirRules)$' 2>&1 | tee scrub-tests.txt
+      - name: Fuzz the same code for 30 s each
+        run: |
+          set -o pipefail
+          for f in FuzzUnwrapEscapes FuzzScrubContextsNoPanic; do
+            go test -run='^$' -fuzz="^${f}$" -fuzztime=30s ./internal/app 2>&1 | tee -a scrub-fuzz.txt
+          done
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## Scrub-context tests (20 runs, -race, shuffled)"
+            echo "| Test | Passes | Failures |"
+            echo "|---|---|---|"
+            for t in TestUnwrapPercentEncodedSecret TestUnwrapEncodedDigits TestUnwrapEscapedJSONKeepsEscaping TestNeedsUnwrap TestContextEntropyLimit TestContextHexWebhookSecrets TestEntropyExemptHeaders TestCheapChecksMatchTheirRules; do
+              p=$(grep -c -- "^--- PASS: $t " scrub-tests.txt 2>/dev/null || true)
+              f=$(grep -c -- "^--- FAIL: $t " scrub-tests.txt 2>/dev/null || true)
+              echo "| \`$t\` | $p | $f |"
+            done
+            [ -f scrub-fuzz.txt ] && { echo '### Fuzz'; echo '```text'; grep -E '^(ok|FAIL|PASS|---)' scrub-fuzz.txt; echo '```'; }
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: scrub-tests-log
+          path: |
+            scrub-tests.txt
+            scrub-fuzz.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 10
+  gitleaks:
+    name: Secret scan (gitleaks v8.30.1) + output cross-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Install gitleaks and trufflehog (checksum-verified)
+        uses: ./.github/actions/install-scanners
+      - name: Scan the repository and its history (report only; test fixtures hold fake secrets)
+        run: |
+          gitleaks git . --no-banner --redact --exit-code 0 --report-format json --report-path gitleaks-repo.json
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, collections
+          f = json.load(open("gitleaks-repo.json")) or []
+          print("## gitleaks v8.30.1 (repo + history)")
+          print(f"- **Findings:** {len(f)}")
+          for rule, n in collections.Counter(x["RuleID"] for x in f).most_common(10):
+              print(f"  - `{rule}`: {n}")
+          for x in f[:20]:
+              print(f"  - `{x['File']}:{x['StartLine']}` ({x['RuleID']})")
+          PY
+      - name: Cross-check - gitleaks and trufflehog must find nothing in NullWire's own scan report
+        run: |
+          go build -o nullwire-mcp .
+          .github/scripts/scanner-crosscheck.sh "$PWD/nullwire-mcp"
+      - name: Save the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: gitleaks-report
+          path: gitleaks-repo.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 11
+  trufflehog:
+    name: Secret scan (trufflehog v3.99.9, no network verification)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Install gitleaks and trufflehog (checksum-verified)
+        uses: ./.github/actions/install-scanners
+      - name: Scan the repository and its history (report only)
+        run: |
+          trufflehog git "file://$PWD" --no-verification --no-update --json > trufflehog-repo.jsonl 2> trufflehog.err || true
+          {
+            echo "## trufflehog v3.99.9 (repo + history, unverified)"
+            echo "- **Findings:** $(grep -c '"SourceMetadata"' trufflehog-repo.jsonl || true)"
+            echo '```text'
+            python3 -c '
+          import json, collections
+          c = collections.Counter()
+          for l in open("trufflehog-repo.jsonl"):
+              try: c[json.loads(l)["DetectorName"]] += 1
+              except Exception: pass
+          for k, v in c.most_common(10): print(k, v)
+          '
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: trufflehog-report
+          path: trufflehog-repo.jsonl
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 12
+  websocat:
+    name: WebSocket redaction end-to-end (websocat v1.14.2 built from a verified source zip)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      WEBSOCAT_VERSION: "1.14.2"
+      WEBSOCAT_ZIP_SHA256: 84ef6f855cc95fde332b554cb240925b5276ea474c3229daff3376516559c43e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Build websocat from the checksum-verified source zip
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o websocat.zip "https://github.com/vi/websocat/archive/refs/tags/v${WEBSOCAT_VERSION}.zip"
+          echo "${WEBSOCAT_ZIP_SHA256}  websocat.zip" | sha256sum -c -
+          unzip -q websocat.zip && cd "websocat-${WEBSOCAT_VERSION}"
+          cargo build --release
+          install -m 0755 target/release/websocat "$RUNNER_TEMP/websocat"
+          mkdir -p "$RUNNER_TEMP/wsbin" && mv "$RUNNER_TEMP/websocat" "$RUNNER_TEMP/wsbin/"
+          echo "$RUNNER_TEMP/wsbin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/wsbin/websocat" --version
+      - name: Build NullWire and start a WebSocket echo upstream
+        run: |
+          go build -o nullwire-mcp .
+          pip install --quiet websockets==15.0.1
+          cat > echo.py <<'PY'
+          import asyncio, websockets
+          async def echo(ws):
+              async for msg in ws:
+                  await ws.send(msg)
+          async def main():
+              async with websockets.serve(echo, "127.0.0.1", 18081, max_size=None, compression=None):
+                  await asyncio.Future()
+          asyncio.run(main())
+          PY
+          python3 echo.py > echo.log 2>&1 &
+          for i in $(seq 1 20); do (echo > /dev/tcp/127.0.0.1/18081) 2>/dev/null && break; sleep 0.5; done
+      - name: A secret must reach the upstream intact and stay out of the captured copy
+        run: python3 .github/scripts/ws-redaction-check.py "$PWD/nullwire-mcp" 18080 http://127.0.0.1:18081
