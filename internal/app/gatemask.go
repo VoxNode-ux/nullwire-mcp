@@ -21,12 +21,13 @@ type maskGroup struct {
 
 // maskGate is an Aho-Corasick automaton like vendors.Gate, but each state
 // carries a bitmask of the groups whose literals end there (or at a suffix of
-// the state). Match reads the text once, folds ASCII case as it goes, and
-// returns the union of the bits. It allocates nothing.
+// the state). Match reads the text once and returns the union of the bits.
+// ASCII case is folded into the class table at build time, so Match has no
+// per-byte case branch. It allocates nothing.
 type maskGate struct {
 	class [256]uint8
 	width int
-	next  []int32  // next[state*width+class]
+	next  []uint16 // next[state*width+class]; state ids fit in 16 bits (checked at build)
 	out   []uint32 // bits of every literal that ends at this state
 	all   uint32   // union of all bits, used to stop early
 }
@@ -53,8 +54,11 @@ func newMaskGate(groups ...maskGroup) *maskGate {
 			n++
 		}
 	}
+	for c := byte('A'); c <= 'Z'; c++ {
+		g.class[c] = g.class[c+'a'-'A'] // fold case here so Match need not
+	}
 	g.width = n
-	g.next = make([]int32, n)
+	next := make([]int32, n) // built wide, narrowed to uint16 at the end
 	g.out = []uint32{0}
 
 	for _, grp := range groups {
@@ -66,12 +70,12 @@ func newMaskGate(groups ...maskGroup) *maskGate {
 			s := 0
 			for i := 0; i < len(lit); i++ {
 				c := int(g.class[lit[i]])
-				t := g.next[s*n+c]
+				t := next[s*n+c]
 				if t == 0 {
 					t = int32(len(g.out)) // #nosec G115 -- the automaton has a few hundred states
 					g.out = append(g.out, 0)
-					g.next = append(g.next, make([]int32, n)...)
-					g.next[s*n+c] = t
+					next = append(next, make([]int32, n)...)
+					next[s*n+c] = t
 				}
 				s = int(t)
 			}
@@ -84,7 +88,7 @@ func newMaskGate(groups ...maskGroup) *maskGate {
 	fail := make([]int32, len(g.out))
 	queue := make([]int32, 0, len(g.out))
 	for c := 1; c < n; c++ {
-		if t := g.next[c]; t != 0 {
+		if t := next[c]; t != 0 {
 			queue = append(queue, t)
 		}
 	}
@@ -93,33 +97,37 @@ func newMaskGate(groups ...maskGroup) *maskGate {
 		queue = queue[1:]
 		g.out[s] |= g.out[fail[s]]
 		for c := 0; c < n; c++ {
-			t := g.next[s*n+c]
-			f := g.next[int(fail[s])*n+c]
+			t := next[s*n+c]
+			f := next[int(fail[s])*n+c]
 			if t != 0 {
 				fail[t] = f
 				queue = append(queue, t)
 			} else {
-				g.next[s*n+c] = f
+				next[s*n+c] = f
 			}
 		}
+	}
+	if len(g.out) > 1<<16-1 {
+		panic("maskGate: automaton exceeds 65535 states") // static literals; a test catches this
+	}
+	g.next = make([]uint16, len(next))
+	for i, t := range next {
+		g.next[i] = uint16(t) // #nosec G115 -- len(g.out) <= 65535 checked above
 	}
 	return g
 }
 
 // Match returns the union of the bits of every literal found in text.
 func (g *maskGate) Match(text string) uint32 {
+	next, out, class, all, n := g.next, g.out, &g.class, g.all, g.width
 	var m uint32
 	s := 0
-	n := g.width
 	for i := 0; i < len(text); i++ {
-		c := text[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		s = int(g.next[s*n+int(g.class[c])])
-		m |= g.out[s]
-		if m == g.all {
-			return m
+		s = int(next[s*n+int(class[text[i]])])
+		if o := out[s]; o != 0 {
+			if m |= o; m == all {
+				return m
+			}
 		}
 	}
 	return m
@@ -174,22 +182,55 @@ func hasPANChain(in string) bool {
 	if len(in) < 13 {
 		return false
 	}
-	chain := 0
-	prevDigit := false
-	for i := 0; i < len(in); i++ {
-		c := in[i]
-		if c >= '0' && c <= '9' {
-			if chain++; chain >= 13 {
-				return true
+	// Any chain of 13 digits spans at least 13 bytes, so it covers a byte at
+	// every residue mod 12, and it starts and ends on a digit with only
+	// single separators inside: if the byte at k is a separator, k+1 is a
+	// digit of the chain. Probing k and k+1 every 12 bytes therefore cannot
+	// miss one. A probe hit is expanded both ways, and the scan resumes after
+	// the span, so no byte is read twice.
+	lo := 0 // bytes below lo are already accounted for
+	for k := 0; k+1 < len(in); {
+		var s int
+		switch {
+		case in[k]-'0' <= 9:
+			s = k
+		case in[k+1]-'0' <= 9:
+			s = k + 1
+		default:
+			k += 12
+			continue
+		}
+		chain := 1
+		for i := s; ; {
+			if i-1 >= lo && in[i-1]-'0' <= 9 {
+				chain++
+				i--
+			} else if i-2 >= lo && (in[i-1] == ' ' || in[i-1] == '-') && in[i-2]-'0' <= 9 {
+				chain++
+				i -= 2
+			} else {
+				break
 			}
-			prevDigit = true
-			continue
 		}
-		if (c == ' ' || c == '-') && prevDigit {
-			prevDigit = false // the chain survives one separator
-			continue
+		if chain >= 13 {
+			return true
 		}
-		chain, prevDigit = 0, false
+		j := s + 1
+		for prevDigit := true; j < len(in); j++ {
+			c := in[j]
+			if c-'0' <= 9 {
+				if chain++; chain >= 13 {
+					return true
+				}
+				prevDigit = true
+			} else if (c == ' ' || c == '-') && prevDigit {
+				prevDigit = false
+			} else {
+				break
+			}
+		}
+		lo = j + 1
+		k = lo
 	}
 	return false
 }

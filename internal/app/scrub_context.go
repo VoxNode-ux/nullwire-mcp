@@ -459,10 +459,16 @@ func hasBase64Run(in string) bool {
 // maybeIPv4 reports whether in has a digit, a dot and a digit in a row, which
 // every IPv4 address does, so the IPv4 pass can be skipped otherwise.
 func maybeIPv4(in string) bool {
-	for i := 1; i+1 < len(in); i++ {
-		if in[i] == '.' && in[i-1] >= '0' && in[i-1] <= '9' && in[i+1] >= '0' && in[i+1] <= '9' {
+	for pos := 0; pos < len(in); {
+		idx := strings.IndexByte(in[pos:], '.') // vectorised on amd64/arm64
+		if idx < 0 {
+			return false
+		}
+		idx += pos
+		if idx > 0 && idx+1 < len(in) && in[idx-1]-'0' <= 9 && in[idx+1]-'0' <= 9 {
 			return true
 		}
+		pos = idx + 1
 	}
 	return false
 }
