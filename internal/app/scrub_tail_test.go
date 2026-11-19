@@ -43,7 +43,7 @@ func checkTail(t *testing.T, s *Scrubber, in string) {
 	}
 }
 
-func clip(s string) string {
+func clipTail(s string) string {
 	if len(s) > 120 {
 		return s[:60] + "..." + s[len(s)-60:]
 	}
