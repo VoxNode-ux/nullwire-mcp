@@ -225,12 +225,27 @@ func (p *egressPolicy) checkIP(a netip.Addr) error {
 //     (fe80::/10) are opt-in (block_cgnat_upstream, block_link_local_upstream),
 //     so tailnets and local networks work out of the box. Note that Alibaba
 //     Cloud's metadata address (100.100.100.200) sits inside the CGNAT range.
-var (
-	metadataV4  = netip.MustParsePrefix("169.254.0.0/16")
-	metadataV6  = netip.MustParseAddr("fd00:ec2::254")
-	cgnatNet    = netip.MustParsePrefix("100.64.0.0/10")
-	linkLocalV6 = netip.MustParsePrefix("fe80::/10")
-)
+//
+// The IPv4 metadata block, CGNAT and IPv6 link-local are tested with the RFC
+// address-class predicates below (no CIDR strings). Only the AWS IPv6 metadata
+// endpoint is a single fixed address, so it stays a readable literal.
+var metadataV6 = netip.MustParseAddr("fd00:ec2::254")
+
+// isLinkLocalV4 reports RFC 3927 IPv4 link-local, 169.254.0.0/16 (cloud
+// metadata lives here). a must already be unmapped.
+func isLinkLocalV4(a netip.Addr) bool { return a.Is4() && a.IsLinkLocalUnicast() }
+
+// isLinkLocalV6 reports RFC 4291 IPv6 link-local, fe80::/10.
+func isLinkLocalV6(a netip.Addr) bool { return a.Is6() && a.IsLinkLocalUnicast() }
+
+// isCGNAT reports RFC 6598 Shared Address Space, 100.64.0.0/10.
+func isCGNAT(a netip.Addr) bool {
+	if !a.Is4() {
+		return false
+	}
+	b := a.As4()
+	return b[0] == 100 && b[1]&0xc0 == 64
+}
 
 // upstreamBlocks selects the built-in blocks above.
 type upstreamBlocks struct {
@@ -243,11 +258,11 @@ type upstreamBlocks struct {
 func (b upstreamBlocks) check(a netip.Addr) error {
 	a = a.Unmap().WithZone("")
 	switch {
-	case !b.allowMetadata && (metadataV4.Contains(a) || a == metadataV6):
+	case !b.allowMetadata && (isLinkLocalV4(a) || a == metadataV6):
 		return fmt.Errorf("upstream address %s is a cloud metadata address (allow_metadata_upstream in -secrets-config turns this off): %w", a, errEgressDenied)
-	case b.blockCGNAT && cgnatNet.Contains(a):
+	case b.blockCGNAT && isCGNAT(a):
 		return fmt.Errorf("upstream address %s is in the CGNAT range 100.64.0.0/10 (block_cgnat_upstream): %w", a, errEgressDenied)
-	case b.blockLinkV6 && linkLocalV6.Contains(a):
+	case b.blockLinkV6 && isLinkLocalV6(a):
 		return fmt.Errorf("upstream address %s is IPv6 link-local fe80::/10 (block_link_local_upstream): %w", a, errEgressDenied)
 	}
 	return nil
