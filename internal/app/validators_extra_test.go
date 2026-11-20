@@ -48,11 +48,11 @@ func TestDerKeyParsesRejects(t *testing.T) {
 	pkcs8, _, _ := valExtraKeys(t)
 	notKey := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("not a private key ", 8)))
 	cases := map[string]string{
-		"empty":       "",
-		"short":       "MIIBVQIBADANBgkqhkiG9w0B", // under 64 chars
-		"too long":    strings.Repeat("A", 16<<10+1),
-		"bad base64":  strings.Repeat("!", 80),
-		"truncated":   pkcs8[:len(pkcs8)/2],
+		"empty":                   "",
+		"short":                   "MIIBVQIBADANBgkqhkiG9w0B", // under 64 chars
+		"too long":                strings.Repeat("A", 16<<10+1),
+		"bad base64":              strings.Repeat("!", 80),
+		"truncated":               pkcs8[:len(pkcs8)/2],
 		"valid b64 but not a key": notKey,
 	}
 	for name, in := range cases {
@@ -63,9 +63,9 @@ func TestDerKeyParsesRejects(t *testing.T) {
 }
 
 func TestGithubPATShape(t *testing.T) {
-	first := strings.Repeat("aB3", 7) + "z"  // 22 chars
-	second := strings.Repeat("Zy9", 19) + "q" // 58 chars
-	second += "r"                               // 59 chars
+	// 22 and 59 characters.
+	first := strings.Repeat("aB3", 7) + "z"
+	second := strings.Repeat("Zy9", 19) + "qr"
 	good := "github_pat_" + first + "_" + second
 	if len(first) != 22 || len(second) != 59 {
 		t.Fatalf("test setup: %d/%d", len(first), len(second))
