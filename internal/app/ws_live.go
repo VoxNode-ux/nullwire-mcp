@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"runtime"
 	"time"
 )
 
@@ -15,11 +16,24 @@ func wsLiveNote(upgrade string, up, down *wsCollector) string {
 		upgrade, wsLiveEvery.Milliseconds(), up.Summary(), down.Summary())
 }
 
+// logPanic reports a panic that a live-capture goroutine recovered from, so it
+// is not lost silently. Capture never alters the forwarded bytes, so the tunnel
+// carries on. Only a runtime error's message or the panic value's type is
+// written, never an arbitrary value that might hold captured text.
+func (a *App) logPanic(where string, r any) {
+	detail := fmt.Sprintf("%T", r)
+	if re, ok := r.(runtime.Error); ok {
+		detail = re.Error()
+	}
+	fmt.Fprintf(a.errW(), "nullwire-mcp: recovered panic in %s: %s\n", where, detail)
+}
+
 // pushLive stores the first entry of a WebSocket flow when the socket opens and
 // returns its ID. ok is false when the flow is ignored or could not be built.
 func (a *App) pushLive(f rawFlow) (id uint64, ok bool) {
 	defer func() {
-		if recover() != nil {
+		if r := recover(); r != nil {
+			a.logPanic("pushLive", r)
 			id, ok = 0, false
 		}
 	}()
@@ -47,7 +61,11 @@ func (a *App) goFinishLive(id uint64, f rawFlow) {
 // entry in place; when that entry has been pushed out of the buffer meanwhile,
 // the final capture is pushed as a new entry, as it was before live capture.
 func (a *App) finishLive(id uint64, f rawFlow) {
-	defer func() { _ = recover() }()
+	defer func() {
+		if r := recover(); r != nil {
+			a.logPanic("finishLive", r)
+		}
+	}()
 	defer f.wipe()
 	e, ok := a.buildEntry(f)
 	if !ok {
@@ -69,7 +87,11 @@ func (a *App) finishLive(id uint64, f rawFlow) {
 // scrubbing to about a tenth of one CPU core however fast messages arrive.
 func (a *App) wsLiveLoop(id uint64, base rawFlow, upgrade string, up, down *wsCollector, stop <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
-	defer func() { _ = recover() }()
+	defer func() {
+		if r := recover(); r != nil {
+			a.logPanic("wsLiveLoop", r)
+		}
+	}()
 	pause := wsLiveEvery
 	sc := a.scrub.detached() // refreshes do not raise the global counters; finishLive does
 	var seen uint64

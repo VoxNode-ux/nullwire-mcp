@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -208,9 +209,11 @@ func TestTapRWC(t *testing.T) {
 	if n, err := tap.Read(buf); n != 0 || err != io.EOF {
 		t.Errorf("Read = %d, %v", n, err)
 	}
-	_ = tap.CloseWrite()
-	if !pr.closed {
-		t.Error("CloseWrite must fall back to Close")
+	if err := tap.CloseWrite(); !errors.Is(err, errNoHalfClose) {
+		t.Errorf("CloseWrite without support = %v, want errNoHalfClose", err)
+	}
+	if pr.closed {
+		t.Error("CloseWrite must not close the connection when half-close is unsupported")
 	}
 	cw2 := &closeWriterRWC{}
 	tap = &tapRWC{rwc: cw2} // no onRead

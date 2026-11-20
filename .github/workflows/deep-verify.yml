@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.27.2"
+  GO_VERSION: "1.27.4"
 
 jobs:
   # ------------------------------------------------------------------ 1
@@ -96,7 +96,7 @@ jobs:
         run: |
           # go.uber.org/goleak v1.3.0 = 31095c657c34bba405a8d480db27989aa5f60b9c
           go get go.uber.org/goleak@v1.3.0
-          for pkg in internal/app internal/scan internal/protect internal/install internal/vendors; do
+          for pkg in internal/app internal/scan internal/protect internal/install internal/vendors internal/cliio; do
             if grep -rqs 'func TestMain' "$pkg"; then
               echo "skip $pkg: it already has a TestMain"
               continue
@@ -626,7 +626,7 @@ jobs:
       - name: Cross-check - gitleaks and trufflehog must find nothing in NullWire's own scan report
         run: |
           go build -o nullwire-mcp .
-          .github/scripts/scanner-crosscheck.sh "$PWD/nullwire-mcp"
+          bash .github/scripts/scanner-crosscheck.sh "$PWD/nullwire-mcp"
       - name: Save the report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -681,12 +681,12 @@ jobs:
 
   # ------------------------------------------------------------------ 12
   websocat:
-    name: WebSocket redaction end-to-end (websocat v1.14.2 built from a verified source zip)
+    name: WebSocket redaction end-to-end (websocat v1.14.2 release binary, checksum-verified)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       WEBSOCAT_VERSION: "1.14.2"
-      WEBSOCAT_ZIP_SHA256: 84ef6f855cc95fde332b554cb240925b5276ea474c3229daff3376516559c43e
+      WEBSOCAT_BIN_SHA256: cd26f92cb507f620e2d54fe6e126f4dc191f3eee90f2b53bccf07eac0645ec84
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -696,18 +696,15 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
           cache: false
-      - name: Build websocat from the checksum-verified source zip
+      - name: Install websocat from the immutable release binary (checksum-verified)
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP"
-          curl -fsSL -o websocat.zip "https://github.com/vi/websocat/archive/refs/tags/v${WEBSOCAT_VERSION}.zip"
-          echo "${WEBSOCAT_ZIP_SHA256}  websocat.zip" | sha256sum -c -
-          unzip -q websocat.zip && cd "websocat-${WEBSOCAT_VERSION}"
-          cargo build --release
-          install -m 0755 target/release/websocat "$RUNNER_TEMP/websocat"
-          mkdir -p "$RUNNER_TEMP/wsbin" && mv "$RUNNER_TEMP/websocat" "$RUNNER_TEMP/wsbin/"
+          mkdir -p "$RUNNER_TEMP/wsbin" && cd "$RUNNER_TEMP/wsbin"
+          curl -fsSL -o websocat "https://github.com/vi/websocat/releases/download/v${WEBSOCAT_VERSION}/websocat.x86_64-unknown-linux-musl"
+          echo "${WEBSOCAT_BIN_SHA256}  websocat" | sha256sum -c -
+          chmod 0755 websocat
           echo "$RUNNER_TEMP/wsbin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/wsbin/websocat" --version
+          ./websocat --version
       - name: Build NullWire and start a WebSocket echo upstream
         run: |
           go build -o nullwire-mcp .

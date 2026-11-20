@@ -2228,10 +2228,28 @@ func isUpgradeRequest(h http.Header) bool {
 	return false
 }
 
+// halfCloseDrain is how long the other direction may keep draining after one
+// side half-closed or stopped being writable, so a peer's final frame (for
+// WebSocket, the Close frame) still reaches its destination. It is a variable
+// so tests can shorten it.
+var halfCloseDrain = 5 * time.Second
+
 func splice(client, upstream io.ReadWriteCloser, idle time.Duration, pre []byte) (toUpstream, toClient int64) {
 	var sent, recv, last atomic.Int64
 	last.Store(time.Now().UnixNano())
 	closeBoth := func() { _ = client.Close(); _ = upstream.Close() }
+	var drainOnce sync.Once
+	var drainTimer *time.Timer
+	var drainMu sync.Mutex
+	// armDrain lets the reverse direction finish, but never for longer than
+	// halfCloseDrain, so a silent half-close cannot hang the tunnel.
+	armDrain := func() {
+		drainOnce.Do(func() {
+			drainMu.Lock()
+			drainTimer = time.AfterFunc(halfCloseDrain, closeBoth)
+			drainMu.Unlock()
+		})
+	}
 	if len(pre) > 0 {
 		n, err := upstream.Write(pre)
 		sent.Add(int64(n))
@@ -2251,16 +2269,20 @@ func splice(client, upstream io.ReadWriteCloser, idle time.Duration, pre []byte)
 				w, werr := dst.Write(buf[:n])
 				ctr.Add(int64(w))
 				if werr != nil {
-					closeBoth()
+					// dst is gone (e.g. EPIPE after a protocol-error close):
+					// stop this direction but let the reverse one deliver
+					// whatever the peer already sent, such as a Close frame.
+					armDrain()
 					return
 				}
 			}
 			if err != nil {
 				if err == io.EOF {
-					if cw, ok := dst.(closeWriter); ok {
-						_ = cw.CloseWrite()
-					} else {
-						_ = dst.Close()
+					cw, ok := dst.(closeWriter)
+					if !ok || cw.CloseWrite() != nil {
+						// No real half-close: keep dst open so the reverse
+						// direction can drain, bounded by the drain timer.
+						armDrain()
 					}
 				} else {
 					closeBoth()
@@ -2296,6 +2318,11 @@ func splice(client, upstream io.ReadWriteCloser, idle time.Duration, pre []byte)
 	go pump(client, upstream, &recv)
 	wg.Wait()
 	close(stop)
+	drainMu.Lock()
+	if drainTimer != nil {
+		drainTimer.Stop()
+	}
+	drainMu.Unlock()
 	closeBoth()
 	return sent.Load(), recv.Load()
 }
@@ -3199,7 +3226,11 @@ func (a *App) dispatchTo(req rpcRequest) *rpcResponse {
 		var p struct {
 			ProtocolVersion string `json:"protocolVersion"`
 		}
-		_ = json.Unmarshal(req.Params, &p)
+		if !isEmptyArgs(req.Params) {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return &rpcResponse{ID: id, Error: &rpcError{Code: -32602, Message: "invalid params"}}
+			}
+		}
 		version := p.ProtocolVersion
 		if version == "" {
 			version = "2025-11-25"

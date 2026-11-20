@@ -1860,8 +1860,12 @@ func TestSplicePreWriteFailureClosesBoth(t *testing.T) {
 	_ = c2.Close()
 }
 
-// net.Pipe ends have no CloseWrite, so end-of-input must close the destination.
+// net.Pipe ends have no CloseWrite, so after end-of-input the destination is
+// kept open only for the bounded drain window, then closed.
 func TestSpliceClosesDestinationWithoutCloseWrite(t *testing.T) {
+	old := halfCloseDrain
+	halfCloseDrain = 100 * time.Millisecond
+	t.Cleanup(func() { halfCloseDrain = old })
 	c1, c2 := net.Pipe()
 	u1, u2 := net.Pipe()
 	done := make(chan int64, 1)

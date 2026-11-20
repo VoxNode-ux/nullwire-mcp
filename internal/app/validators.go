@@ -176,7 +176,9 @@ func dsnMatchIsTemplate(m string) bool {
 func validatedSecret(s string) bool {
 	switch {
 	case strings.HasPrefix(s, "gh"):
-		return githubClassicCRC(s) || githubPATShape(s)
+		return githubClassicCRC(s)
+	case strings.HasPrefix(s, "github_pat_"):
+		return githubPATShape(s)
 	case strings.HasPrefix(s, "eyJ"):
 		return jwtJOSEValid(s)
 	case strings.HasPrefix(s, "AKIA"), strings.HasPrefix(s, "ASIA"):
