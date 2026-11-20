@@ -1,6 +1,7 @@
 package app
 
 import (
+	"math"
 	"net/http"
 	"reflect"
 	"strings"
@@ -573,5 +574,142 @@ func TestRcovUnwrapExtraSpansSkipGuards(t *testing.T) {
 	out, n := s.scrubUnwrapped(in, ContextBody)
 	if n < 1 || strings.Contains(out, "Sup3rS3cretValue") || !strings.Contains(out, "xxxxxxxxxxxx") {
 		t.Errorf("mixed array: %q (%d)", out, n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// coverage: scrubUnwrapped and scrubHexSecrets branches
+// ---------------------------------------------------------------------------
+
+func TestIdx32Clamps(t *testing.T) {
+	big := int(math.MaxInt32)
+	big++ // wraps negative on a 32-bit int, which is also out of range
+	for _, c := range []struct {
+		in   int
+		want int32
+	}{
+		{0, 0},
+		{12345, 12345},
+		{math.MaxInt32, math.MaxInt32},
+		{-1, math.MaxInt32},
+		{big, math.MaxInt32},
+	} {
+		if got := idx32(c.in); got != c.want {
+			t.Errorf("idx32(%d) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+// Secret shapes that only the decoded copy can see: a JWT, a PEM block and a
+// URL password with a decoded "@". Each is replaced in the ORIGINAL text and
+// the text around it is kept as written.
+func TestUnwrapFindsEncodedJWTPEMAndUserInfo(t *testing.T) {
+	s := newCtxScrubber(t)
+	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+	for _, c := range []struct {
+		name, in, gone, prefix, suffix, tag string
+	}{
+		{"JWT", "t%3D" + jwt + "%26ok", "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV", "t%3D", "%26ok", ""},
+		{"PEM block", "k%3D-----BEGIN PRIVATE KEY-----%0AMIIEvQIBADANBgkq%0A-----END PRIVATE KEY-----%0Aok", "MIIEvQIBADANBgkq", "k%3D", "%0Aok", "[REDACTED_KEY#"},
+		{"URL password with a decoded @", "https://user:p%40ssW0rd%21x@host.example/x", "ssW0rd", "https://user:", "@host.example/x", ""},
+	} {
+		out, n := s.scrubUnwrapped(c.in, ContextBody)
+		if n < 1 || strings.Contains(out, c.gone) || !strings.HasPrefix(out, c.prefix) || !strings.HasSuffix(out, c.suffix) || !strings.Contains(out, "[REDACTED_") {
+			t.Errorf("%s: %q (%d)", c.name, out, n)
+		}
+		if c.tag != "" && !strings.Contains(out, c.tag) {
+			t.Errorf("%s: want a %s tag: %q", c.name, c.tag, out)
+		}
+	}
+	// A password that is only a template word is left alone.
+	if out, n := s.scrubUnwrapped("https://user:%DB_PASSWORD%@host/x", ContextBody); out != "https://user:%DB_PASSWORD%@host/x" || n != 0 {
+		t.Errorf("template password: %q (%d)", out, n)
+	}
+}
+
+// Presets run on the decoded copy too.
+func TestUnwrapAppliesPresets(t *testing.T) {
+	s := presetScrubber(t, "hipaa")
+	out, n := s.scrubUnwrapped("ssn%3A 123-45-6789 ok", ContextBody)
+	if n < 1 || strings.Contains(out, "123-45-6789") || !strings.HasPrefix(out, "ssn%3A ") || !strings.HasSuffix(out, " ok") {
+		t.Errorf("preset span not applied: %q (%d)", out, n)
+	}
+}
+
+// Spans found by different rules are put in text order, and one that sits
+// inside another is dropped instead of being tagged twice.
+func TestUnwrapOrdersAndMergesSpans(t *testing.T) {
+	s := newCtxScrubber(t)
+
+	// The vendor rule runs before the card rule, so the later secret is found
+	// first and the spans must be re-ordered.
+	in := "card%3D4111%2D1111%2D1111%2D1111 and ref%3D%73k_live_" + ctxTestBody
+	out, n := s.scrubUnwrapped(in, ContextBody)
+	if n != 2 || strings.Contains(out, "4111") || strings.Contains(out, ctxTestBody[8:]) {
+		t.Errorf("two secrets: %q (%d)", out, n)
+	}
+	if !strings.HasPrefix(out, "card%3D") || !strings.Contains(out, " and ref%3D") {
+		t.Errorf("text between the secrets changed: %q", out)
+	}
+
+	// A vendor key under a secret-named field is found by two rules; only one
+	// tag is written.
+	in = "password%3D%73k_live_" + ctxTestBody
+	out, n = s.scrubUnwrapped(in, ContextBody)
+	if n < 1 || strings.Contains(out, ctxTestBody[8:]) || strings.Count(out, "[REDACTED_") != n {
+		t.Errorf("overlapping spans: %q (%d)", out, n)
+	}
+}
+
+// Whole-run hex secrets: only exactly 32, 40 or 64 digits, on word boundaries.
+func TestScrubHexSecretsBoundaries(t *testing.T) {
+	s := newCtxScrubber(t)
+	h32 := strings.Repeat("abcdefab", 4)
+	h64 := strings.Repeat("0123456789abcdef", 4)
+
+	// Too short, glued to a word character on either side, 33 and 35 digits,
+	// a 40-digit run followed by a letter, all-equal digits (no randomness),
+	// and a value whose key names an identifier.
+	for _, in := range []string{
+		"",
+		strings.Repeat("a", 31),
+		"x" + h32,
+		h32 + "z",
+		h32 + "0",
+		strings.Repeat("abcde", 7),
+		"id " + strings.Repeat("ab", 20) + "g",
+		strings.Repeat("a", 32),
+		"build_hash=" + h32,
+		"commit_sha: " + strings.Repeat("ab12", 10),
+	} {
+		if out, n := s.scrubHexSecrets(in); out != in || n != 0 {
+			t.Errorf("scrubHexSecrets(%q) = %q (%d), want it unchanged", in, out, n)
+		}
+	}
+
+	out, n := s.scrubHexSecrets("a=" + h32 + "&b=" + h64 + "&c=1")
+	if n != 2 || strings.Contains(out, h32) || strings.Contains(out, h64) || !strings.HasPrefix(out, "a=") || !strings.HasSuffix(out, "&c=1") {
+		t.Errorf("two runs: %q (%d)", out, n)
+	}
+	// The tag is the same for the same digits, wherever they are.
+	o1, _ := s.scrubHexSecrets("a=" + h32)
+	o2, _ := s.scrubHexSecrets("zz=" + h32 + "!")
+	if tagOf := func(x string) string { return reTag.FindString(x) }; tagOf(o1) == "" || tagOf(o1) != tagOf(o2) {
+		t.Errorf("tags differ: %q vs %q", o1, o2)
+	}
+}
+
+// The URL helper picks the context by where "?" or "#" is.
+func TestScrubURLSplitsAtQueryOrFragment(t *testing.T) {
+	s := newCtxScrubber(t)
+	h := strings.Repeat("abcdefab", 4)
+	for _, in := range []string{"https://h.example/p?sig=" + h, "https://h.example/p#sig=" + h} {
+		if out, n := s.ScrubURL(in); n < 1 || strings.Contains(out, h) || !strings.HasPrefix(out, "https://h.example/p") {
+			t.Errorf("ScrubURL(%q) = %q (%d)", in, out, n)
+		}
+	}
+	body, path := scrubOpts{ctx: ContextBody}, scrubOpts{ctx: ContextPath}
+	if body.entropyMax() >= path.entropyMax() || body.strictMax() >= path.strictMax() {
+		t.Error("the wide contexts must have wider limits than the body")
 	}
 }
