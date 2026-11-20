@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/VoxNode-ux/nullwire-mcp/internal/cliio"
 )
 
 // Zip Bomb Shield limits. They are checked against the size an entry declares
@@ -31,7 +33,7 @@ func ScanZipFile(s Scrubber, path string, report *strings.Builder) (ok bool, hit
 		fmt.Fprintf(report, "✗ %s: archive larger than %d MiB (Zip Bomb Shield)\n", path, zipMaxArchive>>20)
 		return false, 0, 0
 	}
-	raw, err := os.ReadFile(path) // #nosec G304 -- the path is the archive the user asked us to scan
+	raw, err := cliio.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(report, "✗ %s: %v\n", path, err)
 		return false, 0, 0
