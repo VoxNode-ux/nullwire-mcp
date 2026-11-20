@@ -261,7 +261,7 @@ func fakeClaude(t *testing.T, body string) {
 		t.Skip("shell-script stand-in for the claude command")
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil { // #nosec G306 -- a test stand-in must be executable
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
@@ -478,10 +478,10 @@ func TestWriteFileAtomicErrors(t *testing.T) {
 
 	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
 		ro := filepath.Join(dir, "ro")
-		if err := os.Mkdir(ro, 0o500); err != nil { // #nosec G301 -- read-only on purpose
+		if err := os.Mkdir(ro, 0o500); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = os.Chmod(ro, 0o700) }) // #nosec G302 -- so the temp dir can be removed
+		t.Cleanup(func() { _ = os.Chmod(ro, 0o700) })
 		if _, err := writeFileAtomic(filepath.Join(ro, "x.json"), []byte("y")); err == nil {
 			t.Error("a read-only folder must fail")
 		}
@@ -753,7 +753,7 @@ func rcovLock(t *testing.T, path string, mode os.FileMode) {
 	if err := os.Chmod(path, mode); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o700) }) // #nosec G302 -- so the temp dir can be removed
+	t.Cleanup(func() { _ = os.Chmod(path, 0o700) })
 }
 
 func TestRcovWriteFileAtomicReadOnlyDir(t *testing.T) {
