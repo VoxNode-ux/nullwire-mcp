@@ -1,6 +1,7 @@
 package vendors
 
 import (
+	"math/rand"
 	"strings"
 	"testing"
 )
