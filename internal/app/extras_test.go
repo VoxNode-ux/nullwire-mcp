@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -127,9 +128,7 @@ func b58Encode(b []byte) string {
 	for i := 0; i < len(b) && b[i] == 0; i++ {
 		out = append(out, '1')
 	}
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
+	slices.Reverse(out)
 	return string(out)
 }
 
@@ -258,7 +257,7 @@ func TestWSLiveRefresh(t *testing.T) {
 // 00 00 ff ff tail that the extension removes.
 func deflateMessages(t *testing.T, takeover bool, msgs ...string) [][]byte {
 	t.Helper()
-	var out [][]byte
+	out := make([][]byte, 0, len(msgs))
 	var buf bytes.Buffer
 	w, err := flate.NewWriter(&buf, flate.BestCompression)
 	if err != nil {
@@ -514,12 +513,17 @@ func TestMCPDispatchEdges(t *testing.T) {
 	app := newTestApp(t)
 
 	// initialize echoes the client's protocol version, or falls back.
-	for params, want := range map[string]string{`{"protocolVersion":"2024-11-05"}`: "2024-11-05", ``: "2025-11-25", `not json`: "2025-11-25"} {
+	for params, want := range map[string]string{`{"protocolVersion":"2024-11-05"}`: "2024-11-05", ``: "2025-11-25"} {
 		resp := app.dispatchTo(exRPC{"1", "initialize", params}.req())
 		res, _ := resp.Result.(map[string]any)
 		if resp.Error != nil || res["protocolVersion"] != want {
 			t.Errorf("initialize %q: %+v", params, resp)
 		}
+	}
+
+	// malformed initialize params are a JSON-RPC -32602, not silently ignored.
+	if resp := app.dispatchTo(exRPC{"1", "initialize", `not json`}.req()); resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("initialize with malformed params: %+v", resp)
 	}
 
 	errCases := []struct {

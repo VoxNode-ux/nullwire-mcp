@@ -43,13 +43,14 @@ func TestCapBufferSoak100MiB(t *testing.T) {
 	if sink.n != size {
 		t.Fatalf("forwarded %d bytes, want %d", sink.n, size)
 	}
-	if got := len(cb.Bytes()); got != capN {
-		t.Fatalf("captured %d bytes, want %d", got, capN)
+	got := cb.Bytes()
+	if len(got) != capN {
+		t.Fatalf("captured %d bytes, want %d", len(got), capN)
 	}
 	if !cb.Truncated() {
 		t.Fatal("capture should be marked truncated")
 	}
-	if !bytes.Equal(cb.Bytes()[:4], []byte("aaaa")) {
+	if !bytes.HasPrefix(got, []byte("aaaa")) {
 		t.Fatal("capture content wrong")
 	}
 	if grew := int64(ms1.HeapAlloc) - int64(ms0.HeapAlloc); grew > 4<<20 {
