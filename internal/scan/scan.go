@@ -104,8 +104,9 @@ func scanKV(s Scrubber, key, sep, val string) (shown string, n int, found bool) 
 
 // walkTree calls visit for every regular file under root, skipping the
 // directories in skipDirNames (matched by exact name, never by substring).
-func walkTree(root string, visit func(path string, d fs.DirEntry)) {
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+// Entries that cannot be read are skipped; the error of the walk itself is returned.
+func walkTree(root string, visit func(path string, d fs.DirEntry)) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -203,7 +204,7 @@ func RunTo(out, errw io.Writer, args []string) int {
 			continue
 		}
 		if info.IsDir() {
-			walkTree(p, func(path string, d fs.DirEntry) {
+			if werr := walkTree(p, func(path string, d fs.DirEntry) {
 				name := d.Name()
 				lower := strings.ToLower(name)
 				wanted := isConfigFilename(name) || envFileNames(name) || strings.HasSuffix(lower, ".toml") ||
@@ -215,7 +216,10 @@ func RunTo(out, errw io.Writer, args []string) int {
 				if once(path) {
 					t.record(scanByType(scrub, path, report))
 				}
-			})
+			}); werr != nil {
+				fmt.Fprintf(report, "✗ %s: %v\n", p, werr)
+				t.filesBad++
+			}
 			continue
 		}
 		if once(p) {
@@ -224,7 +228,7 @@ func RunTo(out, errw io.Writer, args []string) int {
 	}
 
 	if *deep != "" {
-		walkTree(*deep, func(path string, d fs.DirEntry) {
+		if werr := walkTree(*deep, func(path string, d fs.DirEntry) {
 			name := d.Name()
 			lower := strings.ToLower(name)
 			switch {
@@ -252,7 +256,10 @@ func RunTo(out, errw io.Writer, args []string) int {
 					t.record(ok, hits, tokens, 0)
 				}
 			}
-		})
+		}); werr != nil {
+			fmt.Fprintf(report, "✗ %s: %v\n", *deep, werr)
+			t.filesBad++
+		}
 	}
 
 	if *history {
