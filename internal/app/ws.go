@@ -194,10 +194,12 @@ func (p *wsParser) consume(b []byte) {
 		return
 	}
 	limit := p.msgLimit()
+	k := p.pos // mask position; p.pos itself advances by len(b) below
 	for i := range b {
 		c := b[i]
 		if p.masked {
-			c ^= p.maskKey[(p.pos+uint64(i))&3] // #nosec G115 -- i is a non-negative index into b
+			c ^= p.maskKey[k&3]
+			k++
 		}
 		if len(p.msg) >= limit {
 			p.msgOver = true

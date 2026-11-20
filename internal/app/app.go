@@ -39,6 +39,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/VoxNode-ux/nullwire-mcp/internal/cliio"
 	"github.com/VoxNode-ux/nullwire-mcp/internal/install"
 	"github.com/VoxNode-ux/nullwire-mcp/internal/protect"
 	"github.com/VoxNode-ux/nullwire-mcp/internal/scan"
@@ -208,6 +209,14 @@ type SecretsConfig struct {
 	AllowedUpstreamHosts []string `json:"allowed_upstream_hosts"`
 	BlockedUpstreamHosts []string `json:"blocked_upstream_hosts"`
 
+	// Built-in upstream address blocks. Cloud metadata (169.254.0.0/16,
+	// fd00:ec2::254) is blocked unless allow_metadata_upstream is true; CGNAT
+	// (100.64.0.0/10) and IPv6 link-local (fe80::/10) are blocked only when
+	// asked for, so Tailscale and local networks work by default.
+	AllowMetadataUpstream  bool `json:"allow_metadata_upstream"`
+	BlockCGNATUpstream     bool `json:"block_cgnat_upstream"`
+	BlockLinkLocalUpstream bool `json:"block_link_local_upstream"`
+
 	// Presets switches on compliance redaction: pci-dss, hipaa, gdpr or all.
 	Presets []string `json:"presets"`
 }
@@ -221,7 +230,7 @@ func loadSecretsConfig(path string) (*SecretsConfig, error) {
 	if path == "" {
 		return &SecretsConfig{}, nil
 	}
-	raw, err := os.ReadFile(path) // #nosec G304 -- the path is the -secrets-config file the user passed
+	raw, err := cliio.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("-secrets-config %s: %v", path, err)
 	}
@@ -2035,30 +2044,34 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nullwire-mcp: "+err.Error(), status)
 		return
 	}
-	var outBody io.Reader = http.NoBody
+	// Body must be a ReadCloser; http.NoBody has to stay as it is, because the
+	// transport recognises it to send a request with no body at all.
+	var outBody io.ReadCloser = http.NoBody
 	hasBody := r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0
 	// No body, no capture buffer: reqCap stays nil, and its methods accept that.
 	var reqCap *capBuffer
+	contentLen := int64(0)
 	if hasBody {
 		reqCap = newCapBuffer(a.limits().reqCap)
 		defer reqCap.release()
-		outBody = io.TeeReader(r.Body, reqCap)
+		outBody = io.NopCloser(io.TeeReader(r.Body, reqCap))
+		contentLen = r.ContentLength
 	}
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, "", outBody) // #nosec G704 -- a proxy forwards the client's own request by design; it listens on loopback only and resolveUpstream picks the destination
-	if err != nil {
-		http.Error(w, "nullwire-mcp: cannot build upstream request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	// The URL was already parsed (and checked) by resolveUpstream. Giving
-	// NewRequest an empty string and setting the URL here skips the
-	// String()-then-Parse round trip; the copy keeps the request's URL its own.
+	// The URL was already parsed (and checked) by resolveUpstream, so the
+	// request is built directly: no NewRequest parse of an empty URL and no
+	// header map that the code below would only replace. The copy keeps the
+	// request's URL its own. Header is set just below; Host is set before the
+	// round trip.
 	outURLCopy := *outURL
-	outReq.URL = &outURLCopy
-	if hasBody {
-		outReq.ContentLength = r.ContentLength
-	} else {
-		outReq.ContentLength = 0
-	}
+	outReq := (&http.Request{
+		Method:        r.Method,
+		URL:           &outURLCopy,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Body:          outBody,
+		ContentLength: contentLen,
+	}).WithContext(r.Context())
 	drop := dropForward
 	if reverse {
 		drop = dropForwardReverse
@@ -2513,7 +2526,7 @@ func addPEMPath(pool *x509.CertPool, path string) (bool, error) {
 		return false, err
 	}
 	if !fi.IsDir() {
-		pem, err := os.ReadFile(path) // #nosec G304 -- the path is a CA file the user configured
+		pem, err := cliio.ReadFile(path)
 		if err != nil {
 			return false, err
 		}
@@ -2528,7 +2541,7 @@ func addPEMPath(pool *x509.CertPool, path string) (bool, error) {
 		if e.IsDir() {
 			continue
 		}
-		pem, err := os.ReadFile(path + "/" + e.Name()) // #nosec G304 -- inside the CA folder the user configured
+		pem, err := cliio.ReadFile(path + "/" + e.Name())
 		if err != nil {
 			continue
 		}
@@ -2599,11 +2612,22 @@ func onTermux() bool {
 	return os.Getenv("TERMUX_VERSION") != "" || strings.Contains(os.Getenv("PREFIX"), "com.termux")
 }
 
+// newDialer builds a dialer that enforces only the user's egress CIDR rules.
 func newDialer(servers []string, egress *egressPolicy) *net.Dialer {
+	return newDialerBlocks(servers, egress, nil)
+}
+
+// newDialerBlocks is newDialer plus the built-in upstream blocks (cloud
+// metadata by default; CGNAT and IPv6 link-local on request). With blocks nil
+// it behaves exactly like newDialer.
+func newDialerBlocks(servers []string, egress *egressPolicy, blocks *upstreamBlocks) *net.Dialer {
 	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	if egress.needsDialControl() {
+	switch {
+	case blocks != nil:
 		// Runs on the resolved address of every connection attempt, so a name
-		// that resolves or rebinds into a blocked CIDR is refused.
+		// that resolves or rebinds into a blocked range is refused.
+		d.Control = upstreamControl(egress, *blocks)
+	case egress.needsDialControl():
 		d.Control = egress.control
 	}
 	if len(servers) > 0 {
@@ -3442,7 +3466,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			return fmt.Errorf("nullwire-mcp: %v", err)
 		}
 	}
-	dialer := newDialer(dnsServers, egress)
+	dialer := newDialerBlocks(dnsServers, egress, &upstreamBlocks{
+		allowMetadata: cfg.AllowMetadataUpstream,
+		blockCGNAT:    cfg.BlockCGNATUpstream,
+		blockLinkV6:   cfg.BlockLinkLocalUpstream,
+	})
 
 	rootCAs, caSource, err := buildRootCAs(*cacert, onTermux())
 	if err != nil {
