@@ -1,6 +1,9 @@
 package vendors
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 // Prefix lists for known secret formats, in three tiers. Matching is
 // case-sensitive. Each prefix must start with a letter or digit, because the
@@ -160,8 +163,81 @@ func NewGate(literals ...[]string) *Gate {
 		g.class[c] = g.class[c+'a'-'A'] // fold case here so Match need not
 	}
 	g.width = n
-	next := make([]int32, n) // built wide, narrowed to uint16 below when it fits
 	g.hit = []bool{false}
+
+	// Every state is a prefix of some literal, so the trie never has more than
+	// 1 + the total literal length. When that fits 16 bits, build the compact
+	// table directly; otherwise build the wide one.
+	maxStates := 1
+	for _, lit := range lits {
+		maxStates += len(lit)
+	}
+	if maxStates <= math.MaxUint16 {
+		g.buildNarrow(lits)
+	} else {
+		g.buildWide(lits)
+	}
+	return g
+}
+
+// buildNarrow builds the transition table with 16-bit state ids. The caller
+// has checked that the automaton cannot have more than 65535 states.
+func (g *Gate) buildNarrow(lits []string) {
+	n := g.width
+	next := make([]uint16, n)
+	nextState := uint16(1) // id of the next state to create; 0 is the root
+
+	// Trie.
+	for _, lit := range lits {
+		s := 0
+		for i := 0; i < len(lit); i++ {
+			c := int(g.class[lit[i]])
+			t := next[s*n+c]
+			if t == 0 {
+				t = nextState
+				nextState++
+				g.hit = append(g.hit, false)
+				next = append(next, make([]uint16, n)...)
+				next[s*n+c] = t
+			}
+			s = int(t)
+		}
+		g.hit[s] = true
+	}
+
+	// Failure links, filled breadth-first, turn the trie into a full DFA.
+	fail := make([]uint16, len(g.hit))
+	queue := make([]uint16, 0, len(g.hit))
+	for c := 0; c < n; c++ {
+		if t := next[c]; t != 0 {
+			queue = append(queue, t)
+		}
+	}
+	for len(queue) > 0 {
+		s := int(queue[0])
+		queue = queue[1:]
+		if g.hit[fail[s]] {
+			g.hit[s] = true
+		}
+		for c := 0; c < n; c++ {
+			t := next[s*n+c]
+			f := next[int(fail[s])*n+c]
+			if t != 0 {
+				fail[t] = f
+				queue = append(queue, t)
+			} else {
+				next[s*n+c] = f
+			}
+		}
+	}
+	g.next = next
+}
+
+// buildWide is buildNarrow with 32-bit state ids, for the rare automaton with
+// more than 65535 states. Match then takes its slower path.
+func (g *Gate) buildWide(lits []string) {
+	n := g.width
+	next := make([]int32, n)
 
 	// Trie.
 	for _, lit := range lits {
@@ -180,7 +256,7 @@ func NewGate(literals ...[]string) *Gate {
 		g.hit[s] = true
 	}
 
-	// Failure links, filled breadth-first, turn the trie into a full DFA.
+	// Failure links.
 	fail := make([]int, len(g.hit))
 	queue := make([]int, 0, len(g.hit))
 	for c := 0; c < n; c++ {
@@ -205,15 +281,7 @@ func NewGate(literals ...[]string) *Gate {
 			}
 		}
 	}
-	if len(g.hit) > 1<<16-1 {
-		g.wide = next // rare: keep the wide table and a slower path
-		return g
-	}
-	g.next = make([]uint16, len(next))
-	for i, t := range next {
-		g.next[i] = uint16(t) // #nosec G115 -- len(g.hit) <= 65535 checked above
-	}
-	return g
+	g.wide = next
 }
 
 // Match reports whether text contains any of the gate's literals, ignoring
