@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -43,6 +44,19 @@ type binJSON struct {
 	out   []byte
 	depth int
 	limit int // most JSON written; the caller's decoded-body limit
+
+	// CBOR heads of major type 7 with a 2- or 4-byte argument leave the raw
+	// bits here, already typed, for cborValue to turn into a float.
+	half   uint16
+	single uint32
+}
+
+// rest returns what is left of the input, moves to its end and reports that
+// the input ended early.
+func (w *binJSON) rest() ([]byte, error) {
+	b := w.in[w.pos:]
+	w.pos = len(w.in)
+	return b, errBinTrunc
 }
 
 // take returns the next n bytes, or what is left of them with errBinTrunc.
@@ -50,23 +64,86 @@ func (w *binJSON) take(n uint64) ([]byte, error) {
 	if w.pos < 0 || w.pos > len(w.in) {
 		return nil, io.ErrUnexpectedEOF
 	}
-	if n > uint64(len(w.in)-w.pos) { // #nosec G115 -- pos is within [0, len(in)], so the difference is non-negative
-		b := w.in[w.pos:]
-		w.pos = len(w.in)
-		return b, errBinTrunc
+	if n > math.MaxInt { // more than any input can hold
+		return w.rest()
 	}
-	nn := int(n) // #nosec G115 -- n <= len(in)-pos, checked above, so it fits an int
+	nn := int(n)
+	if nn > len(w.in)-w.pos {
+		return w.rest()
+	}
 	b := w.in[w.pos : w.pos+nn]
 	w.pos += nn
 	return b, nil
 }
 
-// be reads an n-byte big-endian unsigned integer (n is 1, 2, 4 or 8).
+// fixed is take for a length the caller already knows is small.
+func (w *binJSON) fixed(n int) ([]byte, error) {
+	if w.pos < 0 || w.pos > len(w.in) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	if n < 0 || n > len(w.in)-w.pos {
+		return w.rest()
+	}
+	b := w.in[w.pos : w.pos+n]
+	w.pos += n
+	return b, nil
+}
+
+// readByte, readU16, readU32 and readU64 read one big-endian unsigned integer
+// of exactly that size. They return the type the wire format has, so no
+// caller has to narrow a uint64.
+func (w *binJSON) readByte() (byte, error) {
+	b, err := w.fixed(1)
+	if err != nil {
+		return 0, err
+	}
+	return b[0], nil
+}
+
+func (w *binJSON) readU16() (uint16, error) {
+	b, err := w.fixed(2)
+	if err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint16(b), nil
+}
+
+func (w *binJSON) readU32() (uint32, error) {
+	b, err := w.fixed(4)
+	if err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint32(b), nil
+}
+
+func (w *binJSON) readU64() (uint64, error) {
+	b, err := w.fixed(8)
+	if err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint64(b), nil
+}
+
+// be reads an n-byte big-endian unsigned integer. The wire sizes 1, 2, 4 and 8
+// use the typed readers; any other size is read byte by byte.
 func (w *binJSON) be(n int) (uint64, error) {
+	switch n {
+	case 1:
+		v, err := w.readByte()
+		return uint64(v), err
+	case 2:
+		v, err := w.readU16()
+		return uint64(v), err
+	case 4:
+		v, err := w.readU32()
+		return uint64(v), err
+	case 8:
+		return w.readU64()
+	}
 	if n < 0 {
 		return 0, io.ErrUnexpectedEOF
 	}
-	b, err := w.take(uint64(n)) // #nosec G115 -- n is non-negative, checked above
+	b, err := w.fixed(n)
 	if err != nil {
 		return 0, err
 	}

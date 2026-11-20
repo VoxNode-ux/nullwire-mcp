@@ -12,7 +12,7 @@ import (
 
 // packTri packs a test entry like tools/trigramgen does.
 func packTri(a, b, c byte, score int) uint32 {
-	return (uint32(a)<<14|uint32(b)<<7|uint32(c))<<8 | uint32(score+4) // #nosec G115 -- test scores are within [-4,6]
+	return (uint32(a)<<14|uint32(b)<<7|uint32(c))<<8 | uint32(score+4)
 }
 
 func withTable(t *testing.T, tab []uint32) {
@@ -137,7 +137,7 @@ func TestTrigramHoldoutNotWorseThanBaseline(t *testing.T) {
 		if h.Sum32()%5 != 0 {
 			return nil
 		}
-		data, err := os.ReadFile(path) // #nosec G304 G122 -- test reads repo files under the module root
+		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
@@ -225,7 +225,7 @@ func holdoutSecrets(n int) []string {
 	const b62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 	out := make([]string, 0, n)
 	for i := 0; len(out) < n; i++ {
-		l := 16 + int(next()%49) // #nosec G115 -- value is 0..48
+		l := 16 + int(next()%49)
 		alpha := b62
 		switch i % 4 {
 		case 0:
@@ -238,7 +238,7 @@ func holdoutSecrets(n int) []string {
 			b[j] = alpha[next()%uint64(len(alpha))]
 		}
 		if i%4 == 3 { // base64url: at most two '-' / '_'
-			for k := int(next() % 3); k > 0; k-- { // #nosec G115 -- value is 0..2
+			for k := int(next() % 3); k > 0; k-- {
 				b[next()%uint64(l)] = "-_"[next()%2]
 			}
 		}

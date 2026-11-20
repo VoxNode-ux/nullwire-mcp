@@ -31,17 +31,16 @@ func msgpackToJSON(in []byte, limit int) (out string, complete bool) {
 }
 
 func (w *binJSON) msgpackValue() error {
-	b, err := w.be(1)
+	c, err := w.readByte()
 	if err != nil {
 		return err
 	}
-	c := byte(b) // #nosec G115 -- b is a single wire byte (0-255)
 	switch {
 	case c <= 0x7f: // positive fixint
 		w.out = appendUint(w.out, uint64(c))
 		return nil
 	case c >= 0xe0: // negative fixint
-		w.out = strconv.AppendInt(w.out, int64(int8(c)), 10) // #nosec G115 -- c >= 0xe0: reinterpreting the byte as a two's-complement fixint is the format
+		w.out = strconv.AppendInt(w.out, int64(c)-256, 10) // c is 0xe0..0xff: -32..-1
 		return nil
 	case c <= 0x8f: // fixmap
 		return w.mpMap(uint64(c & 0x0f))
@@ -73,13 +72,13 @@ func (w *binJSON) msgpackValue() error {
 	case 0xd4, 0xd5, 0xd6, 0xd7, 0xd8: // fixext 1, 2, 4, 8, 16
 		return w.mpExt(1 << (c - 0xd4))
 	case 0xca: // float 32
-		v, err := w.be(4)
+		v, err := w.readU32()
 		if err != nil {
 			return err
 		}
-		w.float(float64(math.Float32frombits(uint32(v)))) // #nosec G115 -- v was read as 4 bytes, so it fits uint32
+		w.float(float64(math.Float32frombits(v)))
 	case 0xcb: // float 64
-		v, err := w.be(8)
+		v, err := w.readU64()
 		if err != nil {
 			return err
 		}
@@ -91,13 +90,7 @@ func (w *binJSON) msgpackValue() error {
 		}
 		w.out = appendUint(w.out, v)
 	case 0xd0, 0xd1, 0xd2, 0xd3: // int 8, 16, 32, 64
-		size := 1 << (c - 0xd0)
-		v, err := w.be(size)
-		if err != nil {
-			return err
-		}
-		shift := 64 - 8*size
-		w.out = strconv.AppendInt(w.out, int64(v<<shift)>>shift, 10) // #nosec G115 -- shift left then arithmetic shift right sign-extends a size-byte two's-complement value
+		return w.mpSigned(c)
 	case 0xd9, 0xda, 0xdb: // str 8, 16, 32
 		n, err := w.be(1 << (c - 0xd9))
 		if err != nil {
@@ -125,11 +118,64 @@ func (w *binJSON) msgpackValue() error {
 // mpExt reads the type byte of an extension and skips its n payload bytes.
 // An extension (timestamps included) is only described, never copied.
 func (w *binJSON) mpExt(n uint64) error {
-	t, err := w.be(1)
+	b, err := w.readByte()
 	if err != nil {
 		return err
 	}
-	return w.placeholder("ext("+strconv.Itoa(int(int8(t)))+")", n) // #nosec G115 -- the ext type is a signed byte on the wire
+	t := int(b) // the ext type is a signed byte on the wire
+	if b >= 0x80 {
+		t -= 256
+	}
+	return w.placeholder("ext("+strconv.Itoa(t)+")", n)
+}
+
+// mpSigned writes a MessagePack int 8, 16, 32 or 64 (c is 0xd0..0xd3). Each
+// size is read as the unsigned type it has on the wire and widened; when its
+// top bit is set, 2^bits is subtracted, which is two's complement.
+func (w *binJSON) mpSigned(c byte) error {
+	var v int64
+	switch c {
+	case 0xd0:
+		b, err := w.readByte()
+		if err != nil {
+			return err
+		}
+		v = int64(b)
+		if b >= 1<<7 {
+			v -= 1 << 8
+		}
+	case 0xd1:
+		u, err := w.readU16()
+		if err != nil {
+			return err
+		}
+		v = int64(u)
+		if u >= 1<<15 {
+			v -= 1 << 16
+		}
+	case 0xd2:
+		u, err := w.readU32()
+		if err != nil {
+			return err
+		}
+		v = int64(u)
+		if u >= 1<<31 {
+			v -= 1 << 32
+		}
+	default: // 0xd3: 64 bits, written from the unsigned value (also covers math.MinInt64)
+		u, err := w.readU64()
+		if err != nil {
+			return err
+		}
+		if u < 1<<63 {
+			w.out = appendUint(w.out, u)
+		} else {
+			w.out = appendUint(append(w.out, '-'), ^u+1)
+		}
+		return nil
+	}
+	w.out = strconv.AppendInt(w.out, v, 10)
+	return nil
 }
 
 func (w *binJSON) mpArray(n uint64) error {

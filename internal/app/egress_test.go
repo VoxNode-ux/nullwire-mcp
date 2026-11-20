@@ -210,3 +210,48 @@ func TestDisableTools(t *testing.T) {
 		t.Errorf("no disabled tools should list all %d tools, got %d", len(toolDefinitions()), n)
 	}
 }
+
+func TestUpstreamBlocks(t *testing.T) {
+	cases := []struct {
+		name string
+		b    upstreamBlocks
+		addr string
+		deny bool
+	}{
+		{"metadata v4 default", upstreamBlocks{}, "169.254.169.254:80", true},
+		{"metadata v4 mapped", upstreamBlocks{}, "[::ffff:169.254.169.254]:80", true},
+		{"link-local v4 range", upstreamBlocks{}, "169.254.1.1:80", true},
+		{"aws v6 metadata", upstreamBlocks{}, "[fd00:ec2::254]:80", true},
+		{"metadata allowed", upstreamBlocks{allowMetadata: true}, "169.254.169.254:80", false},
+		{"cgnat default open", upstreamBlocks{}, "100.64.0.1:80", false},
+		{"cgnat opt-in", upstreamBlocks{blockCGNAT: true}, "100.100.100.200:80", true},
+		{"cgnat edge outside", upstreamBlocks{blockCGNAT: true}, "100.128.0.1:80", false},
+		{"v6 link-local default open", upstreamBlocks{}, "[fe80::1]:80", false},
+		{"v6 link-local opt-in", upstreamBlocks{blockLinkV6: true}, "[fe80::1]:80", true},
+		{"public", upstreamBlocks{blockCGNAT: true, blockLinkV6: true}, "93.184.216.34:443", false},
+	}
+	for _, c := range cases {
+		err := upstreamControl(nil, c.b)("tcp", c.addr, nil)
+		if c.deny != errors.Is(err, errEgressDenied) {
+			t.Errorf("%s: %s -> %v, deny=%v", c.name, c.addr, err, c.deny)
+		}
+	}
+	if err := upstreamControl(nil, upstreamBlocks{})("tcp", "garbage", nil); !errors.Is(err, errEgressDenied) {
+		t.Errorf("unparseable address must fail closed, got %v", err)
+	}
+	// The user's CIDR rules still apply on top of the built-ins.
+	p := mustPolicy(t, nil, []string{"10.0.0.0/8"})
+	if err := upstreamControl(p, upstreamBlocks{})("tcp", "10.1.2.3:80", nil); !errors.Is(err, errEgressDenied) {
+		t.Errorf("user CIDR rule not applied: %v", err)
+	}
+	// The default dialer refuses metadata before any connection is made.
+	d := newDialerBlocks(nil, nil, &upstreamBlocks{})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := d.DialContext(ctx, "tcp", "169.254.169.254:80"); !errors.Is(err, errEgressDenied) {
+		t.Errorf("dial metadata: %v", err)
+	}
+	if newDialerBlocks(nil, nil, nil).Control != nil {
+		t.Error("nil blocks and no policy must install no Control hook")
+	}
+}

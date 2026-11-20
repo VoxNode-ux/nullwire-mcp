@@ -308,7 +308,7 @@ func TestHasPANChainRandomStructured(t *testing.T) {
 			b = append(b, noise[r.Intn(len(noise))])
 		}
 		for d, digits := 0, 8+r.Intn(10); d < digits; d++ {
-			b = append(b, byte('0'+r.Intn(10))) // #nosec G115 -- r.Intn(10) is 0..9
+			b = append(b, byte('0'+r.Intn(10)))
 			switch r.Intn(6) {
 			case 0:
 				b = append(b, ' ')

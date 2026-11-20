@@ -116,7 +116,7 @@ func rcovLock(t *testing.T, path string, mode os.FileMode) {
 	if err := os.Chmod(path, mode); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o700) }) // #nosec G302 -- so the temp dir can be removed
+	t.Cleanup(func() { _ = os.Chmod(path, 0o700) })
 }
 
 func TestRcovRunUnreadableBenignInputs(t *testing.T) {

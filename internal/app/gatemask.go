@@ -1,6 +1,9 @@
 package app
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 // Bits reported by scrubGate. One pass over the text answers every "is this
 // rule worth running" question at once, with no lower-cased copy of the text.
@@ -47,18 +50,20 @@ func newMaskGate(groups ...maskGroup) *maskGate {
 			}
 		}
 	}
-	n := 1 // class 0: every byte no literal uses
+	cls := uint8(1) // class 0: every byte no literal uses
 	for b := 0; b < 256; b++ {
 		if used[b] {
-			g.class[b] = uint8(n) // #nosec G115 -- literals are ASCII, so n stays far below 256
-			n++
+			g.class[b] = cls
+			cls++
 		}
 	}
+	n := int(cls)
 	for c := byte('A'); c <= 'Z'; c++ {
 		g.class[c] = g.class[c+'a'-'A'] // fold case here so Match need not
 	}
 	g.width = n
-	next := make([]int32, n) // built wide, narrowed to uint16 at the end
+	next := make([]uint16, n)
+	nextState := uint16(1) // id of the next state to create; 0 is the root
 	g.out = []uint32{0}
 
 	for _, grp := range groups {
@@ -72,9 +77,13 @@ func newMaskGate(groups ...maskGroup) *maskGate {
 				c := int(g.class[lit[i]])
 				t := next[s*n+c]
 				if t == 0 {
-					t = int32(len(g.out)) // #nosec G115 -- the automaton has a few hundred states
+					if nextState == math.MaxUint16 {
+						panic("maskGate: automaton exceeds 65535 states") // static literals; a test catches this
+					}
+					t = nextState
+					nextState++
 					g.out = append(g.out, 0)
-					next = append(next, make([]int32, n)...)
+					next = append(next, make([]uint16, n)...)
 					next[s*n+c] = t
 				}
 				s = int(t)
@@ -85,8 +94,8 @@ func newMaskGate(groups ...maskGroup) *maskGate {
 
 	// Breadth-first failure links; completes the transition table so Match
 	// never follows a failure chain.
-	fail := make([]int32, len(g.out))
-	queue := make([]int32, 0, len(g.out))
+	fail := make([]uint16, len(g.out))
+	queue := make([]uint16, 0, len(g.out))
 	for c := 1; c < n; c++ {
 		if t := next[c]; t != 0 {
 			queue = append(queue, t)
@@ -107,13 +116,7 @@ func newMaskGate(groups ...maskGroup) *maskGate {
 			}
 		}
 	}
-	if len(g.out) > 1<<16-1 {
-		panic("maskGate: automaton exceeds 65535 states") // static literals; a test catches this
-	}
-	g.next = make([]uint16, len(next))
-	for i, t := range next {
-		g.next[i] = uint16(t) // #nosec G115 -- len(g.out) <= 65535 checked above
-	}
+	g.next = next
 	return g
 }
 

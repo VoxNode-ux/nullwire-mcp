@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/VoxNode-ux/nullwire-mcp/internal/cliio"
 	"github.com/VoxNode-ux/nullwire-mcp/tools/internal/corpus"
 )
 
@@ -149,7 +150,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 	ns := 0
 	if *secretsFile != "" {
-		f, err := os.Open(*secretsFile) // #nosec G304 -- offline developer tool: the path is the -secrets flag
+		f, err := cliio.Open(*secretsFile)
 		if err != nil {
 			return err
 		}

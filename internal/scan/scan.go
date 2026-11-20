@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strings"
+
+	"github.com/VoxNode-ux/nullwire-mcp/internal/cliio"
 )
 
 // maxScanFile is the largest file the scanner will read.
@@ -33,7 +36,7 @@ func readScanFile(path string) ([]byte, error) {
 	if fi.Size() > maxScanFile {
 		return nil, fmt.Errorf("file is larger than %d MiB, skipped", maxScanFile>>20)
 	}
-	return os.ReadFile(path) // #nosec G304 -- the path is the file the user asked us to scan
+	return cliio.ReadFile(path)
 }
 
 // scanTotals adds up the results of every scanned file.
@@ -368,8 +371,8 @@ func ScanFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, 
 		}
 		return value
 	})
-	tokens = int(s.TokenCount() - tokBefore) // #nosec G115 -- the delta is bounded by the size of one file
-	ips = int(s.IPCount() - ipBefore) // #nosec G115 -- the delta is bounded by the size of one file
+	tokens = u64ToInt(s.TokenCount() - tokBefore)
+	ips = u64ToInt(s.IPCount() - ipBefore)
 	if hits == 0 {
 		fmt.Fprintf(report, "   (no secrets found)\n")
 	}
@@ -419,4 +422,11 @@ func trimPath(p string) string {
 		return "…" + p[len(p)-49:]
 	}
 	return p
+}
+// u64ToInt converts a counter delta to int, saturating instead of wrapping.
+func u64ToInt(v uint64) int {
+	if v > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(v)
 }

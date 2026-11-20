@@ -1,6 +1,7 @@
 package app
 
 import (
+	"math"
 	"strings"
 )
 
@@ -100,16 +101,17 @@ func (s *Scrubber) ScrubURL(raw string) (string, int) {
 // unwrapMaxLen is the longest text the unwrap pass will look at.
 const unwrapMaxLen = 1 << 20
 
-func unwrapHexVal(c byte) int {
+// unwrapHexVal returns the value (0..15) of a hex digit and whether c is one.
+func unwrapHexVal(c byte) (byte, bool) {
 	switch {
 	case c >= '0' && c <= '9':
-		return int(c - '0')
+		return c - '0', true
 	case c >= 'a' && c <= 'f':
-		return int(c-'a') + 10
+		return c - 'a' + 10, true
 	case c >= 'A' && c <= 'F':
-		return int(c-'A') + 10
+		return c - 'A' + 10, true
 	}
-	return -1
+	return 0, false
 }
 
 // needsUnwrap reports whether in holds a percent-escape ("%41"), an escaped
@@ -122,7 +124,7 @@ func needsUnwrap(in string) bool {
 	for i := 0; i+1 < len(in); i++ {
 		switch in[i] {
 		case '%':
-			if i+2 < len(in) && unwrapHexVal(in[i+1]) >= 0 && unwrapHexVal(in[i+2]) >= 0 {
+			if i+2 < len(in) && isHexDigitByte(in[i+1]) && isHexDigitByte(in[i+2]) {
 				return true
 			}
 		case '\\':
@@ -147,11 +149,11 @@ func unicodeEscapeASCII(in string, i int) (byte, bool) {
 	}
 	v := 0
 	for k := 2; k < 6; k++ {
-		h := unwrapHexVal(in[i+k])
-		if h < 0 {
+		h, ok := unwrapHexVal(in[i+k])
+		if !ok {
 			return 0, false
 		}
-		v = v<<4 | h
+		v = v<<4 | int(h)
 	}
 	if v >= 0x80 {
 		return 0, false
@@ -166,7 +168,10 @@ func unicodeEscapeASCII(in string, i int) (byte, bool) {
 // idx32 narrows a text offset for the offset map. unwrapEscapes only sees text
 // of at most unwrapMaxLen bytes, which is far below the int32 limit.
 func idx32(i int) int32 {
-	return int32(i) // #nosec G115 -- callers keep len(in) at or below unwrapMaxLen
+	if i < 0 || i > math.MaxInt32 {
+		return math.MaxInt32 // never reached: callers keep len(in) at or below unwrapMaxLen
+	}
+	return int32(i)
 }
 
 // quoteFollows reports whether a quote character, raw, escaped (\\") or
@@ -192,8 +197,10 @@ func unwrapEscapes(in string) (string, []int32) {
 	for i := 0; i < len(in); {
 		c := in[i]
 		switch {
-		case c == '%' && i+2 < len(in) && unwrapHexVal(in[i+1]) >= 0 && unwrapHexVal(in[i+2]) >= 0:
-			dec = append(dec, byte(unwrapHexVal(in[i+1])<<4|unwrapHexVal(in[i+2]))) // #nosec G115 -- both nibbles were checked to be 0..15 above
+		case c == '%' && i+2 < len(in) && isHexDigitByte(in[i+1]) && isHexDigitByte(in[i+2]):
+			hi, _ := unwrapHexVal(in[i+1])
+			lo, _ := unwrapHexVal(in[i+2])
+			dec = append(dec, hi<<4|lo)
 			idx = append(idx, idx32(i))
 			i += 3
 		case c == '\\' && i+1 < len(in) && in[i+1] == '\\' && quoteFollows(in, i+2):
@@ -476,7 +483,7 @@ func maybeIPv4(in string) bool {
 // ---------------------------------------------------------------------------
 // Stage 3: hex webhook secrets in headers and query strings.
 
-func isHexDigitByte(c byte) bool { return unwrapHexVal(c) >= 0 }
+func isHexDigitByte(c byte) bool { _, ok := unwrapHexVal(c); return ok }
 
 // scrubHexSecrets redacts standalone runs of exactly 32, 40 or 64 hex digits
 // (the size of MD5, SHA-1 and SHA-256 based webhook secrets and signatures).

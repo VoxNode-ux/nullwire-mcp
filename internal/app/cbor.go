@@ -32,16 +32,29 @@ func cborToJSON(in []byte, limit int) (out string, complete bool) {
 // cborHead reads the initial byte and its argument. For major type 7, arg
 // holds the raw bits of a float or the simple value; info tells which.
 func (w *binJSON) cborHead() (major, info byte, arg uint64, err error) {
-	b, err := w.be(1)
+	b, err := w.readByte()
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	major, info = byte(b>>5), byte(b&0x1f) // #nosec G115 -- b is one wire byte: b>>5 is 0-7 and b&0x1f is 0-31
+	major, info = b>>5, b&0x1f
 	switch {
 	case info < 24:
 		arg = uint64(info)
 	case info < 28:
-		arg, err = w.be(1 << (info - 24)) // 24, 25, 26, 27: 1, 2, 4, 8 bytes
+		switch info { // 24, 25, 26, 27: 1, 2, 4, 8 bytes
+		case 24:
+			var v byte
+			v, err = w.readByte()
+			arg = uint64(v)
+		case 25:
+			w.half, err = w.readU16()
+			arg = uint64(w.half)
+		case 26:
+			w.single, err = w.readU32()
+			arg = uint64(w.single)
+		default:
+			arg, err = w.readU64()
+		}
 	case info == 31 && major != 0 && major != 1 && major != 6:
 		// indefinite length (or the break code); arg stays 0
 	default: // 28 to 30 are reserved, and ints and tags cannot be indefinite
@@ -100,9 +113,9 @@ func (w *binJSON) cborValue() error {
 		case 22, 23: // null, undefined
 			w.out = append(w.out, "null"...)
 		case 25:
-			w.float(halfToFloat(uint16(arg))) // #nosec G115 -- arg was read as 2 bytes, so it fits uint16
+			w.float(halfToFloat(w.half))
 		case 26:
-			w.float(float64(math.Float32frombits(uint32(arg)))) // #nosec G115 -- arg was read as 4 bytes, so it fits uint32
+			w.float(float64(math.Float32frombits(w.single)))
 		case 27:
 			w.float(math.Float64frombits(arg))
 		case 31: // a break with nothing to end
