@@ -47,6 +47,23 @@ jobs:
             go list -m golang.org/x/vuln@latest
           } | tee tools-pinned.txt
 
+      - name: Make the lock file (go.mod + go.sum) for the Go tools
+        run: |
+          set -euo pipefail
+          # The two exact versions the workflows already use, so nothing changes.
+          rm -rf gotools && mkdir gotools && cd gotools
+          go mod init nullwire-gotools
+          go get -tool golang.org/x/vuln/cmd/govulncheck@v1.10.0
+          go get -tool github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
+          go mod tidy
+          go mod verify
+          # Prove the lock works: build both from go.mod/go.sum only.
+          go install -mod=readonly golang.org/x/vuln/cmd/govulncheck
+          go install -mod=readonly github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod
+          "$(go env GOPATH)/bin/govulncheck" -version || true
+          "$(go env GOPATH)/bin/cyclonedx-gomod" version || true
+          cat go.mod
+
       - name: Look up the Scorecard image digest
         run: |
           docker pull ghcr.io/ossf/scorecard:latest > /dev/null
@@ -64,6 +81,10 @@ jobs:
             echo '```'
             cat tools-pinned.txt 2>/dev/null || echo "(no result)"
             echo '```'
+            echo "## 2b. Lock file for the Go tools (commit gotools/go.mod and gotools/go.sum)"
+            echo '```'
+            cat gotools/go.mod 2>/dev/null || echo "(no result)"
+            echo '```'
             echo "## 3. Scorecard image (use this instead of :latest)"
             echo '```'
             cat scorecard-image.txt 2>/dev/null || echo "(no result)"
@@ -79,5 +100,7 @@ jobs:
             actions-pinned.txt
             tools-pinned.txt
             scorecard-image.txt
+            gotools/go.mod
+            gotools/go.sum
           if-no-files-found: ignore
           retention-days: 30
