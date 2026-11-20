@@ -53,8 +53,6 @@ jobs:
           # The two exact versions the workflows already use, so nothing changes.
           rm -rf gotools && mkdir gotools && cd gotools
           go mod init nullwire-gotools
-          go get -tool golang.org/x/vuln/cmd/govulncheck@v1.10.0
-          go get -tool github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
           go mod tidy
           go mod verify
           # Prove the lock works: build both from go.mod/go.sum only.
