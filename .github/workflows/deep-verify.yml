@@ -9,6 +9,9 @@ name: Deep verify (code, protocol and security hardening)
 # Nothing here changes the repository; everything is installed on the runner.
 
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
   schedule:
     - cron: "41 4 * * 2"   # Tuesdays 04:41 UTC, on the default branch
