@@ -393,8 +393,49 @@ jobs:
       - name: CredData FPR by rule stage (diagnostic)
         if: always()
         run: |
-          CREDDATA_TSV="$PWD/work/cred.tsv" go test -run TestCredDataFPRByStage -count=1 -v ./internal/app | tee stage-breakdown.txt
-          { echo "## CredData FPR by stage"; echo '```'; grep -E '^==|^  ' stage-breakdown.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p diag
+          # Run twice: CRED= looks like a secret-named field, X= is neutral. The gap
+          # between the two shows how much of the false-positive rate is the key name.
+          # Raw samples go to RUNNER_TEMP (never uploaded); only a masked copy is kept.
+          for K in CRED X; do
+            CREDDATA_KEY="$K" CREDDATA_SAMPLES=100 CREDDATA_SAMPLES_OUT="$RUNNER_TEMP/samples-raw-$K.tsv" \
+            CREDDATA_TSV="$PWD/work/cred.tsv" go test -run TestCredDataFPRByStage -count=1 -v ./internal/app | tee "diag/stage-$K.txt"
+          done
+          python3 - <<'PY'
+          import os
+          tmp = os.environ["RUNNER_TEMP"]
+          KIND = {("F", True): "FALSE-POSITIVE (benign value redacted)",
+                  ("F", False): "true-negative (benign value allowed)",
+                  ("T", True): "true-positive (secret redacted)",
+                  ("T", False): "FALSE-NEGATIVE (secret allowed through)"}
+          for k in ("CRED", "X"):
+              src = os.path.join(tmp, "samples-raw-%s.tsv" % k)
+              if not os.path.isfile(src):
+                  continue
+              with open("diag/samples-%s.tsv" % k, "w") as out:
+                  out.write("kind\tstage\tvalue\n")
+                  for line in open(src, encoding="utf-8", errors="replace"):
+                      parts = line.rstrip("\n").split("\t", 2)
+                      if len(parts) != 3:
+                          continue
+                      label, stage, val = parts
+                      if label == "T":
+                          # CredData secrets are real leaked values: keep only the shape.
+                          val = val[:3] + "*" * min(max(len(val) - 3, 0), 40) + " (len %d)" % len(val)
+                      out.write("%s\t%s\t%s\n" % (KIND[(label, stage != "clean")], stage, val[:200]))
+          PY
+          {
+            for K in CRED X; do
+              echo "## CredData FPR by stage (key name: $K)"
+              echo '```'
+              grep -E '^==|^  ' "diag/stage-$K.txt"
+              echo '```'
+            done
+            echo "First false positives (CRED run, benign values the scrubber redacted):"
+            echo '```'
+            grep -P '^FALSE-POSITIVE' diag/samples-CRED.tsv | head -25 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Clean-code false positives (Kubernetes Go, Django Python)
         id: fp
         if: always()
@@ -422,7 +463,7 @@ jobs:
                   if 0 <= i < len(origins):
                       found.append(origins[i])
 
-          results, examples = {}, []
+          results, examples, flagged_all = {}, [], []
           for repo, ext in REPOS.items():
               if not os.path.isdir(repo):
                   results[repo] = {"skipped": "clone missing"}
@@ -473,8 +514,14 @@ jobs:
                      "false_positives_per_mb": round(len(found) / (nbytes / 1048576), 3) if nbytes else None}
               results[repo] = res
               examples += ["%s: %s:%d  %s" % (repo, r, l, t[:110]) for (r, l, t) in found[:15]]
+              flagged_all += [(repo, r, l, t[:300]) for (r, l, t) in found[:2000]]
           json.dump(results, open("clean-code-fp-result.json", "w"), indent=2)
           open("clean-code-fp-examples.txt", "w").write("\n".join(examples) + "\n")
+          # Up to 2000 flagged lines per repo (benign code, so safe to publish): repo, file, line, text.
+          with open("clean-code-fp-flagged.tsv", "w") as f:
+              f.write("repo\tfile\tline\ttext\n")
+              for (rp, fl, ln, tx) in flagged_all:
+                  f.write("%s\t%s\t%d\t%s\n" % (rp, fl, ln, tx.replace("\t", " ")))
           print(json.dumps(results, indent=2))
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
               s.write("## Clean-code false positives (held-out Kubernetes and Django, indicative)\n```json\n%s\n```\n" % json.dumps(results, indent=2))
@@ -535,6 +582,8 @@ jobs:
             creddata-result.json
             clean-code-fp-result.json
             clean-code-fp-examples.txt
+            clean-code-fp-flagged.tsv
+            diag/
           if-no-files-found: ignore
 
   # ------------------------------------------------------------------ 3
