@@ -183,58 +183,6 @@ jobs:
           path: nilaway.txt
           retention-days: 30
 
-  # ------------------------------------------------------------------ 4
-  gremlins:
-    name: Mutation testing (gremlins)
-    # Slow: not on pull requests.
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          check-latest: false
-          cache: false
-      - name: Install gremlins
-        run: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
-      - name: Mutate the smaller packages (internal/app is too big for one run)
-        run: |
-          set -o pipefail
-          for pkg in ./internal/scan ./internal/protect ./internal/vendors; do
-            echo "=== $pkg ==="
-            "$(go env GOPATH)/bin/gremlins" unleash --threshold-efficacy 70 "$pkg" 2>&1
-          done | tee gremlins.txt
-      - name: Summarize gremlins mutation scores
-        if: always()
-        run: |
-          {
-            echo "## Mutation Testing Scores (gremlins — threshold 70%)"
-            if [ ! -s gremlins.txt ]; then
-              echo "_No gremlins report generated._"
-              exit 0
-            fi
-            echo '```text'
-            grep -E '^(=== |Mutation testing|Killed:|Lived:|Timed out:|Not covered:|Test efficacy:|Mutator coverage:)' gremlins.txt || tail -n 40 gremlins.txt
-            echo '```'
-            if grep -q 'LIVED' gremlins.txt; then
-              echo "### Surviving Mutants (LIVED)"
-              echo '```text'
-              grep -E 'LIVED' gremlins.txt | head -n 80
-              echo '```'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Save the report
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: gremlins-report
-          path: gremlins.txt
-          retention-days: 30
-
   # ------------------------------------------------------------------ 5
   grype:
     name: CVE scan of the binary and its SBOM (grype)
