@@ -396,7 +396,11 @@ func TestWriteFileAtomic(t *testing.T) {
 		t.Errorf("content = %q", b)
 	}
 	if runtime.GOOS != "windows" {
-		if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+		st, serr := os.Stat(p)
+		if serr != nil {
+			t.Fatal(serr)
+		}
+		if st.Mode().Perm() != 0o600 {
 			t.Errorf("a new file should be private, mode %v", st.Mode().Perm())
 		}
 	}
@@ -428,7 +432,11 @@ func TestWriteFileAtomic(t *testing.T) {
 		if _, err := writeFileAtomic(q, []byte("y")); err != nil {
 			t.Fatal(err)
 		}
-		if st, _ := os.Stat(q); st.Mode().Perm() != 0o640 {
+		st, serr := os.Stat(q)
+		if serr != nil {
+			t.Fatal(serr)
+		}
+		if st.Mode().Perm() != 0o640 {
 			t.Errorf("mode = %v, want 0640", st.Mode().Perm())
 		}
 
