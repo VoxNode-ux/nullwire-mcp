@@ -87,9 +87,7 @@ func fxFrame(fin bool, opcode byte, payload []byte, mask bool, key [4]byte) []by
 			b = append(b, c^key[i&3])
 		}
 	} else {
-		for _, c := range payload {
-			b = append(b, c)
-		}
+		b = append(b, payload...)
 	}
 	return b
 }
