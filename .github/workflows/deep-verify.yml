@@ -399,21 +399,12 @@ jobs:
           cache: false
       - name: Build the proxy
         run: go build -o nullwire-mcp .
-      - name: Start a plain WebSocket echo server as the upstream
+      - name: Start Autobahn's reference WebSocket testee server as the upstream
         run: |
-          pip install --quiet websockets==15.0.1
-          cat > echo.py <<'PY'
-          import asyncio, websockets
-          async def echo(ws):
-              async for msg in ws:
-                  await ws.send(msg)
-          async def main():
-              async with websockets.serve(echo, "127.0.0.1", 18081, max_size=None, compression=None):
-                  await asyncio.Future()
-          asyncio.run(main())
-          PY
-          python3 echo.py > echo.log 2>&1 &
-          for i in $(seq 1 20); do (echo > /dev/tcp/127.0.0.1/18081) 2>/dev/null && break; sleep 0.5; done
+          docker run -d --rm --name autobahn-upstream --network host \
+            crossbario/autobahn-testsuite@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074 \
+            wstest -m testeeserver -w ws://127.0.0.1:18081
+          for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/18081) 2>/dev/null && break; sleep 0.5; done
       - name: Start NullWire in front of it
         run: |
           rm -f go.flag
@@ -475,7 +466,7 @@ jobs:
                             "closedByMe", "droppedByMe", "expected", "received"):
                       print("%s: %s" % (k, rep.get(k)))
                   print("::endgroup::")
-          for f in ("nw-err.txt", "echo.log"):
+          for f in ("nw-err.txt", "upstream.log"):
               try:
                   tail = open(f).read().splitlines()[-30:]
                   print("::group::tail of", f)
@@ -505,6 +496,11 @@ jobs:
           else
             echo -e "## WebSocket Conformance (Autobahn 25.10.1)\n_Test suite did not produce `index.json`._" >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Stop upstream server
+        if: always()
+        run: |
+          docker logs autobahn-upstream > upstream.log 2>&1 || true
+          docker rm -f autobahn-upstream 2>/dev/null || true
       - name: Save the reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -513,7 +509,7 @@ jobs:
           path: |
             autobahn/reports
             nw-err.txt
-            echo.log
+            upstream.log
           if-no-files-found: ignore
           retention-days: 30
 
