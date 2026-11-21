@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/VoxNode-ux/nullwire-mcp/internal/cliio"
 	"github.com/VoxNode-ux/nullwire-mcp/tools/internal/corpus"
 )
 
@@ -64,7 +65,13 @@ type entry struct {
 
 // pack returns the table word for one entry: key<<8 | (score-lo).
 func pack(key uint32, score int) uint32 {
-	return key<<8 | uint32(score-lo) // #nosec G115 -- score is clamped to [lo,hi], so score-lo is 0..10
+	d := score - lo // 0..10 for a clamped score; kept inside the 8-bit field regardless
+	if d < 0 {
+		d = 0
+	} else if d > 255 {
+		d = 255
+	}
+	return key<<8 | uint32(d)
 }
 
 // train turns the two count tables into the pruned, size-capped entry list.
@@ -85,7 +92,10 @@ func train(benign, secret counts) []entry {
 	denomB := tb + alpha*float64(seen)
 	denomS := ts + alpha*float64(seen)
 	var out []entry
+	var key uint32 // index of benign[i], counted alongside the loop
 	for i := range benign {
+		k := key
+		key++
 		n := benign[i] + secret[i]
 		if n < minCount {
 			continue
@@ -95,7 +105,7 @@ func train(benign, secret counts) []entry {
 		if math.Abs(v) < minAbs {
 			continue
 		}
-		out = append(out, entry{uint32(i), int(v), float64(n)}) // #nosec G115 -- i < 128^3
+		out = append(out, entry{k, int(v), float64(n)})
 	}
 	// Keep the top-magnitude entries; ties by evidence, then key, so the
 	// result is deterministic.
@@ -177,7 +187,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		nb++
 	}
 	if *secretsFile != "" {
-		f, err := os.Open(*secretsFile) // #nosec G304 -- offline developer tool: the path is the -secrets flag
+		f, err := cliio.Open(*secretsFile)
 		if err != nil {
 			return fmt.Errorf("opening -secrets: %w", err)
 		}

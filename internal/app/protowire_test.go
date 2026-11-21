@@ -28,10 +28,14 @@ func pbString(field int, s string) []byte { return pbBytes(field, []byte(s)) }
 
 func pbCat(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
 
+// pbGRPCFrame builds one gRPC frame. The result is allocated up front with
+// make and filled by index, so it is never nil, even for a nil message.
 func pbGRPCFrame(flag byte, msg []byte) []byte {
-	out := []byte{flag, 0, 0, 0, 0}
-	binary.BigEndian.PutUint32(out[1:], uint32(len(msg)))
-	return append(out, msg...)
+	out := make([]byte, 5+len(msg))
+	out[0] = flag
+	binary.BigEndian.PutUint32(out[1:5], uint32(len(msg)))
+	copy(out[5:], msg)
+	return out
 }
 
 func pbHeader(ct string) http.Header { return http.Header{"Content-Type": {ct}} }

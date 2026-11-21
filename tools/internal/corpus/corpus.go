@@ -6,12 +6,16 @@
 package corpus
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"hash/fnv"
 	"io/fs"
-	"math/rand"
-	"os"
+	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"github.com/VoxNode-ux/nullwire-mcp/internal/cliio"
 )
 
 const (
@@ -53,13 +57,48 @@ func Tokens(text string, fn func(tok string)) int {
 	return n
 }
 
+// detRand is a deterministic generator for the synthetic corpora: block i of
+// its stream is SHA-256(seed text || i), so the same seed always gives the
+// same corpus on every platform and Go version. Nothing here is secret, and it
+// is not meant for anything that must be unpredictable.
+type detRand struct {
+	seed string
+	ctr  uint64
+}
+
+func newDetRand(seed int64) *detRand { return &detRand{seed: strconv.FormatInt(seed, 10)} }
+
+// next returns the next 63 random bits.
+func (r *detRand) next() uint64 {
+	var blk [8]byte
+	binary.BigEndian.PutUint64(blk[:], r.ctr)
+	r.ctr++
+	h := sha256.New()
+	h.Write([]byte(r.seed))
+	h.Write(blk[:])
+	var sum [sha256.Size]byte
+	return binary.BigEndian.Uint64(h.Sum(sum[:0])) >> 1
+}
+
+// Intn returns a value in [0, n). n must be positive. The 63-bit draw is
+// masked to the platform's int width, so it is uniform on 32- and 64-bit
+// alike; the modulo bias is about n/2^31 at worst (32-bit) and below 2^-55
+// on 64-bit for the small n used here.
+func (r *detRand) Intn(n int) int {
+	if n <= 0 {
+		panic("corpus: Intn needs n > 0")
+	}
+	v := r.next()
+	return int(v&uint64(math.MaxInt)) % n
+}
+
 // Secrets returns n realistic random secrets from a fixed seed: hex, base62
 // and base64url, 16-64 bytes. Strings containing the JWT prefix "eyJ" are
 // skipped and base64url strings carry at most two '-' or '_' bytes, so the
 // secret class does not teach "separator means secret" and snake_case and
 // kebab-case identifiers are not penalised.
 func Secrets(n int, seed int64) []string {
-	r := rand.New(rand.NewSource(seed)) // #nosec G404 -- the seed is fixed on purpose so the table is reproducible; nothing here is secret
+	r := newDetRand(seed)
 	const (
 		hex    = "0123456789abcdef"
 		hexUp  = "0123456789ABCDEF"
@@ -91,7 +130,7 @@ func Secrets(n int, seed int64) []string {
 	return out
 }
 
-func fill(r *rand.Rand, b []byte, alphabet string) {
+func fill(r *detRand, b []byte, alphabet string) {
 	for j := range b {
 		b[j] = alphabet[r.Intn(len(alphabet))]
 	}
@@ -132,7 +171,7 @@ var vowels = strings.Split("a e i o u a e i o ai ea ee ou io", " ")
 
 // pseudoWord makes an English-like word that is not in the word list, so
 // benign identifiers are not limited to a few hundred repeated words.
-func pseudoWord(r *rand.Rand) string {
+func pseudoWord(r *detRand) string {
 	var b strings.Builder
 	for k := 2 + r.Intn(3); k > 0; k-- {
 		b.WriteString(consonants[r.Intn(len(consonants))])
@@ -151,7 +190,7 @@ func title(s string) string { return strings.ToUpper(s[:1]) + s[1:] }
 // from a ~500 word vocabulary and from generated pseudo-words; only about
 // half of the identifiers use a pseudo-word.
 func Benign(n int, seed int64) []string {
-	r := rand.New(rand.NewSource(seed)) // #nosec G404 -- fixed seed for reproducibility; nothing here is secret
+	r := newDetRand(seed)
 	out := make([]string, 0, n)
 	for len(out) < n {
 		parts := make([]string, 2+r.Intn(3))
@@ -199,7 +238,7 @@ func InHoldout(rel string, mod int) bool {
 	}
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(filepath.ToSlash(rel)))
-	return int(h.Sum32()%uint32(mod)) == 0 // #nosec G115 -- mod is a small positive flag value, the remainder fits an int
+	return uint64(h.Sum32())%uint64(mod) == 0
 }
 
 // Walk reads the real benign text files under root (source, docs, configs)
@@ -234,7 +273,7 @@ func Walk(root string, holdoutMod int, onlyHoldout bool, fn func(text string)) e
 		if InHoldout(rel, holdoutMod) != onlyHoldout {
 			return nil
 		}
-		data, rerr := os.ReadFile(path) // #nosec G304 G122 -- offline developer tool: it reads the folders the user passed with -benign
+		data, rerr := cliio.ReadFile(path)
 		if rerr != nil {
 			return rerr
 		}

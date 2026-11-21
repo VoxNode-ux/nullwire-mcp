@@ -72,7 +72,7 @@ jobs:
 
       - name: SonarQube scan (official action, verifies the scanner's OpenPGP signature)
         if: (env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '') && (github.event_name != 'workflow_dispatch' || inputs.scanner == 'action')
-        uses: SonarSource/sonarqube-scan-action@v8.5.0 # 59202af
+        uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5.0
         with:
           skipSignatureVerification: false
           args: >

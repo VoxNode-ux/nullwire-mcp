@@ -48,9 +48,9 @@ trap 'rm -rf "$tmp"' EXIT
 if [ -z "$sums" ]; then
   url="https://github.com/VoxNode-ux/nullwire-mcp/releases/download/$tag/SHA256SUMS.txt"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$tmp/SHA256SUMS.txt" || die "could not download $url"
+    curl --proto '=https' --proto-redir '=https' -fsSL "$url" -o "$tmp/SHA256SUMS.txt" || die "could not download $url"
   elif command -v wget >/dev/null 2>&1; then
-    wget -q "$url" -O "$tmp/SHA256SUMS.txt" || die "could not download $url"
+    wget --https-only -q "$url" -O "$tmp/SHA256SUMS.txt" || die "could not download $url"
   else
     die "need curl or wget, or pass a local file with -s"
   fi

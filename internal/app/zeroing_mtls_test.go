@@ -98,7 +98,10 @@ type testPKI struct {
 
 func newTestPKI(t *testing.T, name string) testPKI {
 	t.Helper()
-	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	caTpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: name + " CA"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
 		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
@@ -106,8 +109,14 @@ func newTestPKI(t *testing.T, name string) testPKI {
 	if err != nil {
 		t.Fatal(err)
 	}
-	caCert, _ := x509.ParseCertificate(caDER)
-	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: name + " client"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
@@ -115,7 +124,10 @@ func newTestPKI(t *testing.T, name string) testPKI {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyDER, _ := x509.MarshalECPrivateKey(key)
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 	p := testPKI{pool: x509.NewCertPool(), certFile: filepath.Join(dir, "c.pem"), keyFile: filepath.Join(dir, "k.pem")}
 	p.pool.AddCert(caCert)

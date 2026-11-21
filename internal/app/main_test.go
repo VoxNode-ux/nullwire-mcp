@@ -31,10 +31,7 @@ var (
 
 func newTestApp(t *testing.T) *App {
 	t.Helper()
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatalf("NewScrubber: %v", err)
-	}
+	s := mustScrubber()
 	app := &App{
 		ring:      NewRingBuffer(),
 		scrub:     s,
@@ -167,10 +164,7 @@ func TestScrubberCorrelationTags(t *testing.T) {
 	}
 
 	// A second scrubber has a different nonce, so the same secret hashes differently.
-	s2, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s2 := mustScrubber()
 	other, _ := s2.ScrubText(secretA)
 	if tokenTagRe.FindString(other) == tag1 {
 		t.Errorf("tags must be salted per process, but two scrubbers agreed on %s", tag1)
@@ -178,7 +172,7 @@ func TestScrubberCorrelationTags(t *testing.T) {
 }
 
 func TestScrubberIPsAndLoopback(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	in := "peer 192.168.10.20 local 127.0.0.1 any 0.0.0.0 peer2 192.168.10.20"
 	out, n := s.ScrubText(in)
 
@@ -198,7 +192,7 @@ func TestScrubberIPsAndLoopback(t *testing.T) {
 }
 
 func TestScrubberSecretShapes(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 	cases := map[string][]string{
 		"jwt":      {"token value " + jwt, jwt},
@@ -223,7 +217,7 @@ func TestScrubberSecretShapes(t *testing.T) {
 }
 
 func TestScrubHeaders(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	h := http.Header{
 		"Authorization": {"Bearer abcdefghijklmnop"},
 		"Cookie":        {"sid=abc; theme=dark"},
@@ -1120,6 +1114,10 @@ func TestCovMatchUpstreamAndUpstreamNames(t *testing.T) {
 		if !found {
 			continue
 		}
+		if base == nil {
+			t.Errorf("matchUpstream(%q, %q): found without a base URL", c.path, c.raw)
+			continue
+		}
 		if base.Host != c.host || rest != c.rest || rawRest != c.wantRawRest {
 			t.Errorf("matchUpstream(%q, %q) = %s %q %q, want %s %q %q", c.path, c.raw, base.Host, rest, rawRest, c.host, c.rest, c.wantRawRest)
 		}
@@ -1188,7 +1186,11 @@ func TestCovCopyHeadersDropsHopByHop(t *testing.T) {
 	if len(dst) != 2 || dst.Get("Content-Type") != "text/plain" || dst.Get("X-Lower") != "v" {
 		t.Errorf("copyHeaders = %v, want only Content-Type and X-Lower", dst)
 	}
-	dst["Content-Type"][0] = "changed"
+	ct := dst["Content-Type"]
+	if len(ct) == 0 {
+		t.Fatal("Content-Type was dropped")
+	}
+	ct[0] = "changed"
 	if src.Get("Content-Type") != "text/plain" {
 		t.Errorf("copyHeaders must copy the value slices")
 	}
@@ -1866,8 +1868,12 @@ func TestSplicePreWriteFailureClosesBoth(t *testing.T) {
 	_ = c2.Close()
 }
 
-// net.Pipe ends have no CloseWrite, so end-of-input must close the destination.
+// net.Pipe ends have no CloseWrite, so after end-of-input the destination is
+// kept open only for the bounded drain window, then closed.
 func TestSpliceClosesDestinationWithoutCloseWrite(t *testing.T) {
+	old := halfCloseDrain
+	halfCloseDrain = 100 * time.Millisecond
+	t.Cleanup(func() { halfCloseDrain = old })
 	c1, c2 := net.Pipe()
 	u1, u2 := net.Pipe()
 	done := make(chan int64, 1)

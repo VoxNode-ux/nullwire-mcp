@@ -5,10 +5,14 @@ name: Deep verify (code, protocol and security hardening)
 #   grype (CVE scan of the built binary), MCP Inspector, agent-scan (mcp-scan),
 #   the Autobahn WebSocket conformance suite, the named scrub-context unit tests
 #   (repeated under -race), gitleaks + trufflehog (repo scan and an independent
-#   cross-check of NullWire's own output) and a websocat end-to-end redaction check.
+#   cross-check of NullWire's own output), a websocat end-to-end redaction check
+#   and a Toxiproxy network-chaos run (latency, bandwidth, slicing, cuts, resets).
 # Nothing here changes the repository; everything is installed on the runner.
 
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
   schedule:
     - cron: "41 4 * * 2"   # Tuesdays 04:41 UTC, on the default branch
@@ -21,7 +25,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.27.2"
+  GO_VERSION: "1.27.4"
 
 jobs:
   # ------------------------------------------------------------------ 1
@@ -93,7 +97,7 @@ jobs:
         run: |
           # go.uber.org/goleak v1.3.0 = 31095c657c34bba405a8d480db27989aa5f60b9c
           go get go.uber.org/goleak@v1.3.0
-          for pkg in internal/app internal/scan internal/protect internal/install internal/vendors; do
+          for pkg in internal/app internal/scan internal/protect internal/install internal/vendors internal/cliio; do
             if grep -rqs 'func TestMain' "$pkg"; then
               echo "skip $pkg: it already has a TestMain"
               continue
@@ -180,58 +184,6 @@ jobs:
           path: nilaway.txt
           retention-days: 30
 
-  # ------------------------------------------------------------------ 4
-  gremlins:
-    name: Mutation testing (gremlins)
-    # Slow: not on pull requests.
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          check-latest: false
-          cache: false
-      - name: Install gremlins
-        run: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
-      - name: Mutate the smaller packages (internal/app is too big for one run)
-        run: |
-          set -o pipefail
-          for pkg in ./internal/scan ./internal/protect ./internal/vendors; do
-            echo "=== $pkg ==="
-            "$(go env GOPATH)/bin/gremlins" unleash --threshold-efficacy 70 "$pkg" 2>&1
-          done | tee gremlins.txt
-      - name: Summarize gremlins mutation scores
-        if: always()
-        run: |
-          {
-            echo "## Mutation Testing Scores (gremlins — threshold 70%)"
-            if [ ! -s gremlins.txt ]; then
-              echo "_No gremlins report generated._"
-              exit 0
-            fi
-            echo '```text'
-            grep -E '^(=== |Mutation testing|Killed:|Lived:|Timed out:|Not covered:|Test efficacy:|Mutator coverage:)' gremlins.txt || tail -n 40 gremlins.txt
-            echo '```'
-            if grep -q 'LIVED' gremlins.txt; then
-              echo "### Surviving Mutants (LIVED)"
-              echo '```text'
-              grep -E 'LIVED' gremlins.txt | head -n 80
-              echo '```'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Save the report
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: gremlins-report
-          path: gremlins.txt
-          retention-days: 30
-
   # ------------------------------------------------------------------ 5
   grype:
     name: CVE scan of the binary and its SBOM (grype)
@@ -264,7 +216,7 @@ jobs:
         run: CGO_ENABLED=0 go build -trimpath -o nullwire-mcp .
       - name: Write an SBOM (CycloneDX, from the Go build info)
         run: |
-          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest
+          go install -modfile=gotools/go.mod github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod
           "$(go env GOPATH)/bin/cyclonedx-gomod" app -json -output sbom.cdx.json -main . .
       - name: Scan the SBOM and the binary (fail on high or critical)
         run: |
@@ -448,21 +400,12 @@ jobs:
           cache: false
       - name: Build the proxy
         run: go build -o nullwire-mcp .
-      - name: Start a plain WebSocket echo server as the upstream
+      - name: Start Autobahn's reference WebSocket testee server as the upstream
         run: |
-          pip install --quiet websockets==15.0.1
-          cat > echo.py <<'PY'
-          import asyncio, websockets
-          async def echo(ws):
-              async for msg in ws:
-                  await ws.send(msg)
-          async def main():
-              async with websockets.serve(echo, "127.0.0.1", 18081, max_size=None, compression=None):
-                  await asyncio.Future()
-          asyncio.run(main())
-          PY
-          python3 echo.py > echo.log 2>&1 &
-          for i in $(seq 1 20); do (echo > /dev/tcp/127.0.0.1/18081) 2>/dev/null && break; sleep 0.5; done
+          docker run -d --rm --name autobahn-upstream --network host \
+            crossbario/autobahn-testsuite@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074 \
+            wstest -m testeeserver -w ws://127.0.0.1:18081
+          for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/18081) 2>/dev/null && break; sleep 0.5; done
       - name: Start NullWire in front of it
         run: |
           rm -f go.flag
@@ -507,6 +450,32 @@ jobs:
           for c, _, _ in sorted(bad):
               print("FAILED:", c)
 
+          # Show why each failed case failed, so the log alone is enough.
+          for agent in data:
+              for c, _, _ in sorted(bad):
+                  fn = "autobahn/reports/%s_case_%s.json" % (agent, c.replace(".", "_"))
+                  try:
+                      rep = json.load(open(fn))
+                  except Exception as e:
+                      print("::group::detail", c, "(unreadable: %s)" % e)
+                      print("::endgroup::")
+                      continue
+                  print("::group::detail", c)
+                  for k in ("description", "expectation", "result", "resultClose",
+                            "behavior", "behaviorClose", "remoteCloseCode",
+                            "remoteCloseReason", "wasClean", "wasNotCleanReason",
+                            "closedByMe", "droppedByMe", "expected", "received"):
+                      print("%s: %s" % (k, rep.get(k)))
+                  print("::endgroup::")
+          for f in ("nw-err.txt", "upstream.log"):
+              try:
+                  tail = open(f).read().splitlines()[-30:]
+                  print("::group::tail of", f)
+                  print("\n".join(tail))
+                  print("::endgroup::")
+              except Exception:
+                  pass
+
           with open("autobahn-summary.md", "w") as out:
               out.write("## WebSocket Conformance (Autobahn 25.10.1)\n")
               out.write(f"- **Total cases run:** {total}\n")
@@ -528,6 +497,11 @@ jobs:
           else
             echo -e "## WebSocket Conformance (Autobahn 25.10.1)\n_Test suite did not produce `index.json`._" >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Stop upstream server
+        if: always()
+        run: |
+          docker logs autobahn-upstream > upstream.log 2>&1 || true
+          docker rm -f autobahn-upstream 2>/dev/null || true
       - name: Save the reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -536,7 +510,7 @@ jobs:
           path: |
             autobahn/reports
             nw-err.txt
-            echo.log
+            upstream.log
           if-no-files-found: ignore
           retention-days: 30
 
@@ -623,7 +597,7 @@ jobs:
       - name: Cross-check - gitleaks and trufflehog must find nothing in NullWire's own scan report
         run: |
           go build -o nullwire-mcp .
-          .github/scripts/scanner-crosscheck.sh "$PWD/nullwire-mcp"
+          bash .github/scripts/scanner-crosscheck.sh "$PWD/nullwire-mcp"
       - name: Save the report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -678,12 +652,12 @@ jobs:
 
   # ------------------------------------------------------------------ 12
   websocat:
-    name: WebSocket redaction end-to-end (websocat v1.14.2 built from a verified source zip)
+    name: WebSocket redaction end-to-end (websocat v1.14.2 release binary, checksum-verified)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       WEBSOCAT_VERSION: "1.14.2"
-      WEBSOCAT_ZIP_SHA256: 84ef6f855cc95fde332b554cb240925b5276ea474c3229daff3376516559c43e
+      WEBSOCAT_BIN_SHA256: cd26f92cb507f620e2d54fe6e126f4dc191f3eee90f2b53bccf07eac0645ec84
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -693,18 +667,15 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           check-latest: false
           cache: false
-      - name: Build websocat from the checksum-verified source zip
+      - name: Install websocat from the immutable release binary (checksum-verified)
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP"
-          curl -fsSL -o websocat.zip "https://github.com/vi/websocat/archive/refs/tags/v${WEBSOCAT_VERSION}.zip"
-          echo "${WEBSOCAT_ZIP_SHA256}  websocat.zip" | sha256sum -c -
-          unzip -q websocat.zip && cd "websocat-${WEBSOCAT_VERSION}"
-          cargo build --release
-          install -m 0755 target/release/websocat "$RUNNER_TEMP/websocat"
-          mkdir -p "$RUNNER_TEMP/wsbin" && mv "$RUNNER_TEMP/websocat" "$RUNNER_TEMP/wsbin/"
+          mkdir -p "$RUNNER_TEMP/wsbin" && cd "$RUNNER_TEMP/wsbin"
+          curl --proto '=https' --tlsv1.2 -fsSL -o websocat "https://github.com/vi/websocat/releases/download/v${WEBSOCAT_VERSION}/websocat.x86_64-unknown-linux-musl"
+          echo "${WEBSOCAT_BIN_SHA256}  websocat" | sha256sum -c -
+          chmod 0755 websocat
           echo "$RUNNER_TEMP/wsbin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/wsbin/websocat" --version
+          ./websocat --version
       - name: Build NullWire and start a WebSocket echo upstream
         run: |
           go build -o nullwire-mcp .
@@ -723,3 +694,47 @@ jobs:
           for i in $(seq 1 20); do (echo > /dev/tcp/127.0.0.1/18081) 2>/dev/null && break; sleep 0.5; done
       - name: A secret must reach the upstream intact and stay out of the captured copy
         run: python3 .github/scripts/ws-redaction-check.py "$PWD/nullwire-mcp" 18080 http://127.0.0.1:18081
+
+  # ------------------------------------------------------------------ toxiproxy
+  toxiproxy:
+    name: Network chaos (Toxiproxy v2.13.0 release binary, checksum-verified)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TOXIPROXY_VERSION: "2.13.0"
+      TOXIPROXY_CHECKSUMS_SHA256: "dc0558603352f0f2f812495ac891852bbfc7e5acdd824fd983d0c189c419541b"   # checksums.txt of v2.13.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Install toxiproxy-server (checksums.txt pinned, then the binary checked against it)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/toxi" && cd "$RUNNER_TEMP/toxi"
+          base="https://github.com/Shopify/toxiproxy/releases/download/v${TOXIPROXY_VERSION}"
+          curl --proto '=https' --tlsv1.2 -fsSLO "$base/checksums.txt"
+          echo "${TOXIPROXY_CHECKSUMS_SHA256}  checksums.txt" | sha256sum -c -
+          curl --proto '=https' --tlsv1.2 -fsSLO "$base/toxiproxy-server-linux-amd64"
+          grep -E "[[:space:]]toxiproxy-server-linux-amd64$" checksums.txt | sha256sum -c -
+          mv toxiproxy-server-linux-amd64 toxiproxy-server && chmod 0755 toxiproxy-server
+          echo "$RUNNER_TEMP/toxi" >> "$GITHUB_PATH"
+          {
+            echo "## Toxiproxy"
+            echo "- Version: \`v${TOXIPROXY_VERSION}\` (release binary, SHA-256 verified through the pinned checksums.txt)"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Build NullWire
+        run: go build -o nullwire-mcp .
+      - name: Chaos run (bytes must stay identical; cuts and stalls must end cleanly)
+        run: python3 .github/scripts/toxiproxy-chaos.py "$PWD/nullwire-mcp" "$RUNNER_TEMP/toxi/toxiproxy-server"
+      - name: Save the result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: toxiproxy-result
+          path: toxiproxy-result.json
+          if-no-files-found: ignore

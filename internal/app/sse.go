@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -182,13 +183,16 @@ func newSSEDecoder(enc string, col *sseCollector) io.WriteCloser {
 	return d
 }
 
+// sseChunkSize is the read size for one event-stream chunk.
+const sseChunkSize = 4 << 10
+
+// sseChunkPool recycles the chunk buffer. Every buffer in it is all zero.
+var sseChunkPool = sync.Pool{New: func() any { b := make([]byte, sseChunkSize); return &b }}
+
 // streamSSE forwards an event stream to the client and captures it. The
 // caller has not written anything to w yet.
 func (a *App) streamSSE(w http.ResponseWriter, r *http.Request, resp *http.Response, flow rawFlow, reqCap *capBuffer, start time.Time) {
-	dst := w.Header()
-	for k, vs := range copyHeaders(resp.Header) {
-		dst[k] = vs
-	}
+	copyHeadersInto(w.Header(), resp.Header) // static hop-by-hop set, no per-stream map
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)
 	if flusher != nil {
@@ -222,9 +226,19 @@ func (a *App) streamSSE(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	}
 
 	clientGone := false
-	buf := make([]byte, 4096)
+	bp := sseChunkPool.Get().(*[]byte)
+	buf := *bp
+	used := 0 // high-water mark of bytes written into buf
+	defer func() {
+		clear(buf[:used]) // the pooled chunk never carries event bytes to the next stream
+		runtime.KeepAlive(buf)
+		sseChunkPool.Put(bp)
+	}()
 	for {
 		n, err := resp.Body.Read(buf)
+		if n > used {
+			used = n
+		}
 		if n > 0 {
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				clientGone = true // stop reading: the caller closes the upstream body

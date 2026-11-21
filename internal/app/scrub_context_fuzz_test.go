@@ -37,10 +37,7 @@ func FuzzScrubContextsNoPanic(f *testing.F) {
 	} {
 		f.Add(seed)
 	}
-	s, err := NewScrubber()
-	if err != nil {
-		f.Fatal(err)
-	}
+	s := mustScrubber()
 	f.Fuzz(func(t *testing.T, in string) {
 		for _, ctx := range []ScrubContext{ContextBody, ContextHeader, ContextQuery, ContextPath} {
 			out, n := s.ScrubTextIn(in, ctx)

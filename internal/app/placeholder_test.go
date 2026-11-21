@@ -45,10 +45,7 @@ func TestSecretishKeyCarveOuts(t *testing.T) {
 }
 
 func TestPlaceholderValuesSurviveScrub(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	keep := []string{
 		`{"api_key": "${OPENAI_API_KEY}"}`,
 		`{"password": "{{ db_password }}"}`,
@@ -73,10 +70,7 @@ func TestPlaceholderValuesSurviveScrub(t *testing.T) {
 }
 
 func TestNewVendorPrefixesRedact(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	for _, in := range []string{
 		"k=glffct-Ab3dEf6hIj9LmN0pQrSt",
 		"k=p8e-Ab3dEf6hIj9LmN0pQrSt",

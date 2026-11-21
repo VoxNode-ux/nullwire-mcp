@@ -41,9 +41,15 @@ func reexecServeEnv(args, env []string) int {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 
-	cmd := exec.Command(self, args...) // #nosec G204 -- re-runs this same executable
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = append(os.Environ(), env...)
+	// self is the running executable's own path, so no PATH lookup is involved.
+	cmd := &exec.Cmd{
+		Path:   self,
+		Args:   append([]string{self}, args...),
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+		Env:    append(os.Environ(), env...),
+	}
 	if err := cmd.Start(); err != nil {
 		signal.Stop(sigs)
 		fmt.Fprintf(os.Stderr, "nullwire-mcp protect: %v\n", err)

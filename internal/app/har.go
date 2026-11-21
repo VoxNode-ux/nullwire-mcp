@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 )
@@ -126,7 +125,7 @@ func harQuery(raw string) []harNV {
 }
 
 // harTagRe matches one complete redaction tag, such as [REDACTED_TOKEN#0a1b2c].
-var harTagRe = regexp.MustCompile(`\[REDACTED_[A-Z0-9_]+#[0-9a-f]{6}\]`)
+var harTagRe = lazyRe(`\[REDACTED_[A-Z0-9_]+#[0-9a-f]{6}\]`)
 
 // harCutFragment drops a #fragment from s. The # that ends a redaction tag
 // ([REDACTED_<KIND>#xxxxxx]) is part of the value, not the start of a
@@ -195,7 +194,7 @@ func harFit(e FlowEntry, withBodies bool, budget int) (raw []byte, cut, ok bool)
 	he.NullWire.BodiesCut = withBodies
 	s, err := marshalJSON(he, false)
 	if err != nil || len(s) > budget {
-		return nil, false, false
+		return []byte{}, false, false
 	}
 	return []byte(s), withBodies, true
 }

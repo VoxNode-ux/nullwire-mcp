@@ -7,10 +7,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
+
+	"github.com/VoxNode-ux/nullwire-mcp/internal/cliio"
 )
 
 // maxScanFile is the largest file the scanner will read.
@@ -32,7 +36,7 @@ func readScanFile(path string) ([]byte, error) {
 	if fi.Size() > maxScanFile {
 		return nil, fmt.Errorf("file is larger than %d MiB, skipped", maxScanFile>>20)
 	}
-	return os.ReadFile(path) // #nosec G304 -- the path is the file the user asked us to scan
+	return cliio.ReadFile(path)
 }
 
 // scanTotals adds up the results of every scanned file.
@@ -100,8 +104,9 @@ func scanKV(s Scrubber, key, sep, val string) (shown string, n int, found bool) 
 
 // walkTree calls visit for every regular file under root, skipping the
 // directories in skipDirNames (matched by exact name, never by substring).
-func walkTree(root string, visit func(path string, d fs.DirEntry)) {
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+// Entries that cannot be read are skipped; the error of the walk itself is returned.
+func walkTree(root string, visit func(path string, d fs.DirEntry)) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -118,7 +123,22 @@ func walkTree(root string, visit func(path string, d fs.DirEntry)) {
 	})
 }
 
-func Run(args []string) int { return RunTo(os.Stdout, os.Stderr, args) }
+func Run(args []string) int {
+	// A one-shot scan reads its files, prints, and exits, so the collector has
+	// nothing worth reclaiming: GC is switched off for the run. The memory
+	// limit keeps that safe on a very large tree (--deep, --history): near the
+	// limit the collector runs anyway, so memory stays bounded. An explicit
+	// GOMEMLIMIT from the operator wins. Both settings are put back on return
+	// (Run is only the process entry point, RunTo is what tests call).
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	if os.Getenv("GOMEMLIMIT") == "" {
+		defer debug.SetMemoryLimit(debug.SetMemoryLimit(scanMemoryLimit))
+	}
+	return RunTo(os.Stdout, os.Stderr, args)
+}
+
+// scanMemoryLimit is the soft heap ceiling of a one-shot scan with GC off.
+const scanMemoryLimit = 256 << 20
 
 // RunTo is Run with explicit output writers, so callers (and tests)
 // never have to swap the process-wide os.Stdout.
@@ -184,7 +204,7 @@ func RunTo(out, errw io.Writer, args []string) int {
 			continue
 		}
 		if info.IsDir() {
-			walkTree(p, func(path string, d fs.DirEntry) {
+			if werr := walkTree(p, func(path string, d fs.DirEntry) {
 				name := d.Name()
 				lower := strings.ToLower(name)
 				wanted := isConfigFilename(name) || envFileNames(name) || strings.HasSuffix(lower, ".toml") ||
@@ -196,7 +216,10 @@ func RunTo(out, errw io.Writer, args []string) int {
 				if once(path) {
 					t.record(scanByType(scrub, path, report))
 				}
-			})
+			}); werr != nil {
+				fmt.Fprintf(report, "✗ %s: %v\n", p, werr)
+				t.filesBad++
+			}
 			continue
 		}
 		if once(p) {
@@ -205,7 +228,7 @@ func RunTo(out, errw io.Writer, args []string) int {
 	}
 
 	if *deep != "" {
-		walkTree(*deep, func(path string, d fs.DirEntry) {
+		if werr := walkTree(*deep, func(path string, d fs.DirEntry) {
 			name := d.Name()
 			lower := strings.ToLower(name)
 			switch {
@@ -233,7 +256,10 @@ func RunTo(out, errw io.Writer, args []string) int {
 					t.record(ok, hits, tokens, 0)
 				}
 			}
-		})
+		}); werr != nil {
+			fmt.Fprintf(report, "✗ %s: %v\n", *deep, werr)
+			t.filesBad++
+		}
 	}
 
 	if *history {
@@ -352,8 +378,8 @@ func ScanFile(s Scrubber, path string, report *strings.Builder) (ok bool, hits, 
 		}
 		return value
 	})
-	tokens = int(s.TokenCount() - tokBefore) // #nosec G115 -- the delta is bounded by the size of one file
-	ips = int(s.IPCount() - ipBefore) // #nosec G115 -- the delta is bounded by the size of one file
+	tokens = u64ToInt(s.TokenCount() - tokBefore)
+	ips = u64ToInt(s.IPCount() - ipBefore)
 	if hits == 0 {
 		fmt.Fprintf(report, "   (no secrets found)\n")
 	}
@@ -403,4 +429,11 @@ func trimPath(p string) string {
 		return "…" + p[len(p)-49:]
 	}
 	return p
+}
+// u64ToInt converts a counter delta to int, saturating instead of wrapping.
+func u64ToInt(v uint64) int {
+	if v > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(v)
 }

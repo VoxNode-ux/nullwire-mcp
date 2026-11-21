@@ -42,16 +42,16 @@ runs:
         cd "$RUNNER_TEMP"
 
         gl="https://github.com/gitleaks/gitleaks/releases/download/v${GL_V}"
-        curl -fsSLO "$gl/gitleaks_${GL_V}_linux_x64.tar.gz"
-        curl -fsSLO "$gl/gitleaks_${GL_V}_checksums.txt"
+        curl --proto '=https' --proto-redir '=https' -fsSLO "$gl/gitleaks_${GL_V}_linux_x64.tar.gz"
+        curl --proto '=https' --proto-redir '=https' -fsSLO "$gl/gitleaks_${GL_V}_checksums.txt"
         echo "${GL_SUM}  gitleaks_${GL_V}_checksums.txt" | sha256sum -c -
         echo "${GL_TAR}  gitleaks_${GL_V}_linux_x64.tar.gz" | sha256sum -c -
         grep " gitleaks_${GL_V}_linux_x64.tar.gz\$" "gitleaks_${GL_V}_checksums.txt" | sha256sum -c -
         tar -xzf "gitleaks_${GL_V}_linux_x64.tar.gz" -C "$bin" gitleaks
 
         th="https://github.com/trufflesecurity/trufflehog/releases/download/v${TH_V}"
-        curl -fsSLO "$th/trufflehog_${TH_V}_linux_amd64.tar.gz"
-        curl -fsSLO "$th/trufflehog_${TH_V}_checksums.txt"
+        curl --proto '=https' --proto-redir '=https' -fsSLO "$th/trufflehog_${TH_V}_linux_amd64.tar.gz"
+        curl --proto '=https' --proto-redir '=https' -fsSLO "$th/trufflehog_${TH_V}_checksums.txt"
         echo "${TH_SUM}  trufflehog_${TH_V}_checksums.txt" | sha256sum -c -
         echo "${TH_TAR}  trufflehog_${TH_V}_linux_amd64.tar.gz" | sha256sum -c -
         grep " trufflehog_${TH_V}_linux_amd64.tar.gz\$" "trufflehog_${TH_V}_checksums.txt" | sha256sum -c -

@@ -90,7 +90,7 @@ jobs:
         if: startsWith(matrix.label, 'openbsd-')
         id: run-openbsd
         continue-on-error: true
-        uses: vmactions/openbsd-vm@v1
+        uses: vmactions/openbsd-vm@f1ca8bc8ecc5b6ef7218e5b914836e067e1546d3 # v1
         with:
           arch: ${{ matrix.vmarch }}
           usesh: true
@@ -104,7 +104,7 @@ jobs:
         if: startsWith(matrix.label, 'netbsd-')
         id: run-netbsd
         continue-on-error: true
-        uses: vmactions/netbsd-vm@v1
+        uses: vmactions/netbsd-vm@5957cf330aef2e6ddc63c604364c99ce2e02b91d # v1
         with:
           arch: ${{ matrix.vmarch }}
           usesh: true

@@ -18,6 +18,36 @@ func serverProtocols() *http.Protocols {
 	return &p
 }
 
+// HTTP/2 limits for both directions. A busy gRPC or h2 client opens many
+// streams at once; the standard library's default of 250 concurrent streams
+// and 16 KiB frames makes the proxy the bottleneck. 256 KiB frames cut the
+// number of frame headers and syscalls for large messages. WriteByteTimeout 0
+// leaves slow writers alone, as before (the proxy has its own idle timeouts).
+// All of it is http.HTTP2Config from the standard library.
+const (
+	h2MaxConcurrentStreams = 1024
+	h2MaxReadFrameSize     = 256 << 10
+)
+
+// serverHTTP2Config is http.Server.HTTP2 for the loopback listener (inbound).
+func serverHTTP2Config() *http.HTTP2Config {
+	return &http.HTTP2Config{
+		MaxConcurrentStreams: h2MaxConcurrentStreams,
+		MaxReadFrameSize:     h2MaxReadFrameSize,
+		WriteByteTimeout:     0,
+	}
+}
+
+// transportHTTP2Config is http.Transport.HTTP2 for connections to upstreams
+// (outbound). It is a separate value so the two sides never share one.
+func transportHTTP2Config() *http.HTTP2Config {
+	return &http.HTTP2Config{
+		MaxConcurrentStreams: h2MaxConcurrentStreams,
+		MaxReadFrameSize:     h2MaxReadFrameSize,
+		WriteByteTimeout:     0,
+	}
+}
+
 // roundTripperFor picks the transport for one request. HTTPS upstreams
 // negotiate HTTP/2 on their own. A client that spoke HTTP/2 over plain TCP
 // (gRPC does) gets plain HTTP/2 to a plain-HTTP upstream too, because such a

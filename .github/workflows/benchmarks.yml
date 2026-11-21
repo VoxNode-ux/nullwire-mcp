@@ -2,7 +2,7 @@ name: Benchmarks (speed, load and DLP accuracy)
 
 # Workflow 2. Measures the proxy; it never gates a merge.
 #   hey (HTTP/1.1 load) + h2load (HTTP/2 cleartext load) + k6 (SSE streaming)
-#   + hyperfine (CLI/scan speed) + Samsung CredData & SecretBench (DLP accuracy)
+#   + hyperfine (CLI/scan speed) + Samsung CredData (DLP accuracy)
 #   + native probes: MCP handshake, tool-call latency (empty and 50 flows),
 #     binary size, scrubber CPU, memory footprint (VmRSS / heap in use),
 #     big body + secret stress, gRPC / gRPC-Web over h2c, and a bash + hey soak
@@ -30,6 +30,7 @@ env:
   K6_VERSION: "v2.4.0"
   K6_SHA256: "5a5ecf23529ccf93135bc7e5b0c1cd5126ecf5f2672e22eed1556a0ab74abb87"
   HYPERFINE_VERSION: "v2.0.0"
+  HYPERFINE_SHA256: "ae2beda2ac99c098427e4f755244552daf20e514422889cca6d44421e2d93c87"   # hyperfine-v2.0.0-x86_64-unknown-linux-gnu.tar.gz
 
 jobs:
   # ------------------------------------------------------------------ 1
@@ -65,14 +66,14 @@ jobs:
           echo "${K6_SHA256}  k6.tgz" | sha256sum -c -
           tar -xzf k6.tgz --strip-components=1 -C bin "k6-${K6_VERSION}-linux-amd64/k6"
           curl -fsSL -o hf.tgz "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-          sha256sum hf.tgz
+          echo "${HYPERFINE_SHA256}  hf.tgz" | sha256sum -c -
           tar -xzf hf.tgz --strip-components=1 -C bin "hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu/hyperfine"
           k6 version; hyperfine --version; hey -n 1 http://127.0.0.1:1/ 2>&1 | head -1 || true
 
       - name: Build NullWire and a local HTTP/1.1 + h2c + SSE upstream
         run: |
           set -e
-          go build -trimpath -o nullwire-mcp .
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
           mkdir -p "$RUNNER_TEMP/up" && cd "$RUNNER_TEMP/up"
           cat > main.go <<'GO'
           package main
@@ -142,6 +143,32 @@ jobs:
           }
           JS
           k6 run --summary-export=k6-sse.json sse.js 2>&1 | tee k6-sse.txt
+      - name: SSE overhead (direct vs through NullWire; upstream floor is 20 x 10 ms)
+        id: ssedirect
+        run: |
+          python3 - <<'PY'
+          import time, urllib.request, json
+          def run(url, n=100):
+              ts = []
+              for _ in range(n):
+                  t = time.perf_counter()
+                  with urllib.request.urlopen(url) as r:
+                      body = r.read()
+                  assert body.count(b"data:") == 20
+                  ts.append((time.perf_counter() - t) * 1000)
+              ts.sort()
+              return sum(ts) / len(ts), ts[len(ts) // 2]
+          run("http://127.0.0.1:18081/sse", 5)  # warm-up
+          run("http://127.0.0.1:18080/sse", 5)
+          d_avg, d_med = run("http://127.0.0.1:18081/sse")
+          p_avg, p_med = run("http://127.0.0.1:18080/sse")
+          res = {"sse_direct_ms": round(d_avg, 2), "sse_proxy_ms": round(p_avg, 2),
+                 "sse_overhead_ms": round(p_avg - d_avg, 2),
+                 "sse_direct_median_ms": round(d_med, 2), "sse_proxy_median_ms": round(p_med, 2),
+                 "sse_overhead_median_ms": round(p_med - d_med, 2)}
+          json.dump(res, open("sse-overhead.json", "w"), indent=2)
+          print(res)
+          PY
       - name: hyperfine (startup, tools/list and scan)
         id: hyperfine
         run: |
@@ -185,6 +212,14 @@ jobs:
           hey -z 10s -c 10 -m POST -T application/octet-stream -D bigbody.txt http://127.0.0.1:18081/ > bigbody-direct.txt
           hey -z 10s -c 10 -m POST -T application/octet-stream -D bigbody.txt http://127.0.0.1:18080/ > bigbody-proxy.txt
           echo "VmRSS after load: $(grep VmRSS /proc/$(cat nw.pid)/status)" | tee bigbody-rss.txt
+      - name: Big body CPU profile (pprof, informational)
+        id: bigbodyprof
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          go test -run='^$' -bench='BenchmarkProxyBigBody' -benchtime=300x -cpuprofile cpu-bigbody.out -mutexprofile mutex-bigbody.out -mutexprofilefraction=1 ./internal/app | tee bigbody-bench.txt
+          go tool pprof -top -cum -nodecount=25 cpu-bigbody.out 2>&1 | tee cpu-bigbody-top.txt
+          go tool pprof -top -nodecount=10 mutex-bigbody.out 2>&1 | tee mutex-bigbody-top.txt
       - name: gRPC and gRPC-Web throughput (h2load over h2c, POST)
         id: grpc
         run: |
@@ -209,6 +244,7 @@ jobs:
               echo "### $f"; grep -E "^finished in|^requests:|^status codes|^time for request" $f.txt 2>/dev/null | sed 's/^/    /'
             done
             echo "### k6 SSE"; grep -E "checks|http_req_duration|iterations" k6-sse.txt 2>/dev/null | sed 's/^/    /'
+            echo "### SSE overhead (proxy minus direct, one 20-event stream)"; sed 's/^/    /' sse-overhead.json 2>/dev/null
             echo "### hyperfine"; cat hyperfine.md 2>/dev/null
             cat binsize.md 2>/dev/null
             echo "### Scrubber CPU (go test -bench)"; grep -E "^Benchmark" scrub-bench.txt 2>/dev/null | sed 's/^/    /'
@@ -231,6 +267,7 @@ jobs:
             echo "| hey (HTTP/1.1) | ${{ steps.hey.outcome }} |"
             echo "| h2load (HTTP/2) | ${{ steps.h2load.outcome }} |"
             echo "| k6 (SSE) | ${{ steps.k6.outcome }} |"
+            echo "| SSE overhead (direct vs proxy) | ${{ steps.ssedirect.outcome }} |"
             echo "| hyperfine | ${{ steps.hyperfine.outcome }} |"
             echo "| binary size | ${{ steps.binsize.outcome }} |"
             echo "| scrubber CPU (go test -bench) | ${{ steps.scrubbench.outcome }} |"
@@ -250,12 +287,16 @@ jobs:
             hey-*.txt
             h2-*.txt
             k6-sse.*
+            sse-overhead.json
             hyperfine.md
             binsize.md
             scrub-bench.txt
             heap-inuse.txt
             mcp-probe.json
             bigbody-*.txt
+            cpu-bigbody*.out
+            cpu-bigbody-top.txt
+            mutex-bigbody-top.txt
             grpc-*.txt
             nw.err
             upstream.log
@@ -263,7 +304,7 @@ jobs:
 
   # ------------------------------------------------------------------ 2
   dlp-accuracy:
-    name: DLP accuracy (Samsung CredData and SecretBench)
+    name: DLP accuracy (Samsung CredData and test_keys)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -276,13 +317,11 @@ jobs:
           check-latest: false
           cache: false
       - name: Build NullWire
-        run: go build -trimpath -o nullwire-mcp .
+        run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
       - name: Clone the datasets (shallow)
         run: |
           git clone --depth 1 https://github.com/Samsung/CredData.git creddata
-          git clone --depth 1 https://github.com/setu1421/SecretBench.git secretbench
           git -C creddata rev-parse HEAD
-          git -C secretbench rev-parse HEAD
       - name: Fetch CredData sample files
         id: fetch
         run: |
@@ -298,7 +337,7 @@ jobs:
           tp = fp = 0
           hit_tp = hit_fp = 0
           rows = []
-          for m in glob.glob("creddata/meta/*.csv"):
+          for m in sorted(glob.glob("creddata/meta/*.csv")):
               with open(m, newline="", encoding="utf-8", errors="replace") as f:
                   for r in csv.DictReader(f):
                       label = r.get("GroundTruth") or r.get("Label")
@@ -320,6 +359,9 @@ jobs:
                           rows.append((label, val))
               if len(rows) > 20000: break
           rows = rows[:20000]
+          with open("work/cred.tsv", "w") as f:
+              for (l, v) in rows:
+                  f.write("%s\t%s\n" % (l, v.replace("\r", "")))
           with open("work/cred.env", "w") as f:
               for i, (_, v) in enumerate(rows):
                   f.write("CRED_%d=%s\n" % (i, v.replace("\r", "")))
@@ -340,14 +382,51 @@ jobs:
                   s.write("_No labelled CredData samples were available on the runner._\n")
           PY
           python3 score.py
-      - name: SecretBench inventory
-        id: sb
+      - name: CredData FPR by rule stage (diagnostic)
+        if: always()
         run: |
+          mkdir -p diag
+          # Run twice: CRED= looks like a secret-named field, X= is neutral. The gap
+          # between the two shows how much of the false-positive rate is the key name.
+          # Raw samples go to RUNNER_TEMP (never uploaded); only a masked copy is kept.
+          for K in CRED X; do
+            CREDDATA_KEY="$K" CREDDATA_SAMPLES=100 CREDDATA_SAMPLES_OUT="$RUNNER_TEMP/samples-raw-$K.tsv" \
+            CREDDATA_TSV="$PWD/work/cred.tsv" go test -run TestCredDataFPRByStage -count=1 -v ./internal/app | tee "diag/stage-$K.txt"
+          done
+          python3 - <<'PY'
+          import os
+          tmp = os.environ["RUNNER_TEMP"]
+          KIND = {("F", True): "FALSE-POSITIVE (benign value redacted)",
+                  ("F", False): "true-negative (benign value allowed)",
+                  ("T", True): "true-positive (secret redacted)",
+                  ("T", False): "FALSE-NEGATIVE (secret allowed through)"}
+          for k in ("CRED", "X"):
+              src = os.path.join(tmp, "samples-raw-%s.tsv" % k)
+              if not os.path.isfile(src):
+                  continue
+              with open("diag/samples-%s.tsv" % k, "w") as out:
+                  out.write("kind\tstage\tvalue\n")
+                  for line in open(src, encoding="utf-8", errors="replace"):
+                      parts = line.rstrip("\n").split("\t", 2)
+                      if len(parts) != 3:
+                          continue
+                      label, stage, val = parts
+                      if label == "T":
+                          # CredData secrets are real leaked values: keep only the shape.
+                          val = val[:3] + "*" * min(max(len(val) - 3, 0), 40) + " (len %d)" % len(val)
+                      out.write("%s\t%s\t%s\n" % (KIND[(label, stage != "clean")], stage, val[:200]))
+          PY
           {
-            echo "## SecretBench"
-            echo "- Commit: \`$(git -C secretbench rev-parse --short HEAD)\`"
-            echo "- Data files found: $(find secretbench -type f \( -name '*.csv' -o -name '*.json' -o -name '*.parquet' \) | wc -l)"
-            echo "_The labelled corpus is distributed separately by the authors; this run scores it only when the files are in the clone._"
+            for K in CRED X; do
+              echo "## CredData FPR by stage (key name: $K)"
+              echo '```'
+              grep -E '^==|^  ' "diag/stage-$K.txt"
+              echo '```'
+            done
+            echo "First false positives (CRED run, benign values the scrubber redacted):"
+            echo '```'
+            grep -P '^FALSE-POSITIVE' diag/samples-CRED.tsv | head -25 || true
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Install gitleaks and trufflehog (checksum-verified)
         id: scanners
@@ -391,13 +470,14 @@ jobs:
             echo "| test_keys before/after (gitleaks, trufflehog) | ${{ steps.testkeys.outcome }} |"
             echo "| CredData download | ${{ steps.fetch.outcome }} |"
             echo "| CredData scoring | ${{ steps.score.outcome }} |"
-            echo "| SecretBench inventory | ${{ steps.sb.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: dlp-accuracy
-          path: creddata-result.json
+          path: |
+            creddata-result.json
+            diag/
           if-no-files-found: ignore
 
   # ------------------------------------------------------------------ 3
@@ -420,7 +500,7 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Build NullWire and start a tiny upstream
         run: |
-          go build -trimpath -o nullwire-mcp .
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
           python3 - <<'PY' > upstream.log 2>&1 &
           from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
           class H(BaseHTTPRequestHandler):
@@ -435,8 +515,12 @@ jobs:
           echo $! > upstream.pid
           ./nullwire-mcp -port 18080 -target http://127.0.0.1:18081 < <(sleep 3000) > nw.out 2> nw.err &
           echo $! > nw.pid
-          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:18080/ && break; sleep 1; done
-          curl -sf http://127.0.0.1:18080/ >/dev/null
+          # Wait for the upstream first, then for the proxy to answer 2xx. A bare
+          # `curl -s` succeeds on a 502 from a proxy whose upstream is not up yet,
+          # and the final `curl -f` then fails with exit code 22.
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:18081/ && break; sleep 1; done
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:18080/ && break; sleep 1; done
+          curl -sf http://127.0.0.1:18080/ >/dev/null || { echo "proxy not healthy"; cat nw.err nw.out upstream.log; exit 1; }
       - name: Soak (24 rounds of 10 s, secrets in every body; VmRSS after each round)
         id: soak
         run: |

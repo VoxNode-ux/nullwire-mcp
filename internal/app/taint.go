@@ -44,7 +44,7 @@ type taintRing struct {
 	set    map[uint64]struct{}
 	pos    int
 	filled int
-	size   atomic.Int32
+	size   atomic.Int64
 }
 
 // taintMAC is one reusable HMAC context. buf holds the text being hashed so the
@@ -112,7 +112,7 @@ func (t *taintRing) insertLocked(h uint64) {
 	t.ring[t.pos] = h
 	t.set[h] = struct{}{}
 	t.pos = (t.pos + 1) % taintCap
-	t.size.Store(int32(len(t.set))) // #nosec G115 -- the set never holds more than taintCap (500) entries
+	t.size.Store(int64(len(t.set)))
 }
 
 // add records a redacted secret. Sub-windows are stored only for secrets of

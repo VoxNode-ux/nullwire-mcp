@@ -14,6 +14,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/VoxNode-ux/nullwire-mcp/internal/cliio"
 )
 
 // Signed offline policy packs.
@@ -70,9 +72,9 @@ func parsePolicyPubKey(spec string) (*ecdsa.PublicKey, error) {
 		return nil, errors.New("empty public key")
 	}
 	data := []byte(spec)
-	fi, statErr := os.Stat(spec) // #nosec G703 -- the path is the -policy-pubkey value the admin passed
+	fi, statErr := cliio.Stat(spec)
 	if statErr == nil && fi.Mode().IsRegular() {
-		b, err := os.ReadFile(spec) // #nosec G304 G703 -- the path is the -policy-pubkey file the user passed
+		b, err := cliio.ReadFile(spec)
 		if err != nil {
 			return nil, err
 		}
@@ -108,7 +110,7 @@ func parseP256PrivateKey(data []byte) (*ecdsa.PrivateKey, error) {
 }
 
 func loadP256PrivateKeyFile(path string) (*ecdsa.PrivateKey, error) {
-	b, err := os.ReadFile(path) // #nosec G304 G703 -- the path is a key file the user passed
+	b, err := cliio.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +156,7 @@ func loadPolicy(path, pubSpec string) (cfg *SecretsConfig, sha string, signed bo
 		}
 		return &SecretsConfig{}, "", false, nil
 	}
-	raw, err := os.ReadFile(path) // #nosec G304 -- the path is the -secrets-config file the user passed
+	raw, err := cliio.ReadFile(path)
 	if err != nil {
 		return nil, "", false, fmt.Errorf("-secrets-config %s: %v", path, err)
 	}
@@ -163,7 +165,7 @@ func loadPolicy(path, pubSpec string) (cfg *SecretsConfig, sha string, signed bo
 		if err != nil {
 			return nil, "", false, fmt.Errorf("-policy-pubkey: %v", err)
 		}
-		sig, err := os.ReadFile(path + policySigSuffix) // #nosec G304 -- next to the policy file
+		sig, err := cliio.ReadFile(path + policySigSuffix)
 		if err != nil {
 			return nil, "", false, fmt.Errorf("-policy-pubkey is set but there is no signature: %v", err)
 		}
@@ -191,7 +193,7 @@ func policyLockError(pubkeySet, allowUninspectable bool) error {
 }
 
 func writeNewFile(path string, data []byte, perm os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm) // #nosec G304 G703 -- output path chosen by the admin
+	f, err := cliio.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
 		return err
 	}
@@ -241,7 +243,7 @@ func RunPolicy(args []string, stdout, stderr io.Writer) int {
 		if err := writeNewFile(*out+".key", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: priv}), 0o600); err != nil {
 			return fail(err)
 		}
-		if err := writeNewFile(*out+".pub", pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pub}), 0o644); err != nil { // #nosec G302 -- a public key
+		if err := writeNewFile(*out+".pub", pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pub}), 0o644); err != nil {
 			return fail(err)
 		}
 		fmt.Fprintf(stdout, "wrote %s.key (private: keep it offline) and %s.pub\npublic key (hex, for -policy-pubkey): %s\n", *out, *out, hex.EncodeToString(pub))
@@ -255,7 +257,7 @@ func RunPolicy(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(err)
 		}
-		data, err := os.ReadFile(fs.Arg(0)) // #nosec G304 G703 -- the file the admin asked to sign
+		data, err := cliio.ReadFile(fs.Arg(0))
 		if err != nil {
 			return fail(err)
 		}
@@ -263,7 +265,7 @@ func RunPolicy(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(err)
 		}
-		if err := os.WriteFile(fs.Arg(0)+policySigSuffix, []byte(sig+"\n"), 0o644); err != nil { // #nosec G306 G703 -- a signature is public; the path is the file the admin signed plus .sig
+		if err := cliio.WriteFile(fs.Arg(0)+policySigSuffix, []byte(sig+"\n"), 0o644); err != nil {
 			return fail(err)
 		}
 		fmt.Fprintf(stdout, "wrote %s%s\n", fs.Arg(0), policySigSuffix)
@@ -277,11 +279,11 @@ func RunPolicy(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(err)
 		}
-		data, err := os.ReadFile(fs.Arg(0)) // #nosec G304 G703 -- the file the admin asked to check
+		data, err := cliio.ReadFile(fs.Arg(0))
 		if err != nil {
 			return fail(err)
 		}
-		sig, err := os.ReadFile(fs.Arg(0) + policySigSuffix) // #nosec G304 G703 -- next to the policy file
+		sig, err := cliio.ReadFile(fs.Arg(0) + policySigSuffix)
 		if err != nil {
 			return fail(err)
 		}
@@ -295,7 +297,7 @@ func RunPolicy(args []string, stdout, stderr io.Writer) int {
 		if fs.Parse(args[1:]) != nil || fs.NArg() != 1 {
 			return usage()
 		}
-		data, err := os.ReadFile(fs.Arg(0)) // #nosec G304 G703 -- the report the admin asked to check
+		data, err := cliio.ReadFile(fs.Arg(0))
 		if err != nil {
 			return fail(err)
 		}

@@ -38,10 +38,7 @@ func FuzzVendorKeysNoLeak(f *testing.F) {
 			"ya29." + body, "glpat-" + body, "hf_" + body, "npm_" + body,
 			"SG." + body[:half] + "." + body[half:],
 		}
-		s, err := NewScrubber()
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := mustScrubber()
 		tail := body[len(body)-12:]
 		for _, secret := range secrets {
 			in := "found " + secret + " in the body"
@@ -73,10 +70,7 @@ func FuzzIPv6NoLeak(f *testing.F) {
 			t.Skip()
 		}
 		text := addr.String()
-		s, err := NewScrubber()
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := mustScrubber()
 		for _, ctx := range []string{"%s", "peer %s connected", "[%s]:443", "addr=%s;", `{"ip":"%s"}`, "seen at %s."} {
 			in := fmt.Sprintf(ctx, text)
 			out, n := s.scrubIPv6(in)
@@ -95,10 +89,7 @@ func FuzzIPv6Stable(f *testing.F) {
 	f.Add("[2001:db8::1]:443 ::ffff:192.0.2.1 v1.2.3 0xdeadbeef")
 	f.Add("::::::: ..:.:..: 1:2:3:4:5:6:7:8:9 ::g ::1%")
 	f.Fuzz(func(t *testing.T, in string) {
-		s, err := NewScrubber()
-		if err != nil {
-			t.Fatal(err)
-		}
+		s := mustScrubber()
 		out, n := s.scrubIPv6(in)
 		if strings.Count(in, ":") < 2 && (out != in || n != 0) {
 			t.Fatalf("touched text with <2 colons: %q -> %q", in, out)

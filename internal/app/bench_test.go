@@ -23,7 +23,7 @@ func benchScrubber(b *testing.B) *Scrubber {
 	b.Helper()
 	s, err := NewScrubber()
 	if err != nil {
-		b.Fatalf("NewScrubber: %v", err)
+		b.Fatal(err)
 	}
 	return s
 }

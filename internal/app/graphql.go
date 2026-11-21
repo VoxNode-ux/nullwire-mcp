@@ -180,7 +180,7 @@ func gqlOperations(src string) []gqlOp {
 	var ops []gqlOp
 	depth, header := 0, false // header: an operation or fragment keyword came before the next {
 	var pending *gqlOp        // operation keyword seen, kept only once its { follows
-	awaiting := -1            // op whose first root field has not been read yet
+	var awaitOp *gqlOp        // op whose first root field has not been read yet
 	i, n := 0, len(src)
 	for i < n && len(ops) < gqlMaxOps {
 		c := src[i]
@@ -211,11 +211,10 @@ func gqlOperations(src string) []gqlOp {
 				switch {
 				case pending != nil:
 					ops = append(ops, *pending)
+					awaitOp = &ops[len(ops)-1]
 				case !header:
 					ops = append(ops, gqlOp{kind: "query"}) // shorthand: { ... }
-				}
-				if pending != nil || !header {
-					awaiting = len(ops) - 1
+					awaitOp = &ops[len(ops)-1]
 				}
 				pending, header = nil, false
 			}
@@ -237,7 +236,7 @@ func gqlOperations(src string) []gqlOp {
 			word := src[i:j]
 			i = j
 			if depth != 0 {
-				if awaiting >= 0 && depth == 1 {
+				if awaitOp != nil && depth == 1 {
 					start := i - len(word)
 					if k := gqlSkip(src, i); k < n && src[k] == ':' {
 						continue // an alias: the field name follows
@@ -246,11 +245,11 @@ func gqlOperations(src string) []gqlOp {
 						if word != "on" {
 							continue // a fragment spread: the root field may still follow
 						}
-						awaiting = -1 // "... on Type": an inline fragment, not a root field
+						awaitOp = nil // "... on Type": an inline fragment, not a root field
 						continue
 					}
-					ops[awaiting].field = word
-					awaiting = -1
+					awaitOp.field = word
+					awaitOp = nil
 				}
 				continue
 			}

@@ -24,6 +24,11 @@ nullwire-mcp install [options]       register NullWire with your MCP clients
 | `-scrub-headers` | none | Extra header names to always redact. |
 | `-allow-uninspectable` | off | Forward request bodies that can't be inspected instead of refusing them with `415`. |
 | `-max-body` | none (32 KiB request, 256 KiB response) | Raise the stored body size for both requests and responses, for debugging large errors. Accepts a byte count or a `k`/`m` suffix: `-max-body 1m`. Between 32 KiB and 2 MiB; it never lowers a default. Secrets are scrubbed before the text is cut, so one that straddles the limit is still redacted. Memory: the ring keeps up to 50 flows, so `2m` can hold about 200 MiB of body text. |
+| `-max-ram` | off | Opt-in RAM ceiling for the captured-flow buffer, e.g. `-max-ram 64m`. Accepts a byte count or a `k`/`m` suffix; zero, negative and anything above `400m` are refused, and so is a value too small for one flow at the current `-max-body`. The buffer keeps its 50-flow limit and also stays under the byte budget (bodies, URL, headers and a fixed overhead per flow): when a new flow would go over, the oldest flows are dropped first and their slots zeroed. A single flow is cut to fit rather than dropped. Only the stored copy is affected; live traffic is not. |
+| `-ttl` | off | Opt-in: wipe any captured flow older than this duration, e.g. `-ttl 10m`. Checked on every read (`inspect_traffic`, `export_har`, `export_sanitized_curl`) and by a background sweeper, so expired flows are zeroed even if nobody reads them. Negative values are refused. |
+| `-idle-wipe` | off | Opt-in: wipe the whole captured-flow buffer when no new flow arrives for this long, e.g. `-idle-wipe 5m`. Same zeroing as `clear_ram_buffer`; a new flow restarts the window. Negative values are refused. The sweeper runs only when `-ttl` or `-idle-wipe` is set and stops on shutdown. |
+| `-tail` | off | Opt-in live tail: one summary line per captured flow on **stderr** (never stdout, which carries MCP JSON-RPC), e.g. `[14:02:11] POST https://api.example.com/v1/chat 200 142ms (3 redacted)`. Built only from the scrubbed URL, status, latency and redaction count; bodies and headers are never printed, and control bytes are shown as `?`. The `\r` status bar is turned off while `-tail` is on, so lines are not overwritten. |
+| `-minify` | off | Opt-in: store captured JSON bodies compacted (whitespace removed) so more fit in the ring and `-max-ram`. It runs after scrubbing and changes only the copy kept in RAM; the bytes sent to the client and upstream are never touched. Bodies that are not a complete JSON object or array (plain text, truncated or invalid JSON) are stored as they are. |
 | `-ws-deflate` | off | Keep the WebSocket `permessage-deflate` offer and decode compressed text messages for capture. By default the offer is dropped so frames stay readable, which is safer. Decoding is capped per message and per connection (16 MiB) against compression bombs. |
 
 ## Capture modes
@@ -204,7 +209,7 @@ The hook runs `nullwire-mcp scan --fail --yaml` on staged `.env`, MCP config, TO
 nullwire-mcp protect --target https://api.example.com --deep .
 ```
 
-It accepts the server options (`--port`, `--target`, `--target-map`, `--cacert`, `--dns`, `--secrets-config`, `--scrub-headers`, `--allow-uninspectable`, `--max-body`, `--ws-deflate`) plus `--deep DIR`, `--history` and `--no-scan`. The scan report goes to stderr, so the MCP channel on stdout stays clean, and stop signals are passed on to the server.
+It accepts the server options (`--port`, `--target`, `--target-map`, `--cacert`, `--dns`, `--secrets-config`, `--scrub-headers`, `--allow-uninspectable`, `--max-body`, `--max-ram`, `--ttl`, `--idle-wipe`, `--tail`, `--minify`, `--ws-deflate`) plus `--deep DIR`, `--history` and `--no-scan`. The scan report goes to stderr, so the MCP channel on stdout stays clean, and stop signals are passed on to the server.
 
 ## Troubleshooting
 

@@ -29,6 +29,8 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +39,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/VoxNode-ux/nullwire-mcp/internal/cliio"
 	"github.com/VoxNode-ux/nullwire-mcp/internal/install"
 	"github.com/VoxNode-ux/nullwire-mcp/internal/protect"
 	"github.com/VoxNode-ux/nullwire-mcp/internal/scan"
@@ -97,9 +100,229 @@ type RingBuffer struct {
 	next   int
 	size   int
 	nextID uint64
+
+	// maxBytes is the -max-ram budget; 0 means off. bytes is the estimated
+	// size of everything stored, and is only kept up to date when maxBytes > 0.
+	maxBytes int
+	bytes    int
+
+	// -ttl and -idle-wipe. timed is set once by SetExpiry before the buffer
+	// is shared; when it is false none of this code runs. born[i] is when
+	// slots[i] was stored; lastPush is when the newest flow arrived.
+	timed     bool
+	ttl, idle time.Duration
+	born      [ringCapacity]time.Time
+	lastPush  time.Time
+	clock     func() time.Time // tests only; nil means time.Now
+	sweepDone chan struct{}
+	sweepWG   sync.WaitGroup
+}
+
+func (r *RingBuffer) now() time.Time {
+	if r.clock != nil {
+		return r.clock()
+	}
+	return time.Now()
+}
+
+// SetExpiry turns on -ttl (entries older than ttl are wiped) and -idle-wipe
+// (the whole buffer is wiped when no flow arrives for idle). Zero means off.
+// Call it before the buffer is shared.
+func (r *RingBuffer) SetExpiry(ttl, idle time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ttl, r.idle = max(ttl, 0), max(idle, 0)
+	r.timed = r.ttl > 0 || r.idle > 0
+	if r.timed {
+		now := r.now()
+		r.lastPush = now
+		for i := 0; i < r.size; i++ {
+			r.born[(r.next-1-i+2*ringCapacity)%ringCapacity] = now
+		}
+	}
+}
+
+// expireLocked wipes what -idle-wipe and -ttl say is due. The caller holds
+// r.mu for writing.
+func (r *RingBuffer) expireLocked(now time.Time) {
+	if r.size == 0 {
+		return
+	}
+	if r.idle > 0 && now.Sub(r.lastPush) >= r.idle {
+		r.wipeLocked()
+		return
+	}
+	if r.ttl <= 0 {
+		return
+	}
+	for r.size > 0 {
+		oldest := (r.next - r.size + ringCapacity) % ringCapacity
+		if now.Sub(r.born[oldest]) < r.ttl {
+			return
+		}
+		r.dropOldestLocked()
+	}
+}
+
+// expire is the lazy check run by the read paths.
+func (r *RingBuffer) expire() {
+	if !r.timed {
+		return
+	}
+	r.mu.Lock()
+	r.expireLocked(r.now())
+	r.mu.Unlock()
+}
+
+// sweepInterval is how often the background sweeper looks: a quarter of the
+// shortest window, kept between 5 ms and 5 s. Reads also expire lazily, so
+// the sweeper only bounds how long expired data can sit unread.
+func sweepInterval(ttl, idle time.Duration) time.Duration {
+	m := ttl
+	if m <= 0 || (idle > 0 && idle < m) {
+		m = idle
+	}
+	return min(max(m/4, 5*time.Millisecond), 5*time.Second)
+}
+
+// StartSweeper starts the background sweeper. It does nothing unless -ttl or
+// -idle-wipe is set, and does nothing when one is already running.
+func (r *RingBuffer) StartSweeper() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.timed || r.sweepDone != nil {
+		return
+	}
+	done := make(chan struct{})
+	r.sweepDone = done
+	tick := time.NewTicker(sweepInterval(r.ttl, r.idle))
+	r.sweepWG.Add(1)
+	go func() {
+		defer r.sweepWG.Done()
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+				r.mu.Lock()
+				r.expireLocked(r.now())
+				r.mu.Unlock()
+			}
+		}
+	}()
+}
+
+// StopSweeper stops the sweeper and waits for it to exit. It is safe to call
+// more than once, or without StartSweeper.
+func (r *RingBuffer) StopSweeper() {
+	r.mu.Lock()
+	done := r.sweepDone
+	r.sweepDone = nil
+	r.mu.Unlock()
+	if done == nil {
+		return
+	}
+	close(done)
+	r.sweepWG.Wait()
 }
 
 func NewRingBuffer() *RingBuffer { return &RingBuffer{nextID: 1} }
+
+// SetMaxBytes turns the byte budget on (n > 0) or off (n <= 0). Call it
+// before the buffer is shared. Entries already stored are counted.
+func (r *RingBuffer) SetMaxBytes(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n <= 0 {
+		r.maxBytes, r.bytes = 0, 0
+		return
+	}
+	r.maxBytes = n
+	r.bytes = 0
+	for i := 0; i < r.size; i++ {
+		r.bytes += entryCost(&r.slots[(r.next-1-i+2*ringCapacity)%ringCapacity])
+	}
+	r.evictLocked(-1)
+}
+
+// Bytes returns the estimated stored size, or 0 when -max-ram is off.
+func (r *RingBuffer) Bytes() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.bytes
+}
+
+// entryFixedCost covers the FlowEntry struct, map headers and slack.
+const entryFixedCost = 512
+
+// entryCost estimates the memory held by one entry: bodies, URL, header
+// text and a fixed allowance for the struct and map overhead.
+func entryCost(e *FlowEntry) int {
+	n := entryFixedCost + len(e.RequestBody) + len(e.ResponseBody) +
+		len(e.URL) + len(e.Method) + len(e.Timestamp) + len(e.Note)
+	for k, v := range e.RequestHeaders {
+		n += len(k) + len(v) + 32
+	}
+	for k, v := range e.ResponseHeaders {
+		n += len(k) + len(v) + 32
+	}
+	return n
+}
+
+// dropOldestLocked removes the oldest entry, zeroing its slot, and returns
+// its slot index. The caller holds r.mu.
+func (r *RingBuffer) dropOldestLocked() int {
+	idx := (r.next - r.size + ringCapacity) % ringCapacity
+	if r.maxBytes > 0 {
+		r.bytes -= entryCost(&r.slots[idx])
+	}
+	r.slots[idx] = FlowEntry{}
+	r.born[idx] = time.Time{}
+	r.size--
+	return idx
+}
+
+// evictLocked drops the oldest entries (FIFO) until the buffer fits the
+// budget. The slot at keep is never dropped (-1 keeps none).
+func (r *RingBuffer) evictLocked(keep int) {
+	for r.bytes > r.maxBytes && r.size > 0 {
+		if (r.next-r.size+ringCapacity)%ringCapacity == keep {
+			return
+		}
+		r.dropOldestLocked()
+	}
+}
+
+// fitEntry cuts the bodies of e until it alone fits the budget. Bodies are
+// already limited by -max-body, and -max-ram is checked against those limits
+// at startup, so this only matters for a huge header set or URL.
+func (r *RingBuffer) fitEntry(e *FlowEntry) {
+	over := entryCost(e) - r.maxBytes
+	if over <= 0 {
+		return
+	}
+	e.ResponseBody = cutBody(e.ResponseBody, over)
+	if over = entryCost(e) - r.maxBytes; over > 0 {
+		e.RequestBody = cutBody(e.RequestBody, over)
+	}
+	if over = entryCost(e) - r.maxBytes; over > 0 {
+		e.RequestHeaders, e.ResponseHeaders = nil, nil
+	}
+}
+
+// cutBody removes at least over bytes from s, keeping the head and adding
+// the truncation marker; when that would not save anything it returns "".
+func cutBody(s string, over int) string {
+	keep := len(s) - over - len(truncMarker)
+	if keep <= 0 {
+		return ""
+	}
+	return truncate(s, keep)
+}
 
 // Push stores entry and returns the ID it was given.
 func (r *RingBuffer) Push(entry FlowEntry) uint64 {
@@ -107,7 +330,24 @@ func (r *RingBuffer) Push(entry FlowEntry) uint64 {
 	defer r.mu.Unlock()
 	entry.ID = r.nextID
 	r.nextID++
+	var now time.Time
+	if r.timed {
+		now = r.now()
+		r.expireLocked(now)
+	}
+	if r.maxBytes > 0 {
+		r.fitEntry(&entry)
+		if r.size == ringCapacity {
+			r.dropOldestLocked() // the slot we are about to reuse
+		}
+		r.bytes += entryCost(&entry)
+		r.evictLocked(-1)
+	}
 	r.slots[r.next] = entry
+	if r.timed {
+		r.born[r.next] = now
+		r.lastPush = now
+	}
 	r.next = (r.next + 1) % ringCapacity
 	if r.size < ringCapacity {
 		r.size++
@@ -121,11 +361,23 @@ func (r *RingBuffer) Push(entry FlowEntry) uint64 {
 func (r *RingBuffer) Update(id uint64, fn func(*FlowEntry)) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.timed {
+		r.expireLocked(r.now())
+	}
 	for i := 0; i < r.size; i++ {
 		idx := (r.next - 1 - i + 2*ringCapacity) % ringCapacity
 		if r.slots[idx].ID == id {
+			if r.maxBytes <= 0 {
+				fn(&r.slots[idx])
+				r.slots[idx].ID = id // fn cannot move an entry to another ID
+				return true
+			}
+			before := entryCost(&r.slots[idx])
 			fn(&r.slots[idx])
-			r.slots[idx].ID = id // fn cannot move an entry to another ID
+			r.slots[idx].ID = id
+			r.fitEntry(&r.slots[idx])
+			r.bytes += entryCost(&r.slots[idx]) - before
+			r.evictLocked(idx)
 			return true
 		}
 	}
@@ -136,12 +388,14 @@ func (r *RingBuffer) Len() int {
 	if r == nil {
 		return 0
 	}
+	r.expire()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.size
 }
 
 func (r *RingBuffer) ListRecent(limit int, methodFilter string, urlSubstring string) []FlowEntry {
+	r.expire()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if limit <= 0 {
@@ -167,6 +421,7 @@ func (r *RingBuffer) ListRecent(limit int, methodFilter string, urlSubstring str
 }
 
 func (r *RingBuffer) GetByID(id uint64) (FlowEntry, bool) {
+	r.expire()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for i := 0; i < r.size; i++ {
@@ -181,9 +436,16 @@ func (r *RingBuffer) GetByID(id uint64) (FlowEntry, bool) {
 func (r *RingBuffer) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.wipeLocked()
+}
+
+// wipeLocked zeroes every slot and resets the counters. The caller holds r.mu.
+func (r *RingBuffer) wipeLocked() {
 	clear(r.slots[:])
+	clear(r.born[:])
 	r.next = 0
 	r.size = 0
+	r.bytes = 0
 }
 
 type VendorConfig struct {
@@ -206,6 +468,14 @@ type SecretsConfig struct {
 	AllowedUpstreamHosts []string `json:"allowed_upstream_hosts"`
 	BlockedUpstreamHosts []string `json:"blocked_upstream_hosts"`
 
+	// Built-in upstream address blocks. Cloud metadata (169.254.0.0/16,
+	// fd00:ec2::254) is blocked unless allow_metadata_upstream is true; CGNAT
+	// (100.64.0.0/10) and IPv6 link-local (fe80::/10) are blocked only when
+	// asked for, so Tailscale and local networks work by default.
+	AllowMetadataUpstream  bool `json:"allow_metadata_upstream"`
+	BlockCGNATUpstream     bool `json:"block_cgnat_upstream"`
+	BlockLinkLocalUpstream bool `json:"block_link_local_upstream"`
+
 	// Presets switches on compliance redaction: pci-dss, hipaa, gdpr or all.
 	Presets []string `json:"presets"`
 }
@@ -219,7 +489,7 @@ func loadSecretsConfig(path string) (*SecretsConfig, error) {
 	if path == "" {
 		return &SecretsConfig{}, nil
 	}
-	raw, err := os.ReadFile(path) // #nosec G304 -- the path is the -secrets-config file the user passed
+	raw, err := cliio.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("-secrets-config %s: %v", path, err)
 	}
@@ -266,22 +536,22 @@ type Scrubber struct {
 	extraSensitive map[string]bool
 	ignoreHeaders  map[string]bool
 	extraPatterns  []*regexp.Regexp
-	vendorGate     *vendors.Gate // Aho-Corasick pre-check over every prefix (run on lower-cased text)
+	vendorGate     *lazyVendorGate // Aho-Corasick pre-check over every prefix (run on lower-cased text); built on first use
 	vendorRules    []vendorRule // strong, weak, DSN and custom prefix rules
 	allow          *allowlist   // body exemptions from the user's config; nil when none are set
 	presets        presetSet    // -preset: pci-dss, hipaa, gdpr (all off by default)
 
-	reBearer          *regexp.Regexp
-	reSensitiveHeader *regexp.Regexp
-	reJWT             *regexp.Regexp
-	reAPIKey          *regexp.Regexp
-	reJSONSecret      *regexp.Regexp
-	reQuerySecret     *regexp.Regexp
-	reUserInfo        *regexp.Regexp
-	reIPv4            *regexp.Regexp
-	rePEM             *regexp.Regexp
-	reXML             *regexp.Regexp
-	reJSONSecretArr   *regexp.Regexp
+	reBearer          *lazyRegexp
+	reSensitiveHeader *lazyRegexp
+	reJWT             *lazyRegexp
+	reAPIKey          *lazyRegexp
+	reJSONSecret      *lazyRegexp
+	reQuerySecret     *lazyRegexp
+	reUserInfo        *lazyRegexp
+	reIPv4            *lazyRegexp
+	rePEM             *lazyRegexp
+	reXML             *lazyRegexp
+	reJSONSecretArr   *lazyRegexp
 
 	// Counters are pointers so detached() can give a live refresh its own set.
 	Tokens  *atomic.Uint64
@@ -397,24 +667,21 @@ func NewScrubberWithConfig(cfg *SecretsConfig) (*Scrubber, error) {
 		extraSensitive: extra,
 		ignoreHeaders:  ignore,
 		extraPatterns:  extras,
-		vendorGate:     vendors.NewGate(gate),
+		vendorGate:     lazyVendors(gate),
 		vendorRules:    rules,
-		reBearer:       regexp.MustCompile(`(?i)(Bearer|Basic|Token)\s+([A-Za-z0-9._~+/=-]{8,})`),
-		reSensitiveHeader: regexp.MustCompile(`(?i)^(authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|proxy-authorization)$`),
-		reJWT:             regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
-		reAPIKey:          regexp.MustCompile(`(?i)\b((?-i:sk-[A-Za-z0-9]{20,})|ghp_[a-zA-Z0-9]{30,}|github_pat_[a-zA-Z0-9_]{30,}|AIza[0-9A-Za-z_-]{35}|xox[baprs]-[0-9a-zA-Z-]+|AKIA[0-9A-Z]{16})\b`),
-		reJSONSecret:      regexp.MustCompile(`(?i)("(?:access_token|refresh_token|id_token|api_key|apikey|secret|client_secret|password|passwd|session_id|auth_token|key)"\s*:\s*")((?:[^"\\]|\\.)+)(")`),
-		reQuerySecret:     regexp.MustCompile(`(?i)((?:^|[?&])(?:api_key|apikey|token|access_token|refresh_token|id_token|secret|client_secret|password|passwd|key)=)([^&\s#]+)`),
-		reUserInfo:        regexp.MustCompile(`(://[^/\s:@]+:)([^@/\s]+)(@)`),
-		reIPv4:            regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`),
-		// A private key block, from BEGIN to END; a block cut off by the capture limit is redacted to the end of the text.
-		rePEM: regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----(?:.*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|.*)`),
-		// The text of an XML element whose name suggests a secret. Only the opening "</" is part of the match, so the rest of the closing tag is
-		// left in place; a body cut off before the closing tag is redacted to the end of the text. RE2 has no backreferences, so the closing
-		// tag name is not compared with the opening one.
-		reXML: regexp.MustCompile(`(?is)(<(?:[A-Za-z0-9_.-]+:)?[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|apikey|api_key|api-key|authorization|credential|privatekey|private_key|accesskey|access_key|sessionid|session_id)[A-Za-z0-9_.-]*(?:\s(?:[^<>]*[^/<>])?)?>)(<!\[CDATA\[.*?\]\]>|[^<]+)(</|\z)`),
-		// "password": ["a", "b"]
-		reJSONSecretArr: regexp.MustCompile(`(?i)("(?:access_token|refresh_token|id_token|api_key|apikey|secret|client_secret|password|passwd|session_id|auth_token|key)"\s*:\s*\[)((?:\s*"(?:[^"\\]|\\.)*"\s*,?)+)(\s*\])`),
+		// The DLP regular expressions are shared and compiled on first use (see
+		// lazyinit.go), so building a Scrubber compiles none of them.
+		reBearer:          reBearerShared,
+		reSensitiveHeader: reSensitiveHeaderShared,
+		reJWT:             reJWTShared,
+		reAPIKey:          reAPIKeyShared,
+		reJSONSecret:      reJSONSecretShared,
+		reQuerySecret:     reQuerySecretShared,
+		reUserInfo:        reUserInfoShared,
+		reIPv4:            reIPv4Shared,
+		rePEM:             rePEMShared,
+		reXML:             reXMLShared,
+		reJSONSecretArr:   reJSONSecretArrShared,
 	}, nil
 }
 
@@ -458,7 +725,7 @@ const (
 // vendorRule redacts "<prefix><at least min class characters>". A weak rule
 // only redacts when the part after the prefix also looks like a key.
 type vendorRule struct {
-	re       *regexp.Regexp
+	re       *lazyRegexp
 	prefixes []string
 	weak     bool
 }
@@ -478,11 +745,14 @@ func buildVendorRule(prefixes []string, class string, minLen int, weak bool) (ve
 	b.WriteString(`)`)
 	b.WriteString(class)
 	fmt.Fprintf(&b, "{%d,}", minLen)
-	return vendorRule{re: regexp.MustCompile(b.String()), prefixes: prefixes, weak: weak}, true
+	return vendorRule{re: lazyRe(b.String()), prefixes: prefixes, weak: weak}, true
 }
 
 // weakVendorMatchOK checks the text after the matched prefix.
 func weakVendorMatchOK(m string, prefixes []string) bool {
+	if validatedSecret(m) { // a format validator affirms it: promote, never demote
+		return true
+	}
 	best := 0
 	for _, p := range prefixes {
 		if len(p) > best && strings.HasPrefix(m, p) {
@@ -546,34 +816,22 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 		})
 	}
 
+	// Structural pass: on a complete JSON document, a string under a
+	// secret-looking key is redacted by the key that owns it. Anything that is
+	// not a whole JSON document is left to the rules below.
+	out = s.scrubJSONTree(out, &count)
+
 	if preSecretKey {
-		out = s.reJSONSecret.ReplaceAllStringFunc(out, func(m string) string {
-			g := s.reJSONSecret.FindStringSubmatch(m)
-			if g == nil {
-				return m
-			}
-			// Stage 1 may already have replaced this value with its own tag. Leave
-			// that tag exactly as it is: tagging a tag corrupts it.
-			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) || benignBareKey(g[1], g[2]) {
-				return m
-			}
-			count++
-			s.Tokens.Add(1)
-			return g[1] + s.tag("TOKEN", g[2]) + g[3]
-		})
-		out = s.scrubJSONSecretArrays(out, &count)
-		out = s.reQuerySecret.ReplaceAllStringFunc(out, func(m string) string {
-			g := s.reQuerySecret.FindStringSubmatch(m)
-			if g == nil {
-				return m
-			}
-			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) || benignBareKey(g[1], g[2]) {
-				return m
-			}
-			count++
-			s.Tokens.Add(1)
-			return g[1] + s.tag("TOKEN", g[2])
-		})
+		// gateSecretKey is coarse; secretKeyGate says which of the three regexps
+		// below can match at all (see gatemask.go).
+		sk := secretKeyGate.Match(in)
+		if sk&jsonKeyBit != 0 {
+			out = s.scrubJSONSecretFields(out, &count)
+			out = s.scrubJSONSecretArrays(out, &count)
+		}
+		if sk&queryKeyBit != 0 {
+			out = s.scrubQuerySecrets(out, &count)
+		}
 	}
 	if gm&gateXML != 0 && (strings.Contains(in, "<") || strings.Contains(in, "&lt;")) {
 		// Tree pass first: it handles CDATA, nesting, benign leaves and entity-escaped markup.
@@ -588,6 +846,12 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 				return m
 			}
 			if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) {
+				return m
+			}
+			// A DSN whose password is only template words or <angle brackets>
+			// is documentation, not a credential. A password with an
+			// explicit secret prefix is never treated that way.
+			if !hasStructuredPrefix(g[2]) && dsnPasswordIsPlaceholder("x"+m+"h") {
 				return m
 			}
 			count++
@@ -630,6 +894,10 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 				if vr.weak && !weakVendorMatchOK(m, vr.prefixes) {
 					return m
 				}
+				// A DSN whose password is only template words is documentation.
+				if strings.Contains(m, "://") && dsnMatchIsTemplate(m) {
+					return m
+				}
 				count++
 				s.Tokens.Add(1)
 				return s.tag("TOKEN", m)
@@ -660,19 +928,9 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 		})
 	}
 
-	if !o.skipIP {
-		var n6 int
-		out, n6 = s.scrubIPv6(out)
-		count += n6
-	}
-
-	if !o.skipIP && maybeIPv4(out) {
-		out = replaceIPv4(s, out, &count)
-	}
-
-	var nPAN int
-	out, nPAN = s.scrubPANs(out)
-	count += nPAN
+	var nTail int
+	out, nTail = s.scrubTail(out, o.skipIP)
+	count += nTail
 
 	if s.presets.enabled() {
 		var nPreset int
@@ -704,6 +962,66 @@ func (s *Scrubber) scrubLayersOpts(in string, o scrubOpts) (string, int) {
 		count += nEntropy
 	}
 	return out, count
+}
+
+// scrubTail runs the last three rules of scrubLayersOpts: IPv6, IPv4 and
+// payment-card numbers. Each sits behind a gate that is a necessary condition
+// for the rule to match, so skipping it loses nothing. The gates read the text
+// as it stands when its rule runs, and use the SIMD-backed strings.Count and
+// strings.IndexByte where they can. TestScrubTailMatchesUngated holds this to
+// the ungated rules.
+func (s *Scrubber) scrubTail(out string, skipIP bool) (string, int) {
+	count := 0
+	if !skipIP && strings.Count(out, ":") >= 2 {
+		var n6 int
+		out, n6 = s.scrubIPv6(out)
+		count += n6
+	}
+	if !skipIP && strings.IndexByte(out, '.') >= 0 && maybeIPv4(out) {
+		out = replaceIPv4(s, out, &count)
+	}
+	if hasPANChain(out) {
+		var nPAN int
+		out, nPAN = s.scrubPANs(out)
+		count += nPAN
+	}
+	return out, count
+}
+
+// scrubJSONSecretFields redacts the value of every "password": "..." style
+// field. Split out of scrubLayersOpts so the regexp can sit behind its own gate.
+func (s *Scrubber) scrubJSONSecretFields(out string, count *int) string {
+	return s.reJSONSecret.ReplaceAllStringFunc(out, func(m string) string {
+		g := s.reJSONSecret.FindStringSubmatch(m)
+		if g == nil {
+			return m
+		}
+		// Stage 1 may already have replaced this value with its own tag. Leave
+		// that tag exactly as it is: tagging a tag corrupts it.
+		if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) || benignBareKey(g[1], g[2]) {
+			return m
+		}
+		*count++
+		s.Tokens.Add(1)
+		return g[1] + s.tag("TOKEN", g[2]) + g[3]
+	})
+}
+
+// scrubQuerySecrets redacts the value of every ?token=... / &api_key=... style
+// parameter.
+func (s *Scrubber) scrubQuerySecrets(out string, count *int) string {
+	return s.reQuerySecret.ReplaceAllStringFunc(out, func(m string) string {
+		g := s.reQuerySecret.FindStringSubmatch(m)
+		if g == nil {
+			return m
+		}
+		if strings.HasPrefix(g[2], "[REDACTED_") || isAllowMarkOnly(g[2]) || isPlaceholderValue(g[2]) || benignBareKey(g[1], g[2]) {
+			return m
+		}
+		*count++
+		s.Tokens.Add(1)
+		return g[1] + s.tag("TOKEN", g[2])
+	})
 }
 
 // strictKeyHints are fragments of field names that usually hold secrets.
@@ -777,6 +1095,12 @@ var nonSecretFields = map[string]bool{
 	"s3_key": true, "s3-key": true, "s3key": true,
 	"shard_key": true, "shard-key": true, "shardkey": true,
 	"project_key": true, "project-key": true, "projectkey": true,
+	// Pagination cursors: opaque, but they page through results, not log in.
+	"next_page_token": true, "next-page-token": true, "nextpagetoken": true,
+	"page_token": true, "page-token": true, "pagetoken": true,
+	"next_token": true, "next-token": true, "nexttoken": true,
+	"continuation_token": true, "continuation-token": true, "continuationtoken": true,
+	"pagination_token": true, "pagination-token": true, "paginationtoken": true,
 }
 
 func secretishKey(key string) bool {
@@ -902,6 +1226,9 @@ func strictFieldRanges(in string, maxVal int) [][2]int {
 		if strings.ContainsAny(val, "/.") && !strictSlashDotOK(val) && (!isSignatureKey(kb) || !signatureValueOK(val)) {
 			continue
 		}
+		if !hasStructuredPrefix(val) && stage3Placeholder(val) {
+			continue // YOUR_API_KEY_HERE style template, no explicit prefix
+		}
 		out = append(out, [2]int{start, end})
 		i = end - 1
 	}
@@ -909,9 +1236,9 @@ func strictFieldRanges(in string, maxVal int) [][2]int {
 }
 
 var (
-	reStrictDate    = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(?:[Tt][0-9:.+Zz-]*)?$`)
-	reStrictVersion = regexp.MustCompile(`^[vV]?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?$`)
-	reStrictPath    = regexp.MustCompile(`^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+/?$`)
+	reStrictDate    = lazyRe(`^\d{4}-\d{2}-\d{2}(?:[Tt][0-9:.+Zz-]*)?$`)
+	reStrictVersion = lazyRe(`^[vV]?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?$`)
+	reStrictPath    = lazyRe(`^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+/?$`)
 )
 
 // isSignatureKey reports whether k names a signature field: sig, signature, x-amz-signature.
@@ -1093,6 +1420,17 @@ func looksLikeTokenMax(s string, maxLen int) bool {
 		return false
 	}
 
+	// A validator that affirms the format promotes the candidate past every
+	// penalty below. A heuristic-only candidate (no explicit prefix) made of
+	// template words is a placeholder. A candidate WITH an explicit prefix is
+	// never dropped by this test.
+	if validatedSecret(s) {
+		return true
+	}
+	if !hasStructuredPrefix(s) && stage3Placeholder(s) {
+		return false
+	}
+
 	if isHexUUID(s) {
 		return false
 	}
@@ -1107,10 +1445,13 @@ func looksLikeTokenMax(s string, maxLen int) bool {
 	if isAllDigits(s) {
 		return false
 	}
-	h := shannonEntropyBits(s)
 	if isHexLike(s) {
-		return h >= entropyHexMin
+		return shannonEntropyBits(s) >= entropyHexMin
 	}
+	// Cheap rejections first: a lower-case run with no digit or capital (and
+	// shorter than hasTokenSignalAutoLen) is prose or a path, and is dropped
+	// here before any floating-point math. The entropy is only computed for
+	// the branches that read it.
 	if !hasTokenSignal(s) {
 		return false
 	}
@@ -1120,6 +1461,7 @@ func looksLikeTokenMax(s string, maxLen int) bool {
 	if vowelRatio(s) > entropyMaxVowel {
 		return false
 	}
+	h := shannonEntropyBits(s)
 	if n >= 32 {
 		return h >= entropyLongMin
 	}
@@ -1374,12 +1716,21 @@ type App struct {
 	allowUninspectable  bool // forward request bodies whose Content-Encoding cannot be decoded
 	maxBody             int  // -max-body: stored body size in bytes; 0 means the defaults
 	wsDeflate           bool // -ws-deflate: keep permessage-deflate and decode it for capture
+	minify              bool // -minify: store scrubbed JSON bodies compacted
+	tail                bool // -tail: one scrubbed summary line per captured flow on stderr, instead of the status bar
 	listener            string // "" for the TCP loopback listener, "unix" for -listen
 	sockPath            string // the -listen socket path, for the status bar
 	tokenOn             bool   // -proxy-token: every request must carry the token
 	tokenSum            [sha256.Size]byte
 	att                 attestInfo // facts export_attestation reports
 	barMu               sync.Mutex
+	capQ                atomic.Pointer[capturePool] // nil until startCapture; see captureworker.go
+	captureDropped      atomic.Int64                // flows wiped unrecorded because the capture queue was full
+	barDirty            atomic.Bool                 // a redraw is wanted; the ticker draws it
+	barTick             atomic.Bool                 // the ticker is running, so markBar only sets barDirty
+	barStop             chan struct{}
+	barWG               sync.WaitGroup
+	barStopOnce         sync.Once
 	stdoutMu            sync.Mutex
 	stdout, stderr      io.Writer // nil means os.Stdout / os.Stderr (run() injects its own)
 }
@@ -1399,6 +1750,9 @@ func (a *App) errW() io.Writer {
 }
 
 func (a *App) drawBar() {
+	if a.tail {
+		return // the tail lines own stderr; a \r bar would overwrite them
+	}
 	where := fmt.Sprintf("127.0.0.1:%d", a.port)
 	if a.listener == "unix" {
 		where = "unix socket"
@@ -1407,62 +1761,336 @@ func (a *App) drawBar() {
 		where, a.ring.Len(), ringCapacity, a.scrub.Tokens.Load(), a.scrub.Cookies.Load(), a.scrub.IPs.Load())
 }
 func (a *App) Bar() { a.barMu.Lock(); defer a.barMu.Unlock(); a.drawBar() }
-func (a *App) Logf(format string, args ...any) { a.barMu.Lock(); defer a.barMu.Unlock(); fmt.Fprintf(a.errW(), "\r\033[K"+format+"\n", args...); a.drawBar() }
-
-type capBuffer struct {
-	mu  sync.Mutex
-	buf []byte
-	max int
+func (a *App) Logf(format string, args ...any) {
+	a.barMu.Lock()
+	defer a.barMu.Unlock()
+	if a.tail {
+		fmt.Fprintf(a.errW(), format+"\n", args...)
+		return
+	}
+	fmt.Fprintf(a.errW(), "\r\033[K"+format+"\n", args...)
+	a.drawBar()
 }
 
-func (c *capBuffer) Write(p []byte) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if room := c.max - len(c.buf); room > 0 {
-		if len(p) > room {
-			c.buf = append(c.buf, p[:room]...)
-		} else {
-			c.buf = append(c.buf, p...)
+// tailLine formats the -tail summary of a stored flow, e.g.
+// "[14:02:11] POST https://api.example.com/v1/chat 200 142ms (3 redacted)".
+// It reads only the scrubbed entry: the URL went through ScrubURL, and no
+// header or body is printed. Control bytes are shown as "?" so nothing in a
+// URL can drive the terminal.
+func tailLine(now time.Time, e *FlowEntry) string {
+	return fmt.Sprintf("[%s] %s %s %d %dms (%d redacted)\n",
+		now.Format("15:04:05"), tailClean(e.Method), tailClean(truncate(e.URL, 300)),
+		e.StatusCode, e.LatencyMs, e.RedactionCount)
+}
+
+func tailClean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || (r >= 0x7f && r < 0xa0) {
+			return '?'
 		}
+		return r
+	}, s)
+}
+
+// tailFlow writes the -tail line for e to stderr, under barMu with the rest
+// of the stderr output. It is only called when -tail is on.
+func (a *App) tailFlow(e *FlowEntry) {
+	line := tailLine(time.Now(), e)
+	a.barMu.Lock()
+	defer a.barMu.Unlock()
+	_, _ = io.WriteString(a.errW(), line)
+}
+
+type capBuffer struct {
+	mu   sync.Mutex
+	buf  []byte
+	max  int
+	done bool // release was called: later writes are dropped
+	solo bool // only one goroutine ever touches it, so the mutex is skipped
+
+	// full is set, under the lock, once buf holds max bytes. From then on Write
+	// answers with one atomic load: no lock, no copy, no allocation, however
+	// much more of the body goes by. truncated is set once a byte has actually
+	// been dropped because of the cap.
+	full      atomic.Bool
+	truncated atomic.Bool
+}
+
+// capBufPool recycles the backing arrays of capBuffer. Every array in it is
+// all zero: release clears what was written (the only part ever written)
+// before the array goes back, so one request's bytes are never visible to the
+// next.
+var capBufPool = sync.Pool{New: func() any { b := make([]byte, 0, 8<<10); return &b }}
+
+// capBufPoolMax is the largest array kept for reuse; bigger ones are zeroed
+// and left to the garbage collector so one huge body does not pin memory.
+const capBufPoolMax = 1 << 20
+
+// newCapBuffer makes a capture buffer that several goroutines may touch (the
+// request body is read by the transport's own goroutine). No array is taken
+// from the pool until the first byte is written, so a request without a body
+// costs nothing.
+func newCapBuffer(limit int) *capBuffer { return &capBuffer{max: limit} }
+
+// newSoloCapBuffer is newCapBuffer for a buffer used by one goroutine only.
+func newSoloCapBuffer(limit int) *capBuffer { return &capBuffer{max: limit, solo: true} }
+
+func (c *capBuffer) lock() {
+	if !c.solo {
+		c.mu.Lock()
+	}
+}
+
+func (c *capBuffer) unlock() {
+	if !c.solo {
+		c.mu.Unlock()
+	}
+}
+
+// release zeroes the bytes that were written and returns the array to the
+// pool. Only buf[:len(buf)] was ever written, so clearing that is the same as
+// clearing the whole array, without touching the unused tail. Bytes() hands
+// out a copy, so flows already built are not affected. Safe to call twice and
+// on a capBuffer that never held a byte.
+func (c *capBuffer) release() {
+	if c == nil { // a request without a body never made one
+		return
+	}
+	c.lock()
+	defer c.unlock()
+	if c.done {
+		return
+	}
+	c.done = true
+	buf := c.buf
+	c.buf = nil
+	if cap(buf) == 0 {
+		return
+	}
+	clear(buf)
+	runtime.KeepAlive(buf)
+	if cap(buf) <= capBufPoolMax {
+		buf = buf[:0]
+		capBufPool.Put(&buf)
+	}
+}
+
+// Truncated reports that more bytes were written than the buffer holds, so the
+// capture is a prefix of the body.
+func (c *capBuffer) Truncated() bool { return c != nil && c.truncated.Load() }
+
+func (c *capBuffer) Write(p []byte) (int, error) {
+	// Capture limit already reached: swallow the rest of the body untouched.
+	if c.full.Load() {
+		if len(p) > 0 {
+			c.truncated.Store(true)
+		}
+		return len(p), nil
+	}
+	c.lock()
+	defer c.unlock()
+	if c.done {
+		return len(p), nil
+	}
+	room := c.max - len(c.buf)
+	if room <= 0 {
+		c.full.Store(true)
+		if len(p) > 0 {
+			c.truncated.Store(true)
+		}
+		return len(p), nil
+	}
+	q := p
+	if len(q) > room {
+		q = q[:room]
+		c.truncated.Store(true)
+	}
+	if len(q) == 0 {
+		return len(p), nil
+	}
+	if c.buf == nil {
+		bp := capBufPool.Get().(*[]byte)
+		c.buf = (*bp)[:0]
+	}
+	if need := len(c.buf) + len(q); need > cap(c.buf) {
+		// Grow by hand so the array being left behind can be zeroed; append
+		// would drop it with the captured bytes still in it.
+		newCap := 2 * cap(c.buf)
+		if newCap < need {
+			newCap = need
+		}
+		nb := make([]byte, len(c.buf), newCap)
+		copy(nb, c.buf)
+		clear(c.buf)
+		runtime.KeepAlive(c.buf)
+		c.buf = nb
+	}
+	c.buf = append(c.buf, q...)
+	if len(c.buf) >= c.max {
+		c.full.Store(true)
 	}
 	return len(p), nil
 }
-func (c *capBuffer) Bytes() []byte { c.mu.Lock(); defer c.mu.Unlock(); return append([]byte(nil), c.buf...) }
 
-type flushWriter struct{ w http.ResponseWriter }
-
-func (f *flushWriter) Write(p []byte) (int, error) {
-	n, err := f.w.Write(p)
-	if fl, ok := f.w.(http.Flusher); ok {
-		fl.Flush()
+func (c *capBuffer) Bytes() []byte {
+	if c == nil {
+		return nil
 	}
-	return n, err
+	c.lock()
+	defer c.unlock()
+	return append([]byte(nil), c.buf...)
+}
+
+// copyBufSize is the size of the pooled buffer that copies a response body.
+const copyBufSize = 32 << 10
+
+var copyBufPool = sync.Pool{New: func() any { b := make([]byte, copyBufSize); return &b }}
+
+// copyBuffered copies src to w with a pooled buffer, teeing every byte into
+// capture first (as io.TeeReader did). It flushes after each write only when
+// fl is non-nil (a stream of unknown length); a body of known length passes
+// nil and is never flushed. Only the part of the buffer that was actually
+// filled is zeroed before it goes back to the pool, so the pooled buffers hold
+// no response bytes.
+func copyBuffered(w io.Writer, src io.Reader, capture io.Writer, fl http.Flusher) {
+	bp := copyBufPool.Get().(*[]byte)
+	buf := *bp
+	used := 0
+	for {
+		n, err := src.Read(buf)
+		if n > used {
+			used = n
+		}
+		if n > 0 {
+			_, _ = capture.Write(buf[:n])
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				break
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	clear(buf[:used])
+	runtime.KeepAlive(buf)
+	copyBufPool.Put(bp)
 }
 
 var hopByHop = []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade"}
 
-func copyHeaders(src http.Header, extraDrop ...string) http.Header {
-	drop := make(map[string]bool, len(hopByHop)+len(extraDrop))
+// hopByHopSet is hopByHop as a read-only set, built once. Every key in it is
+// already in canonical form.
+var hopByHopSet = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(hopByHop))
 	for _, h := range hopByHop {
-		drop[h] = true
+		m[http.CanonicalHeaderKey(h)] = struct{}{}
 	}
+	return m
+}()
+
+// connectionNamed returns the header names that src's own Connection header
+// lists (they are hop-by-hop for this message). Most messages list none, so
+// nothing is allocated for them and the result is nil, which reads as empty.
+func connectionNamed(src http.Header) map[string]struct{} {
+	var named map[string]struct{}
 	for _, v := range src.Values("Connection") {
 		for _, f := range strings.Split(v, ",") {
 			if f = strings.TrimSpace(f); f != "" {
-				drop[http.CanonicalHeaderKey(f)] = true
+				if named == nil {
+					named = make(map[string]struct{}, 2)
+				}
+				named[http.CanonicalHeaderKey(f)] = struct{}{}
 			}
 		}
 	}
-	for _, e := range extraDrop {
-		drop[http.CanonicalHeaderKey(e)] = true
+	return named
+}
+
+// copyHeadersInto adds the end-to-end headers of src to dst without building
+// an intermediate map: the response path used to copy src into a new
+// http.Header and then copy that again into the ResponseWriter's.
+// The value slices are shared with src (capped, so an append to one cannot
+// write into src); neither side changes them in place.
+func copyHeadersInto(dst, src http.Header) {
+	named := connectionNamed(src)
+	for k, vs := range src {
+		ck := http.CanonicalHeaderKey(k)
+		if _, drop := hopByHopSet[ck]; drop {
+			continue
+		}
+		if _, drop := named[ck]; drop {
+			continue
+		}
+		dst[ck] = vs[:len(vs):len(vs)]
 	}
+}
+
+// Headers the request path drops whatever else it forwards.
+var (
+	dropForward        = []string{"Accept-Encoding"}
+	dropForwardReverse = []string{"X-Target-URL", "Accept-Encoding"}
+)
+
+// headersForwardable reports whether copyHeaders(h, drop...) would return h
+// unchanged: every key is already canonical, none is hop-by-hop (which also
+// rules out a Connection header, and so any names it lists) and none is in
+// drop. It allocates nothing. When it is true the request can be forwarded with
+// h itself, and the map is copied only if something has to change it later.
+func headersForwardable(h http.Header, drop []string) bool {
+	for k := range h {
+		ck := http.CanonicalHeaderKey(k)
+		if ck != k {
+			return false
+		}
+		if _, hop := hopByHopSet[ck]; hop {
+			return false
+		}
+		for _, e := range drop {
+			if strings.EqualFold(ck, e) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func copyHeaders(src http.Header, extraDrop ...string) http.Header {
+	named := connectionNamed(src)
+	// One backing array holds every kept value slice, instead of one small
+	// allocation per header. The three-index slices stop a later append to one
+	// header from running into its neighbour.
+	total := 0
+	for _, vs := range src {
+		total += len(vs)
+	}
+	backing := make([]string, 0, total)
 	dst := make(http.Header, len(src))
 	for k, vs := range src {
 		ck := http.CanonicalHeaderKey(k)
-		if drop[ck] {
+		if _, drop := hopByHopSet[ck]; drop {
 			continue
 		}
-		dst[ck] = append([]string(nil), vs...)
+		if _, drop := named[ck]; drop {
+			continue
+		}
+		skip := false
+		for _, e := range extraDrop {
+			// Canonical names differ only in letter case, so EqualFold is the
+			// same test as comparing with CanonicalHeaderKey(e).
+			if strings.EqualFold(ck, e) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		start := len(backing)
+		backing = append(backing, vs...)
+		dst[ck] = backing[start:len(backing):len(backing)]
 	}
 	return dst
 }
@@ -1506,7 +2134,7 @@ func (a *App) isSelf(hostport string) bool {
 	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
-var reUpstreamName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`)
+var reUpstreamName = lazyRe(`^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`)
 
 func parseTargets(spec string) (def *url.URL, named map[string]*url.URL, err error) {
 	named = map[string]*url.URL{}
@@ -1669,6 +2297,10 @@ type rawFlow struct {
 	note        string
 
 	respTrailers http.Header // read after the body; gRPC puts its status here
+
+	// hdrBorrowed means reqHeaders and respHeaders are the live maps of the
+	// request and response, not copies. capture() clones them on its worker.
+	hdrBorrowed bool
 }
 
 // upgradeTransport returns a transport that never negotiates HTTP/2. An
@@ -1714,35 +2346,63 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nullwire-mcp: "+err.Error(), status)
 		return
 	}
-	reqCap := &capBuffer{max: a.limits().reqCap}
-	var outBody io.Reader = http.NoBody
+	// Body must be a ReadCloser; http.NoBody has to stay as it is, because the
+	// transport recognises it to send a request with no body at all.
+	var outBody io.ReadCloser = http.NoBody
 	hasBody := r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0
+	// No body, no capture buffer: reqCap stays nil, and its methods accept that.
+	var reqCap *capBuffer
+	contentLen := int64(0)
 	if hasBody {
-		outBody = io.TeeReader(r.Body, reqCap)
+		reqCap = newCapBuffer(a.limits().reqCap)
+		defer reqCap.release()
+		outBody = io.NopCloser(io.TeeReader(r.Body, reqCap))
+		contentLen = r.ContentLength
 	}
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), outBody) // #nosec G704 -- a proxy forwards the client's own request by design; it listens on loopback only and resolveUpstream picks the destination
-	if err != nil {
-		http.Error(w, "nullwire-mcp: cannot build upstream request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if hasBody {
-		outReq.ContentLength = r.ContentLength
-	} else {
-		outReq.ContentLength = 0
-	}
+	// The URL was already parsed (and checked) by resolveUpstream, so the
+	// request is built directly: no NewRequest parse of an empty URL and no
+	// header map that the code below would only replace. The copy keeps the
+	// request's URL its own. Header is set just below; Host is set before the
+	// round trip.
+	outURLCopy := *outURL
+	outReq := (&http.Request{
+		Method:        r.Method,
+		URL:           &outURLCopy,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Body:          outBody,
+		ContentLength: contentLen,
+	}).WithContext(r.Context())
+	drop := dropForward
 	if reverse {
-		outReq.Header = copyHeaders(r.Header, "X-Target-URL", "Accept-Encoding")
+		drop = dropForwardReverse
+	}
+	// Fast path: a request with no hop-by-hop header (and nothing else to drop)
+	// is forwarded with its own header map, which the transport only reads, so
+	// no new map is built. own() makes a private copy at the first change.
+	hdrShared := headersForwardable(r.Header, drop)
+	if hdrShared {
+		outReq.Header = r.Header
 	} else {
-		outReq.Header = copyHeaders(r.Header, "Accept-Encoding")
+		outReq.Header = copyHeaders(r.Header, drop...)
+	}
+	own := func() {
+		if hdrShared {
+			outReq.Header = r.Header.Clone()
+			hdrShared = false
+		}
 	}
 	// gRPC servers look for "TE: trailers", so this one hop-by-hop value travels on.
 	if acceptsTrailers(r.Header) {
+		own()
 		outReq.Header.Set("Te", "trailers")
 	}
 	// Response shield: never ask the server for an encoding NullWire cannot read.
 	restrictAcceptEncoding(outReq.Header, r.Header)
 	upgrade := isUpgradeRequest(r.Header)
 	if upgrade {
+		own()
 		outReq.Header.Set("Connection", "Upgrade")
 		outReq.Header.Set("Upgrade", r.Header.Get("Upgrade"))
 		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
@@ -1756,9 +2416,13 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if _, ok := outReq.Header["User-Agent"]; !ok {
+		own()
 		outReq.Header["User-Agent"] = []string{""}
 	}
-	flow := rawFlow{started: start, method: r.Method, url: outURL.String(), reqHeaders: r.Header.Clone()}
+	// The flow borrows the request's headers: nothing in ServeHTTP changes
+	// r.Header from here on, and capture() takes its own copy on a worker, off
+	// the forwarding path (hdrBorrowed).
+	flow := rawFlow{started: start, method: r.Method, url: outURL.String(), reqHeaders: r.Header, hdrBorrowed: true}
 	outReq.Host = outURL.Host
 	rt := a.roundTripperFor(r, outURL)
 	if upgrade {
@@ -1779,7 +2443,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		flow.respHeaders = http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}}
 		flow.respBody = []byte(msg)
 		flow.latencyMs = time.Since(start).Milliseconds()
-		go a.capture(flow)
+		a.dispatchCapture(flow)
 		return
 	}
 	defer resp.Body.Close()
@@ -1793,20 +2457,21 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.streamSSE(w, r, resp, flow, reqCap, start)
 		return
 	}
-	respCap := &capBuffer{max: a.limits().respCap}
-	dst := w.Header()
-	for k, vs := range copyHeaders(resp.Header) {
-		dst[k] = vs
-	}
+	respCap := newSoloCapBuffer(a.limits().respCap)
+	defer respCap.release()
+	copyHeadersInto(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	if resp.ContentLength < 0 {
-		// A stream of unknown length (server-sent events, gRPC): the client
-		// sees the headers now, not together with the first chunk.
-		if fl, ok := w.(http.Flusher); ok {
+	// Streaming (unknown length, or trailers to come) flushes as data arrives;
+	// a body of known length is copied straight through without flushes.
+	var fl http.Flusher
+	if resp.ContentLength < 0 || len(resp.Trailer) > 0 {
+		// The client sees the headers now, not together with the first chunk.
+		fl, _ = w.(http.Flusher)
+		if fl != nil && resp.ContentLength < 0 {
 			fl.Flush()
 		}
 	}
-	_, _ = io.Copy(&flushWriter{w: w}, io.TeeReader(resp.Body, respCap))
+	copyBuffered(w, resp.Body, respCap, fl)
 	// Trailers are only known once the body has been read.
 	for k, vs := range resp.Trailer {
 		if len(vs) > 0 { // a declared trailer the server never sent has no value
@@ -1815,11 +2480,11 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	flow.reqBody = reqCap.Bytes()
 	flow.status = resp.StatusCode
-	flow.respHeaders = resp.Header.Clone()
-	flow.respTrailers = resp.Trailer.Clone()
+	flow.respHeaders = resp.Header // borrowed, like reqHeaders; capture() copies it
+	flow.respTrailers = resp.Trailer.Clone() // trailers may still be filled in by the transport until the body ends, so copy now
 	flow.respBody = respCap.Bytes()
 	flow.latencyMs = time.Since(start).Milliseconds()
-	go a.capture(flow)
+	a.dispatchCapture(flow)
 }
 
 // wipe zeroes the captured body copies once they are scrubbed and stored.
@@ -1865,10 +2530,28 @@ func isUpgradeRequest(h http.Header) bool {
 	return false
 }
 
+// halfCloseDrain is how long the other direction may keep draining after one
+// side half-closed or stopped being writable, so a peer's final frame (for
+// WebSocket, the Close frame) still reaches its destination. It is a variable
+// so tests can shorten it.
+var halfCloseDrain = 5 * time.Second
+
 func splice(client, upstream io.ReadWriteCloser, idle time.Duration, pre []byte) (toUpstream, toClient int64) {
 	var sent, recv, last atomic.Int64
 	last.Store(time.Now().UnixNano())
 	closeBoth := func() { _ = client.Close(); _ = upstream.Close() }
+	var drainOnce sync.Once
+	var drainTimer *time.Timer
+	var drainMu sync.Mutex
+	// armDrain lets the reverse direction finish, but never for longer than
+	// halfCloseDrain, so a silent half-close cannot hang the tunnel.
+	armDrain := func() {
+		drainOnce.Do(func() {
+			drainMu.Lock()
+			drainTimer = time.AfterFunc(halfCloseDrain, closeBoth)
+			drainMu.Unlock()
+		})
+	}
 	if len(pre) > 0 {
 		n, err := upstream.Write(pre)
 		sent.Add(int64(n))
@@ -1888,19 +2571,26 @@ func splice(client, upstream io.ReadWriteCloser, idle time.Duration, pre []byte)
 				w, werr := dst.Write(buf[:n])
 				ctr.Add(int64(w))
 				if werr != nil {
-					closeBoth()
+					// dst is gone (e.g. EPIPE after a protocol-error close):
+					// stop this direction but let the reverse one deliver
+					// whatever the peer already sent, such as a Close frame.
+					armDrain()
 					return
 				}
 			}
 			if err != nil {
 				if err == io.EOF {
-					if cw, ok := dst.(closeWriter); ok {
-						_ = cw.CloseWrite()
-					} else {
-						_ = dst.Close()
+					cw, ok := dst.(closeWriter)
+					if !ok || cw.CloseWrite() != nil {
+						// No real half-close: keep dst open so the reverse
+						// direction can drain, bounded by the drain timer.
+						armDrain()
 					}
 				} else {
-					closeBoth()
+					// Non-EOF read error (e.g. ECONNRESET): src is unusable, but
+					// the reverse direction may still hold the peer's Close frame.
+					// Drain it, bounded by the drain timer, instead of cutting it off.
+					armDrain()
 				}
 				return
 			}
@@ -1933,6 +2623,11 @@ func splice(client, upstream io.ReadWriteCloser, idle time.Duration, pre []byte)
 	go pump(client, upstream, &recv)
 	wg.Wait()
 	close(stop)
+	drainMu.Lock()
+	if drainTimer != nil {
+		drainTimer.Stop()
+	}
+	drainMu.Unlock()
 	closeBoth()
 	return sent.Load(), recv.Load()
 }
@@ -1956,7 +2651,7 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.T
 	if perr := a.egress.checkHost(host); perr != nil {
 		msg := "nullwire-mcp: " + perr.Error()
 		http.Error(w, msg, http.StatusForbidden)
-		go a.capture(rawFlow{started: start, method: http.MethodConnect, url: target, reqHeaders: r.Header.Clone(), respHeaders: http.Header{}, status: http.StatusForbidden, note: msg, latencyMs: time.Since(start).Milliseconds()})
+		a.dispatchCapture(rawFlow{started: start, method: http.MethodConnect, url: target, reqHeaders: r.Header.Clone(), respHeaders: http.Header{}, status: http.StatusForbidden, note: msg, latencyMs: time.Since(start).Milliseconds()})
 		return
 	}
 	if !a.acquireTunnel() {
@@ -1981,7 +2676,7 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.T
 		flow.status = code
 		flow.note = msg
 		flow.latencyMs = time.Since(start).Milliseconds()
-		go a.capture(flow)
+		a.dispatchCapture(flow)
 		return
 	}
 	client, brw, err := hj.Hijack()
@@ -2005,7 +2700,7 @@ func (a *App) handleConnect(w http.ResponseWriter, r *http.Request, start time.T
 	flow.status = http.StatusOK
 	flow.latencyMs = time.Since(start).Milliseconds()
 	flow.note = fmt.Sprintf("blind CONNECT tunnel: %d B client->upstream, %d B upstream->client; payload not inspected or stored", sent, recv)
-	go a.capture(flow)
+	a.dispatchCapture(flow)
 }
 
 func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow rawFlow, isWS bool) {
@@ -2018,7 +2713,7 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 		flow.respHeaders = http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}}
 		flow.respBody = []byte(msg)
 		flow.latencyMs = time.Since(flow.started).Milliseconds()
-		go a.capture(flow)
+		a.dispatchCapture(flow)
 		return
 	}
 	if !a.acquireTunnel() {
@@ -2113,7 +2808,7 @@ func (a *App) handleUpgrade(w http.ResponseWriter, resp *http.Response, flow raw
 	}
 	flow.latencyMs = time.Since(flow.started).Milliseconds()
 	note := fmt.Sprintf("upgraded connection (%s): %d B client->upstream, %d B upstream->client", resp.Header.Get("Upgrade"), sent, recv)
-	if isWS {
+	if wsUp != nil && wsDown != nil {
 		flow.reqBody = wsUp.Bytes()
 		flow.respBody = wsDown.Bytes()
 		note += fmt.Sprintf("; WebSocket text messages are captured and scrubbed (refreshed live while open, final on close) (client->server: %s; server->client: %s); live frames are forwarded unmodified", wsUp.Summary(), wsDown.Summary())
@@ -2163,7 +2858,7 @@ func addPEMPath(pool *x509.CertPool, path string) (bool, error) {
 		return false, err
 	}
 	if !fi.IsDir() {
-		pem, err := os.ReadFile(path) // #nosec G304 -- the path is a CA file the user configured
+		pem, err := cliio.ReadFile(path)
 		if err != nil {
 			return false, err
 		}
@@ -2178,7 +2873,7 @@ func addPEMPath(pool *x509.CertPool, path string) (bool, error) {
 		if e.IsDir() {
 			continue
 		}
-		pem, err := os.ReadFile(path + "/" + e.Name()) // #nosec G304 -- inside the CA folder the user configured
+		pem, err := cliio.ReadFile(path + "/" + e.Name())
 		if err != nil {
 			continue
 		}
@@ -2249,11 +2944,22 @@ func onTermux() bool {
 	return os.Getenv("TERMUX_VERSION") != "" || strings.Contains(os.Getenv("PREFIX"), "com.termux")
 }
 
+// newDialer builds a dialer that enforces only the user's egress CIDR rules.
 func newDialer(servers []string, egress *egressPolicy) *net.Dialer {
+	return newDialerBlocks(servers, egress, nil)
+}
+
+// newDialerBlocks is newDialer plus the built-in upstream blocks (cloud
+// metadata by default; CGNAT and IPv6 link-local on request). With blocks nil
+// it behaves exactly like newDialer.
+func newDialerBlocks(servers []string, egress *egressPolicy, blocks *upstreamBlocks) *net.Dialer {
 	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	if egress.needsDialControl() {
+	switch {
+	case blocks != nil:
 		// Runs on the resolved address of every connection attempt, so a name
-		// that resolves or rebinds into a blocked CIDR is refused.
+		// that resolves or rebinds into a blocked range is refused.
+		d.Control = upstreamControl(egress, *blocks)
+	case egress.needsDialControl():
 		d.Control = egress.control
 	}
 	if len(servers) > 0 {
@@ -2399,9 +3105,17 @@ const truncTagLookback = 40
 func (a *App) capture(f rawFlow) {
 	defer func() { _ = recover() }()
 	defer f.wipe()
+	if f.hdrBorrowed {
+		f.reqHeaders = f.reqHeaders.Clone()
+		f.respHeaders = f.respHeaders.Clone()
+		f.hdrBorrowed = false
+	}
 	if e, ok := a.buildEntry(f); ok {
 		a.ring.Push(e)
-		a.Bar()
+		if a.tail {
+			a.tailFlow(&e)
+		}
+		a.markBar()
 	}
 }
 
@@ -2520,6 +3234,13 @@ func (a *App) buildEntryWith(sc *Scrubber, f rawFlow) (FlowEntry, bool) {
 	total += n
 	pb, n := sc.ScrubText(rawRespBody)
 	total += n
+
+	// -minify: compact the scrubbed copy kept in RAM. This runs after
+	// scrubbing and only on what is stored; the bytes already forwarded to the
+	// client and the upstream are never touched.
+	if a.minify {
+		rb, pb = minifyJSON(rb), minifyJSON(pb)
+	}
 
 	return FlowEntry{
 		Timestamp: f.started.UTC().Format(time.RFC3339), Method: f.method, URL: u,
@@ -2678,7 +3399,7 @@ func (a *App) toolInspect(args json.RawMessage) map[string]any {
 	return toolResult(text, false)
 }
 
-var reTag = regexp.MustCompile(`\[REDACTED_(TOKEN|COOKIE|IP|KEY|PAN)#[0-9a-f]{6}\]`)
+var reTag = lazyRe(`\[REDACTED_(TOKEN|COOKIE|IP|KEY|PAN)#[0-9a-f]{6}\]`)
 
 func envFor(kind string) string {
 	switch kind {
@@ -2820,7 +3541,11 @@ func (a *App) dispatchTo(req rpcRequest) *rpcResponse {
 		var p struct {
 			ProtocolVersion string `json:"protocolVersion"`
 		}
-		_ = json.Unmarshal(req.Params, &p)
+		if !isEmptyArgs(req.Params) {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return &rpcResponse{ID: id, Error: &rpcError{Code: -32602, Message: "invalid params"}}
+			}
+		}
 		version := p.ProtocolVersion
 		if version == "" {
 			version = "2025-11-25"
@@ -2968,6 +3693,9 @@ func Main() {
 	}
 }
 
+// proxyMemoryLimit is the soft heap target of the proxy (see run).
+const proxyMemoryLimit = 48 << 20
+
 // flagParseError marks a command-line parse failure (already reported by the flag set).
 type flagParseError struct{ error }
 
@@ -2976,6 +3704,14 @@ func (e flagParseError) Unwrap() error { return e.error }
 // run is the proxy + MCP stdio server behind Main. It returns when stdin
 // reaches EOF (nil) or when startup validation fails (a non-nil error).
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	// A soft heap target keeps resident memory low under large-body floods
+	// (the capture buffers stop at their cap, see capBuffer). It is a GC
+	// target, not a hard cap, and an explicit GOMEMLIMIT from the operator
+	// wins. The previous value comes back when run returns, so a test that
+	// calls run does not leave the limit set for the rest of the process.
+	if os.Getenv("GOMEMLIMIT") == "" {
+		defer debug.SetMemoryLimit(debug.SetMemoryLimit(proxyMemoryLimit))
+	}
 	fs := flag.NewFlagSet("nullwire-mcp", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	port := fs.Int("port", 8080, "TCP port for the diagnostic proxy (always bound to 127.0.0.1)")
@@ -2991,6 +3727,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	presetSpec := fs.String("preset", "", "comma-separated compliance redaction presets: pci-dss, hipaa, gdpr, all (off by default)")
 	allowUninspectable := fs.Bool("allow-uninspectable", false, "forward request bodies whose Content-Encoding (br, zstd, ...) cannot be inspected; by default they are refused with 415")
 	maxBodySpec := fs.String("max-body", "", "stored body size per request/response, e.g. 1m (default 32 KiB request / 256 KiB response; at most 2m). Secrets are scrubbed before the cut")
+	maxRamSpec := fs.String("max-ram", "", "opt-in RAM ceiling for the captured-flow buffer, e.g. 64m (at most 400m); the oldest flows are dropped and wiped first when a new one would go over. Off by default")
+	ttl := fs.Duration("ttl", 0, "opt-in: wipe any captured flow older than this duration, e.g. 10m (checked on every read and by a background sweeper). Off by default")
+	idleWipe := fs.Duration("idle-wipe", 0, "opt-in: wipe the whole captured-flow buffer when no new flow arrives for this long, e.g. 5m. Off by default")
+	tail := fs.Bool("tail", false, "opt-in: print one scrubbed summary line per captured flow to stderr (method, scrubbed URL, status, latency, redaction count) and turn off the status bar. Never prints bodies or headers. Off by default")
+	minify := fs.Bool("minify", false, "opt-in: store captured JSON bodies compacted (whitespace removed) after scrubbing, to fit more in the ring. Only the RAM copy changes; live traffic is never touched. Invalid or truncated JSON is stored as it is. Off by default")
 	wsDeflate := fs.Bool("ws-deflate", false, "keep WebSocket permessage-deflate and decode it for capture (default: drop the offer so frames stay readable)")
 	policyPubkey := fs.String("policy-pubkey", "", "enterprise mode: ECDSA P-256 public key (PEM file, hex file or hex text) that must verify <secrets-config>.sig; also refuses -allow-uninspectable")
 	attestOut := fs.String("attest-out", "", "write the signed attestation report to this file when the server exits")
@@ -3007,6 +3748,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	maxBody, err := parseMaxBody(*maxBodySpec)
 	if err != nil {
 		return fmt.Errorf("nullwire-mcp: %v", err)
+	}
+	maxRAM, err := parseMaxRAM(*maxRamSpec)
+	if err != nil {
+		return fmt.Errorf("nullwire-mcp: %v", err)
+	}
+	if err := validateMaxRAM(maxRAM, maxBody); err != nil {
+		return fmt.Errorf("nullwire-mcp: %v", err)
+	}
+	if *ttl < 0 {
+		return fmt.Errorf("nullwire-mcp: -ttl: %v must not be negative", *ttl)
+	}
+	if *idleWipe < 0 {
+		return fmt.Errorf("nullwire-mcp: -idle-wipe: %v must not be negative", *idleWipe)
 	}
 	if err := policyLockError(*policyPubkey != "", *allowUninspectable); err != nil {
 		return fmt.Errorf("nullwire-mcp: %v", err)
@@ -3076,7 +3830,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			return fmt.Errorf("nullwire-mcp: %v", err)
 		}
 	}
-	dialer := newDialer(dnsServers, egress)
+	dialer := newDialerBlocks(dnsServers, egress, &upstreamBlocks{
+		allowMetadata: cfg.AllowMetadataUpstream,
+		blockCGNAT:    cfg.BlockCGNATUpstream,
+		blockLinkV6:   cfg.BlockLinkLocalUpstream,
+	})
 
 	rootCAs, caSource, err := buildRootCAs(*cacert, onTermux())
 	if err != nil {
@@ -3090,9 +3848,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 
 	app := &App{
 		ring: NewRingBuffer(), scrub: scrub, egress: egress, disabledTools: disabled, ignoreURLSubstrings: cfg.IgnoreURLSubstrings, allowUninspectable: *allowUninspectable, maxBody: maxBody, wsDeflate: *wsDeflate,
-		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 32, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true},
+		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 256, MaxIdleConnsPerHost: 128, ReadBufferSize: 32 << 10, WriteBufferSize: 32 << 10, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true, HTTP2: transportHTTP2Config()},
 	}
 	app.stdout, app.stderr = stdout, stderr
+	app.tail = *tail
+	app.minify = *minify
+	app.ring.SetMaxBytes(maxRAM)
+	app.ring.SetExpiry(*ttl, *idleWipe)
 	app.setProxyToken(tok)
 	app.att = attestInfo{
 		started: time.Now().UTC(), policySHA: polSHA, policySigned: polSigned, presets: activePresets,
@@ -3152,7 +3914,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		}
 	}
 
-	srv := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, Protocols: serverProtocols()}
+	app.startCapture()
+	app.startBarTicker()
+	app.ring.StartSweeper() // a no-op unless -ttl or -idle-wipe is set
+	// drain stops the capture workers after they finish every queued flow, then
+	// stops the bar ticker with one last redraw. It runs before the ring and the
+	// taint table are wiped, so no queued flow is pushed after the wipe.
+	drain := func() {
+		app.stopCapture()
+		app.stopBarTicker()
+		app.ring.StopSweeper()
+	}
+
+	srv := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, Protocols: serverProtocols(), HTTP2: serverHTTP2Config()}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			app.Logf("proxy server stopped: %v", err)
@@ -3171,10 +3945,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			return
 		}
 		app.Logf("signal received; wiping RAM")
+		drain()
 		finish()
 		app.ring.Clear()
 		app.scrub.taint.clear()
 		_ = srv.Close()
+		// The tag key is wiped only here, at shutdown: ResetCounters and
+		// clear_ram_buffer must keep it, or tags would change mid-session.
+		clear(app.scrub.nonce)
+		runtime.KeepAlive(app.scrub.nonce)
 		os.Exit(0)
 	}()
 
@@ -3217,6 +3996,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		app.Logf("stdin error: %v", err)
 	}
 	app.Logf("stdin closed; wiping RAM")
+	drain()
 	finish()
 	app.ring.Clear()
 	app.scrub.taint.clear()

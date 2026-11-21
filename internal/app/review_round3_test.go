@@ -7,10 +7,7 @@ import (
 )
 
 func TestDSNWithUserInfoCountsOnce(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	before := s.Tokens.Load()
 	out, n := s.ScrubText("dsn=postgres://app:Sup3rS3cretPw@db.example.com:5432/app")
 	if strings.Contains(out, "Sup3rS3cretPw") {
@@ -22,10 +19,7 @@ func TestDSNWithUserInfoCountsOnce(t *testing.T) {
 }
 
 func TestLegacySkKeyNarrowedToAlphanumeric(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	if in := "id sk-checkout-payment-panel-v2 end"; true {
 		if out, n := s.ScrubText(in); n != 0 || out != in {
 			t.Errorf("kebab id changed: %q -> %q", in, out)
@@ -38,10 +32,7 @@ func TestLegacySkKeyNarrowedToAlphanumeric(t *testing.T) {
 }
 
 func TestAzureSASSignatureRedacted(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	for _, sig := range []string{"Zx9Yw%2FkQ7pL3mN8vB2cD5fG1hJ4sA6tU0eR%3D", "Zx9Yw/kQ7pL3mN8vB2cD5fG1hJ4sA6tU0eR+8="} {
 		in := "https://acct.blob.core.windows.net/c/b?sv=2022-11-02&se=2026-12-01&sp=r&sig=" + sig
 		out, n := s.ScrubText(in)
@@ -52,10 +43,7 @@ func TestAzureSASSignatureRedacted(t *testing.T) {
 }
 
 func TestHexIdentifiersInHeadersAndQueriesSurvive(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	trace := "80f198ee56343ba864fe8b2a57d3eff7"
 	for _, name := range []string{"X-B3-TraceId", "Sentry-Trace"} {
 		h := http.Header{}

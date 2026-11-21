@@ -112,7 +112,7 @@ func (s *Scrubber) scrubXMLTree(in string, count *int) string {
 	// Bytes are used as they are; the offsets below refer to the input itself.
 	dec.CharsetReader = func(_ string, r io.Reader) (io.Reader, error) { return r, nil }
 
-	var stack []xmlFrame
+	stack := make([]xmlFrame, 0, 16)
 	var edits []xmlEdit
 loop:
 	for {

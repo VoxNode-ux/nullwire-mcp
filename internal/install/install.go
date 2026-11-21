@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+
+	"github.com/VoxNode-ux/nullwire-mcp/internal/cliio"
 )
 
 // The install command registers NullWire in MCP clients' config files (and
@@ -330,8 +332,8 @@ func writeFileAtomic(path string, data []byte) (backup string, err error) {
 		mode = st.Mode().Perm()
 		bak := path + ".nullwire-bak"
 		if _, err := os.Stat(bak); os.IsNotExist(err) {
-			if old, err := os.ReadFile(path); err == nil { // #nosec G304 -- path is a known MCP client config file
-				if err := os.WriteFile(bak, old, mode); err == nil { // #nosec G703 -- bak is that same config file plus ".nullwire-bak"
+			if old, err := cliio.ReadFile(path); err == nil {
+				if err := cliio.WriteFile(bak, old, mode); err == nil {
 					backup = bak
 				}
 			}
@@ -365,7 +367,7 @@ func writeFileAtomic(path string, data []byte) (backup string, err error) {
 }
 
 func readIfExists(path string) ([]byte, error) {
-	b, err := os.ReadFile(path) // #nosec G304 -- path is a known client config file
+	b, err := cliio.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -424,7 +426,8 @@ func claudeCodeArgs(o installOptions) [][]string {
 }
 
 func applyClaudeCode(o installOptions) (status string, err error) {
-	if _, err := exec.LookPath("claude"); err != nil {
+	claudePath, lerr := exec.LookPath("claude")
+	if lerr != nil {
 		return "", fmt.Errorf("the claude command was not found; run: claude %s", strings.Join(claudeCodeArgs(o)[len(claudeCodeArgs(o))-1], " "))
 	}
 	cmds := claudeCodeArgs(o)
@@ -432,7 +435,9 @@ func applyClaudeCode(o installOptions) (status string, err error) {
 		return "would run: claude " + strings.Join(cmds[len(cmds)-1], " "), nil
 	}
 	for i, a := range cmds {
-		out, err := exec.Command("claude", a...).CombinedOutput() // #nosec G204 -- fixed program name, arguments come from the install options
+		// Run the binary LookPath resolved above, so PATH is read once.
+		cmd := &exec.Cmd{Path: claudePath, Args: append([]string{claudePath}, a...)}
+		out, err := cmd.CombinedOutput()
 		last := i == len(cmds)-1
 		if err != nil && (last || o.uninstall) {
 			if o.uninstall {

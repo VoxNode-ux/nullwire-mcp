@@ -159,7 +159,7 @@ func TestRcovWalkUnreadableFolder(t *testing.T) {
 	if err := os.Chmod(locked, 0); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) }) // #nosec G302 -- so the temp dir can be removed
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
 	if err := Walk(root, 0, false, func(string) {}); err == nil {
 		t.Error("an unreadable folder must be reported")
 	}

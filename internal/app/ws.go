@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -194,10 +195,12 @@ func (p *wsParser) consume(b []byte) {
 		return
 	}
 	limit := p.msgLimit()
+	k := p.pos // mask position; p.pos itself advances by len(b) below
 	for i := range b {
 		c := b[i]
 		if p.masked {
-			c ^= p.maskKey[(p.pos+uint64(i))&3] // #nosec G115 -- i is a non-negative index into b
+			c ^= p.maskKey[k&3]
+			k++
 		}
 		if len(p.msg) >= limit {
 			p.msgOver = true
@@ -312,6 +315,10 @@ func (c *wsCollector) Summary() string {
 
 // tapRWC passes everything through and also hands each chunk it reads to
 // onRead. onRead must not retain the slice and must not block.
+// errNoHalfClose tells splice the connection cannot be half-closed, so it
+// should drain the other direction instead of closing.
+var errNoHalfClose = errors.New("connection does not support CloseWrite")
+
 type tapRWC struct {
 	rwc    io.ReadWriteCloser
 	onRead func([]byte)
@@ -332,7 +339,9 @@ func (t *tapRWC) CloseWrite() error {
 	if cw, ok := t.rwc.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()
 	}
-	return t.rwc.Close()
+	// No half-close available (e.g. the *http.readWriteCloserBody behind a 101
+	// response): do not tear down the socket, or the peer's reply is lost.
+	return errNoHalfClose
 }
 
 // ---------------------------------------------------------------------------

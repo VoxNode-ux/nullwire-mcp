@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -84,10 +85,7 @@ func TestMaxBodyScrubsBeforeCutting(t *testing.T) {
 // Nested XML and CDATA
 
 func TestScrubXMLTree(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	pw := "hunter2hunter2"
 	cases := []struct{ name, in, keep string }{
 		{"nested", "<Credentials><Value>" + pw + "</Value><Type>Bearer</Type></Credentials>", "<Type>Bearer</Type>"},
@@ -130,17 +128,12 @@ func b58Encode(b []byte) string {
 	for i := 0; i < len(b) && b[i] == 0; i++ {
 		out = append(out, '1')
 	}
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
+	slices.Reverse(out)
 	return string(out)
 }
 
 func TestScrubEncodedText(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	payload := []byte(`{"password":"hunter2hunter2"}`)
 	enc := map[string]string{
 		"hex":    hex.EncodeToString(payload),
@@ -264,7 +257,7 @@ func TestWSLiveRefresh(t *testing.T) {
 // 00 00 ff ff tail that the extension removes.
 func deflateMessages(t *testing.T, takeover bool, msgs ...string) [][]byte {
 	t.Helper()
-	var out [][]byte
+	out := make([][]byte, 0, len(msgs))
 	var buf bytes.Buffer
 	w, err := flate.NewWriter(&buf, flate.BestCompression)
 	if err != nil {
@@ -300,6 +293,9 @@ func TestWSDeflateDecode(t *testing.T) {
 		var stream []byte
 		for _, p := range packed {
 			f := fxFrame(true, 0x1, p, true, key)
+			if len(f) == 0 {
+				t.Fatal("empty frame")
+			}
 			f[0] |= 0x40 // RSV1
 			stream = append(stream, f...)
 		}
@@ -318,6 +314,9 @@ func TestWSDeflateDecode(t *testing.T) {
 
 	// Without an inflater a compressed message stays unreadable.
 	f := fxFrame(true, 0x1, deflateMessages(t, true, first)[0], true, key)
+	if len(f) == 0 {
+		t.Fatal("empty frame")
+	}
 	f[0] |= 0x40
 	c := newWSCollector(1 << 20)
 	fxFeed(newWSParser(c.add), f, 5)
@@ -520,12 +519,17 @@ func TestMCPDispatchEdges(t *testing.T) {
 	app := newTestApp(t)
 
 	// initialize echoes the client's protocol version, or falls back.
-	for params, want := range map[string]string{`{"protocolVersion":"2024-11-05"}`: "2024-11-05", ``: "2025-11-25", `not json`: "2025-11-25"} {
+	for params, want := range map[string]string{`{"protocolVersion":"2024-11-05"}`: "2024-11-05", ``: "2025-11-25"} {
 		resp := app.dispatchTo(exRPC{"1", "initialize", params}.req())
 		res, _ := resp.Result.(map[string]any)
 		if resp.Error != nil || res["protocolVersion"] != want {
 			t.Errorf("initialize %q: %+v", params, resp)
 		}
+	}
+
+	// malformed initialize params are a JSON-RPC -32602, not silently ignored.
+	if resp := app.dispatchTo(exRPC{"1", "initialize", `not json`}.req()); resp.Error == nil || resp.Error.Code != -32602 {
+		t.Errorf("initialize with malformed params: %+v", resp)
 	}
 
 	errCases := []struct {
@@ -744,10 +748,7 @@ const (
 )
 
 func TestScrubBase64WasteAndTextBudgets(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	secret := base64.RawStdEncoding.EncodeToString([]byte(`{"password":"hunter2hunter2"}`))
 	n := 0
 	if out := s.scrubBase64("x "+secret+" y", &n); n != 1 || strings.Contains(out, secret) {
@@ -784,10 +785,7 @@ func TestScrubBase64WasteAndTextBudgets(t *testing.T) {
 }
 
 func TestScrubEncodedTextBudgets(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	secret := hex.EncodeToString([]byte(`{"password":"hunter2hunter2"}`))
 	n := 0
 	if out := s.scrubEncodedText("x "+secret+" y", &n); n != 1 || strings.Contains(out, secret) {
@@ -941,10 +939,7 @@ func TestTextShapeHelpers(t *testing.T) {
 }
 
 func TestScrubJSONSecretArraysSkips(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	n := 0
 	in := `{"password":["","[REDACTED_TOKEN#abc]","Sup3rS3cretValue"]}`
 	out := s.scrubJSONSecretArrays(in, &n)
@@ -979,10 +974,7 @@ func TestXMLOpenLocalName(t *testing.T) {
 // scrubXMLSecrets is the regexp pass that mops up after the tree pass, so it
 // is called directly here to reach its early returns.
 func TestScrubXMLSecretsSkipsAndRedacts(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	for name, in := range map[string]string{
 		"blank value":          "<Secret> </Secret>",
 		"blank cdata":          "<Secret><![CDATA[ ]]></Secret>",

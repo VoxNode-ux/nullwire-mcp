@@ -27,10 +27,7 @@ var fxTagRe = regexp.MustCompile(`\[REDACTED_[A-Z]+#[0-9a-f]+\]`)
 
 func fxApp(t *testing.T) *App {
 	t.Helper()
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 	return &App{ring: NewRingBuffer(), scrub: s, transport: &http.Transport{DisableCompression: true}}
 }
 
@@ -66,33 +63,48 @@ func fxStdout(t *testing.T, fn func()) string {
 	return <-done
 }
 
+// fxFrame builds one WebSocket frame. The result is allocated up front with
+// make and filled by index, so it is never nil, whatever payload is passed.
 func fxFrame(fin bool, opcode byte, payload []byte, mask bool, key [4]byte) []byte {
 	b0 := opcode
 	if fin {
 		b0 |= 0x80
 	}
-	b := []byte{b0}
 	mbit := byte(0)
 	if mask {
 		mbit = 0x80
 	}
-	switch n := len(payload); {
+	n := len(payload)
+	var hdr [14]byte // 1 + up to 9 length bytes + 4 mask bytes
+	h := 0
+	hdr[h] = b0
+	h++
+	switch {
 	case n < 126:
-		b = append(b, mbit|byte(n))
+		hdr[h] = mbit | byte(n)
+		h++
 	case n < 65536:
-		b = append(b, mbit|126, byte(n>>8), byte(n))
+		hdr[h], hdr[h+1], hdr[h+2] = mbit|126, byte(n>>8), byte(n)
+		h += 3
 	default:
-		b = append(b, mbit|127, 0, 0, 0, 0, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+		hdr[h], hdr[h+5], hdr[h+6], hdr[h+7], hdr[h+8] = mbit|127, byte(n>>24), byte(n>>16), byte(n>>8), byte(n)
+		h += 9
 	}
 	if mask {
-		b = append(b, key[:]...)
+		copy(hdr[h:], key[:])
+		h += 4
+	}
+	out := make([]byte, h+n)
+	copy(out, hdr[:h])
+	body := out[h:]
+	if mask {
 		for i, c := range payload {
-			b = append(b, c^key[i&3])
+			body[i] = c ^ key[i&3]
 		}
 	} else {
-		b = append(b, payload...)
+		copy(body, payload)
 	}
-	return b
+	return out
 }
 
 func fxFeed(p *wsParser, stream []byte, chunk int) {
@@ -118,7 +130,7 @@ func fxParse(stream []byte, chunk, maxBytes int) (*wsCollector, *wsParser) {
 // ---------------------------------------------------------------------------
 
 func TestHighEntropyCatch(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	tokens := []string{
 		"aB3xK9mP2qR7sT4w",
 		"xYz9AbC8dEf7GhJ6",
@@ -150,7 +162,7 @@ func TestHighEntropyCatch(t *testing.T) {
 }
 
 func TestIPv4StrictValidation(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	for _, ip := range []string{"192.168.1.1", "10.0.0.42"} {
 		if out, n := s.ScrubText("peer " + ip); n != 1 || strings.Contains(out, ip) {
 			t.Errorf("valid IP %q failed", ip)
@@ -165,7 +177,7 @@ func TestIPv4StrictValidation(t *testing.T) {
 }
 
 func TestJSONKeyField(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	out, n := s.ScrubText(`{"key":"supersecretvalue123"}`)
 	if n == 0 || strings.Contains(out, "supersecretvalue123") || !fxTagRe.MatchString(out) {
 		t.Errorf("key field not scrubbed: %q", out)
@@ -173,7 +185,7 @@ func TestJSONKeyField(t *testing.T) {
 }
 
 func TestStrictFieldsOnlyForSecretKeys(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 
 	benign := `{"model":"claude-opus-4-5","role":"administrator","status":"authenticated_ok","sort":"created_at_desc"}`
 	if out, n := s.ScrubText(benign); n != 0 || out != benign {
@@ -200,7 +212,7 @@ func TestStrictFieldsOnlyForSecretKeys(t *testing.T) {
 }
 
 func TestVendorTiers(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	redacted := map[string]string{
 		"aws-sts":     "ASIA" + "IOSFODNN7EXAMPLE",
 		"sendgrid":    "SG." + strings.Repeat("aB3", 8) + "." + strings.Repeat("cD4", 15),
@@ -493,7 +505,7 @@ func TestScanFindsSecrets(t *testing.T) {
 	if err := os.WriteFile(cfg, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	var report strings.Builder
 	ok, hits, tokens, _ := scan.ScanFile(s, cfg, &report)
 	if !ok || hits == 0 || tokens == 0 || strings.Contains(report.String(), strings.Repeat("a1", 20)) {
@@ -564,7 +576,7 @@ func TestHistoryScanNeverPrintsText(t *testing.T) {
 	if err := os.WriteFile(path, []byte("ls -la\nexport GITHUB_TOKEN="+secret+"\ngit status\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	var report strings.Builder
 	ok, hits, tokens := scan.ScanHistoryFile(s, path, &report)
 	if !ok || hits != 1 || tokens == 0 {
@@ -580,7 +592,7 @@ func TestHistoryScanNeverPrintsText(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPEMPrivateKeys(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	cases := map[string]string{
 		"rsa":      "key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234\nabcdefgh\n-----END RSA PRIVATE KEY-----\nrest ok",
 		"plain":    "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\n-----END PRIVATE KEY-----",
@@ -609,7 +621,7 @@ func TestPEMPrivateKeys(t *testing.T) {
 }
 
 func TestXMLSecrets(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	in := `<user><password>hunter2hunter2</password><name>bob</name></user>`
 	out, n := s.ScrubText(in)
 	if n == 0 || strings.Contains(out, "hunter2hunter2") || !strings.Contains(out, "<name>bob</name>") {
@@ -632,7 +644,7 @@ func TestXMLSecrets(t *testing.T) {
 // The XML must stay well formed for whoever reads it: only the text inside the
 // element is replaced, and the closing tag keeps its name.
 func TestXMLSecretsKeepClosingTags(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	keep := regexp.MustCompile(`^<user><password>\[REDACTED_TOKEN#[0-9a-f]+\]</password><name>bob</name></user>$`)
 	if out, _ := s.ScrubText(`<user><password>hunter2hunter2</password><name>bob</name></user>`); !keep.MatchString(out) {
 		t.Errorf("closing tags were damaged: %q", out)
@@ -655,7 +667,7 @@ func TestXMLSecretsKeepClosingTags(t *testing.T) {
 }
 
 func TestJSONSecretArrays(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	in := `{"Password": ["value1234abcd", "second5678efgh"], "user": ["bob"]}`
 	out, n := s.ScrubText(in)
 	if n != 2 || strings.Contains(out, "value1234abcd") || strings.Contains(out, "second5678efgh") || !strings.Contains(out, `"user": ["bob"]`) {
@@ -664,7 +676,7 @@ func TestJSONSecretArrays(t *testing.T) {
 }
 
 func TestSecretsInsideBase64(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	secret := "sk-" + strings.Repeat("A", 28)
 	blob := base64.StdEncoding.EncodeToString([]byte(`{"api_key":"` + secret + `","user":"bob"}`))
 	out, n := s.ScrubText("payload: " + blob + " end")
@@ -771,7 +783,7 @@ func TestFailClosedRequestShield(t *testing.T) {
 }
 
 func TestMultipartScrubbing(t *testing.T) {
-	app := &App{scrub: func() *Scrubber { s, _ := NewScrubber(); return s }()}
+	app := &App{scrub: func() *Scrubber { s := mustScrubber(); return s }()}
 	body := "--boundary\r\n" +
 		"Content-Disposition: form-data; name=\"username\"\r\n\r\nadmin\r\n" +
 		"--boundary\r\n" +
@@ -809,7 +821,7 @@ func TestYAMLScan(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	var report strings.Builder
 	ok, hits, tokens := scan.ScanYAMLFile(s, path, &report)
 	if !ok || hits != 3 || tokens < 3 {
@@ -863,7 +875,7 @@ func TestZipBombShield(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	var report strings.Builder
 	ok, hits, tokens := scan.ScanZipFile(s, path, &report)
 	if !ok || hits != 1 || tokens == 0 {

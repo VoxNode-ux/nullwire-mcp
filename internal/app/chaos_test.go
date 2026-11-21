@@ -196,7 +196,10 @@ func TestChaosUpstreamNeverAnswers(t *testing.T) {
 	app.transport.ResponseHeaderTimeout = 300 * time.Millisecond
 	up := chaosUpstream(t, func(c net.Conn, br *bufio.Reader) {
 		_, _ = http.ReadRequest(br)
-		time.Sleep(2 * time.Second) // read the request, then say nothing
+		// Read the request, then say nothing until the gateway gives up and
+		// closes the connection (bounded by the 10s conn deadline), so no
+		// goroutine outlives the test.
+		_, _ = io.Copy(io.Discard, br)
 	})
 	start := time.Now()
 	rec := chaosGateway(app, up)

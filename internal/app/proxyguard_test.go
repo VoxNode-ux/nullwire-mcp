@@ -219,3 +219,198 @@ func TestAuthorizeRefusesEmptyAndAcceptsPaddedToken(t *testing.T) {
 		t.Error("a token with surrounding spaces must pass")
 	}
 }
+
+func edgeSockDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets: Linux and macOS")
+	}
+	// Short, so the socket path stays under the sun_path limit.
+	dir, err := os.MkdirTemp("", "nw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(dir, 0o700)
+		_ = os.RemoveAll(dir)
+	})
+	return dir
+}
+
+// deadSocket leaves a socket file with nothing listening behind it.
+func deadSocket(t *testing.T, path string) {
+	t.Helper()
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ul, ok := ln.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
+	_ = ln.Close()
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("setup: expected a leftover socket file, got %v, %v", fi, err)
+	}
+}
+
+func TestParseListenEdges(t *testing.T) {
+	for _, c := range []struct{ spec, want string }{
+		{"unix:///tmp/nw.sock", "/tmp/nw.sock"},
+		{"  unix:///tmp/nw.sock \n", "/tmp/nw.sock"},
+		{"unix:///tmp//a/../nw.sock", "/tmp/nw.sock"},
+		{"unix:///run/user/1000/nullwire.sock", "/run/user/1000/nullwire.sock"},
+	} {
+		if p, err := parseListen(c.spec); err != nil || p != c.want {
+			t.Errorf("parseListen(%q) = %q, %v; want %q", c.spec, p, err, c.want)
+		}
+	}
+	// Anything but unix://: the error points at the right syntax.
+	for _, spec := range []string{"", "   ", "/tmp/nw.sock", "unix:/tmp/nw.sock", "UNIX:///tmp/nw.sock", "tcp://127.0.0.1:1", "127.0.0.1:8080"} {
+		p, err := parseListen(spec)
+		if err == nil || p != "" || !strings.Contains(err.Error(), "unix:///") {
+			t.Errorf("parseListen(%q) = %q, %v; want a unix:// usage error", spec, p, err)
+		}
+	}
+	// unix:// with no path, or a relative one: an absolute path is required.
+	for _, spec := range []string{"unix://", "unix://   ", "unix://nw.sock", "unix://./nw.sock", "unix://../nw.sock", "unix://run/nw.sock"} {
+		p, err := parseListen(spec)
+		if err == nil || p != "" || !strings.Contains(err.Error(), "absolute") {
+			t.Errorf("parseListen(%q) = %q, %v; want an absolute-path error", spec, p, err)
+		}
+	}
+}
+
+func TestListenUnixRefusesNonSocket(t *testing.T) {
+	dir := edgeSockDir(t)
+
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "subdir")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink is not a socket either, even when it points at one.
+	sock := filepath.Join(dir, "sock.sock")
+	deadSocket(t, sock)
+	link := filepath.Join(dir, "link.sock")
+	if err := os.Symlink(sock, link); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, p := range []string{file, sub, link} {
+		ln, err := listenUnix(p)
+		if err == nil || !strings.Contains(err.Error(), "not a socket") || !strings.Contains(err.Error(), p) {
+			if ln != nil {
+				_ = ln.Close()
+			}
+			t.Errorf("listenUnix(%s) = %v; want a \"not a socket\" refusal", p, err)
+		}
+	}
+	// Nothing was removed or replaced.
+	if b, err := os.ReadFile(file); err != nil || string(b) != "keep" {
+		t.Errorf("regular file was touched: %q, %v", b, err)
+	}
+	if fi, err := os.Lstat(sub); err != nil || !fi.IsDir() {
+		t.Errorf("directory was touched: %v, %v", fi, err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("symlink was touched: %v, %v", fi, err)
+	}
+	if fi, err := os.Lstat(sock); err != nil || fi.Mode()&os.ModeSocket == 0 {
+		t.Errorf("socket behind the symlink was touched: %v, %v", fi, err)
+	}
+}
+
+func TestListenUnixRefusesLiveSocket(t *testing.T) {
+	dir := edgeSockDir(t)
+	path := filepath.Join(dir, "live.sock")
+
+	live, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+
+	ln, err := listenUnix(path)
+	if err == nil || !strings.Contains(err.Error(), "already in use") || !strings.Contains(err.Error(), path) {
+		if ln != nil {
+			_ = ln.Close()
+		}
+		t.Fatalf("listenUnix on a live socket = %v; want \"already in use\"", err)
+	}
+	// The original listener is untouched and still reachable.
+	c, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("the live socket was disturbed: %v", err)
+	}
+	_ = c.Close()
+	// No temporary directory was left behind.
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("expected only the live socket in %s, got %d entries", dir, len(entries))
+	}
+}
+
+func TestListenUnixReplacesStaleSocket(t *testing.T) {
+	dir := edgeSockDir(t)
+	path := filepath.Join(dir, "stale.sock")
+	deadSocket(t, path)
+
+	ln, err := listenUnix(path)
+	if err != nil {
+		t.Fatalf("a dead socket must be cleaned up and reused: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&os.ModeSocket == 0 || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("replacement socket: %v, %v", fi, err)
+	}
+	// It is the new listener that answers.
+	accepted := make(chan struct{})
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			_ = c.Close()
+		}
+		close(accepted)
+	}()
+	c, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial the replacement: %v", err)
+	}
+	_ = c.Close()
+	<-accepted
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("temporary files remain: %d entries", len(entries))
+	}
+}
+
+// A dead socket that cannot be removed is reported, not ignored.
+func TestListenUnixStaleSocketNotRemovable(t *testing.T) {
+	dir := edgeSockDir(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	locked := filepath.Join(dir, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(locked, "s.sock")
+	deadSocket(t, path)
+	if err := os.Chmod(locked, 0o500); err != nil { // no write: unlink is refused
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	ln, err := listenUnix(path)
+	if err == nil || !strings.HasPrefix(err.Error(), "-listen:") {
+		if ln != nil {
+			_ = ln.Close()
+		}
+		t.Fatalf("listenUnix = %v; want a -listen error", err)
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSocket == 0 {
+		t.Errorf("the stale socket should still be there: %v, %v", fi, err)
+	}
+}

@@ -22,7 +22,7 @@ import (
 const vendorBody = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
 
 func TestVendorKeyShapes(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	shapes := map[string]string{
 		"stripe secret":     "sk_live_" + vendorBody,
 		"stripe restricted": "rk_live_" + vendorBody,
@@ -55,7 +55,7 @@ func TestVendorKeyShapes(t *testing.T) {
 }
 
 func TestVendorKeyLookalikesUntouched(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	for _, in := range []string{
 		"sk_live_short",
 		"npm_config_registry",
@@ -94,7 +94,7 @@ func TestVendorKeyLookalikesUntouched(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIPv6Redaction(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	cases := []struct {
 		in, leak string
 		want     int
@@ -139,7 +139,7 @@ func TestIPv6Redaction(t *testing.T) {
 }
 
 func TestIPv6CorrelatesAcrossSpellings(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	a, _ := s.ScrubText("2001:db8::1")
 	b, _ := s.ScrubText("2001:0DB8:0:0:0:0:0:1")
 	if a != b || !ipTagRe.MatchString(a) {
@@ -154,7 +154,7 @@ func TestIPv6CorrelatesAcrossSpellings(t *testing.T) {
 // These are the strings an IPv6 rule must leave alone: hex, versions, clock
 // times, MAC addresses, namespaces, loopback, ports.
 func TestIPv6FalsePositives(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	for _, in := range []string{
 		"v1.2.3", "0xdeadbeef", "deadbeefcafe",
 		"sha256:3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
@@ -174,7 +174,7 @@ func TestIPv6FalsePositives(t *testing.T) {
 }
 
 func TestIPv6InHeaders(t *testing.T) {
-	s, _ := NewScrubber()
+	s := mustScrubber()
 	h := http.Header{}
 	h.Set("X-Forwarded-For", "2001:db8::1")
 	got, n := s.ScrubHeaders(h)
@@ -197,7 +197,11 @@ func TestParseTargets(t *testing.T) {
 	if err != nil || def != nil || len(named) != 2 {
 		t.Fatalf("two named: %v %v %v", def, named, err)
 	}
-	if named["openai"].Host != "api.openai.com" || named["anthropic"].Host != "api.anthropic.com" {
+	openai, anthropic := named["openai"], named["anthropic"]
+	if openai == nil || anthropic == nil {
+		t.Fatalf("missing named targets: %v", named)
+	}
+	if openai.Host != "api.openai.com" || anthropic.Host != "api.anthropic.com" {
 		t.Errorf("wrong hosts: %v", named)
 	}
 
@@ -596,10 +600,7 @@ func TestCovSignatureValueOK(t *testing.T) {
 }
 
 func TestCovScrubStrictFieldsMax(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 
 	// Azure SAS signature, percent-encoded and plain base64 with "/".
 	for _, c := range []struct{ name, in string }{
@@ -681,10 +682,7 @@ func TestCovIPv6Redactable(t *testing.T) {
 }
 
 func TestCovScrubIPv6EdgeBranches(t *testing.T) {
-	s, err := NewScrubber()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mustScrubber()
 
 	// A zone id belongs to the address and goes with it.
 	out, n := s.scrubIPv6("peer fe80::1%eth0 ok")

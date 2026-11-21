@@ -108,7 +108,7 @@ func TestEgressControlAddressForms(t *testing.T) {
 	}
 	// netip.ParseAddrPort rejects these ports, so the SplitHostPort fallback decides.
 	for _, addr := range []string{"10.1.2.3:http", "10.1.2.3:99999"} {
-		if err := p.control("tcp", addr, nil); !errors.Is(err, errEgressDenied) || !strings.Contains(err.Error(), "blocked_upstream_hosts") {
+		if err := p.control("tcp", addr, nil); err == nil || !errors.Is(err, errEgressDenied) || !strings.Contains(err.Error(), "blocked_upstream_hosts") {
 			t.Errorf("fallback must still enforce the block for %q: %v", addr, err)
 		}
 	}
@@ -120,7 +120,7 @@ func TestEgressControlAddressForms(t *testing.T) {
 	// Anything that is not an address fails closed.
 	for _, addr := range []string{"", "no-port", "10.1.2.3", "example.com:80", "[::1", "::1::1:80"} {
 		err := p.control("tcp", addr, nil)
-		if !errors.Is(err, errEgressDenied) || !strings.Contains(err.Error(), "cannot parse upstream address") {
+		if err == nil || !errors.Is(err, errEgressDenied) || !strings.Contains(err.Error(), "cannot parse upstream address") {
 			t.Errorf("control(%q) = %v, want a fail-closed parse error", addr, err)
 		}
 	}
