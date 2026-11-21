@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -25,6 +26,21 @@ func TestCredDataFPRByStage(t *testing.T) {
 	defer f.Close()
 	s := mustScrubber()
 	ctx := ContextBody
+	// CREDDATA_KEY sets the key name put in front of every value (default
+	// "CRED", which looks like a secret-named field). Run it again with a
+	// neutral name such as "X" to see how much of the FPR comes from the key.
+	key := os.Getenv("CREDDATA_KEY")
+	if key == "" {
+		key = "CRED"
+	}
+	// CREDDATA_SAMPLES=N writes up to N example values per label and stage to
+	// CREDDATA_SAMPLES_OUT (default stage-samples.tsv), to see what triggers.
+	maxSamples, _ := strconv.Atoi(os.Getenv("CREDDATA_SAMPLES"))
+	samplesOut := os.Getenv("CREDDATA_SAMPLES_OUT")
+	if samplesOut == "" {
+		samplesOut = "stage-samples.tsv"
+	}
+	samples := map[string][]string{}
 	counts := map[string]map[string]int{"T": {}, "F": {}}
 	total := map[string]int{}
 	sc := bufio.NewScanner(f)
@@ -35,7 +51,7 @@ func TestCredDataFPRByStage(t *testing.T) {
 			continue
 		}
 		total[label]++
-		line := "CRED=" + val
+		line := key + "=" + val
 		stage := "clean"
 		if _, n := s.scrubUnwrapped(line, ctx); n > 0 {
 			stage = "1-unwrap"
@@ -53,7 +69,27 @@ func TestCredDataFPRByStage(t *testing.T) {
 			}
 		}
 		counts[label][stage]++
+		if k := label + "\t" + stage; len(samples[k]) < maxSamples {
+			samples[k] = append(samples[k], val)
+		}
 	}
+	if maxSamples > 0 {
+		var b strings.Builder
+		keys := make([]string, 0, len(samples))
+		for k := range samples {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			for _, v := range samples[k] {
+				b.WriteString(k + "\t" + v + "\n")
+			}
+		}
+		if err := os.WriteFile(samplesOut, []byte(b.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fmt.Printf("== key name used: %q\n", key)
 	for _, l := range []string{"F", "T"} {
 		keys := make([]string, 0, len(counts[l]))
 		for k := range counts[l] {
