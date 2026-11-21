@@ -120,7 +120,7 @@ func TestEgressControlAddressForms(t *testing.T) {
 	// Anything that is not an address fails closed.
 	for _, addr := range []string{"", "no-port", "10.1.2.3", "example.com:80", "[::1", "::1::1:80"} {
 		err := p.control("tcp", addr, nil)
-		if !errors.Is(err, errEgressDenied) || !strings.Contains(err.Error(), "cannot parse upstream address") {
+		if err == nil || !errors.Is(err, errEgressDenied) || !strings.Contains(err.Error(), "cannot parse upstream address") {
 			t.Errorf("control(%q) = %v, want a fail-closed parse error", addr, err)
 		}
 	}

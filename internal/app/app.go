@@ -2285,7 +2285,10 @@ func splice(client, upstream io.ReadWriteCloser, idle time.Duration, pre []byte)
 						armDrain()
 					}
 				} else {
-					closeBoth()
+					// Non-EOF read error (e.g. ECONNRESET): src is unusable, but
+					// the reverse direction may still hold the peer's Close frame.
+					// Drain it, bounded by the drain timer, instead of cutting it off.
+					armDrain()
 				}
 				return
 			}

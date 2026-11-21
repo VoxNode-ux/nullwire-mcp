@@ -47,11 +47,18 @@ func TestSpliceWriteErrorStillDeliversReverseData(t *testing.T) {
 	t.Cleanup(func() { halfCloseDrain = old })
 	cc, cs := net.Pipe()
 	uc, us := net.Pipe()
-	go splice(cs, uc, 0, nil)
-	go func() { _, _ = us.Write([]byte("close")); _ = us.Close() }()
+	spliceDone := make(chan struct{})
+	go func() { defer close(spliceDone); splice(cs, uc, 0, nil) }()
+	upDone := make(chan struct{})
+	go func() { defer close(upDone); _, _ = us.Write([]byte("close")); _ = us.Close() }()
 	time.Sleep(50 * time.Millisecond)
-	go func() { _, _ = cc.Write([]byte("junk")) }() // upstream side is closed: write fails
+	wrDone := make(chan struct{})
+	go func() { defer close(wrDone); _, _ = cc.Write([]byte("junk")) }() // upstream side is closed: write fails
 	b, _ := io.ReadAll(cc)
+	_ = cc.Close()
+	<-wrDone
+	<-upDone
+	<-spliceDone
 	if string(b) != "close" {
 		t.Fatalf("client got %q, want the upstream's close data", b)
 	}

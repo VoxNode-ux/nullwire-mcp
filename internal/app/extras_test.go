@@ -311,6 +311,9 @@ func TestWSDeflateDecode(t *testing.T) {
 
 	// Without an inflater a compressed message stays unreadable.
 	f := fxFrame(true, 0x1, deflateMessages(t, true, first)[0], true, key)
+	if len(f) == 0 {
+		t.Fatal("empty frame")
+	}
 	f[0] |= 0x40
 	c := newWSCollector(1 << 20)
 	fxFeed(newWSParser(c.add), f, 5)
