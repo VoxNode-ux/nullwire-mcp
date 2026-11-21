@@ -125,7 +125,7 @@ func TestMinifyKeepsRedactionInInspectAndHAR(t *testing.T) {
 		t.Fatal("inspect_traffic leaks the secret")
 	}
 
-	_, har := harCall(t, app, `{"limit":1}`)
+	_, har := harCall(t, app, `{"limit":1,"include_bodies":true}`)
 	if strings.Contains(har, secret) {
 		t.Fatal("export_har leaks the secret")
 	}

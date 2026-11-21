@@ -58,7 +58,7 @@ func TestMaxRAMAccountingAndFIFO(t *testing.T) {
 	r := NewRingBuffer()
 	cost := entryCost(&FlowEntry{Method: "GET", URL: "http://x.test/", RequestBody: strings.Repeat("a", 1000)})
 	r.SetMaxBytes(3*cost + cost/2) // room for three entries
-	var ids []uint64
+	ids := make([]uint64, 0, 5)
 	for i := 0; i < 5; i++ {
 		ids = append(ids, r.Push(ramEntry(1000)))
 		if got, limit := r.Bytes(), 3*cost+cost/2; got > limit {
