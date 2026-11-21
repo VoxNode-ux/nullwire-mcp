@@ -197,7 +197,11 @@ func TestParseTargets(t *testing.T) {
 	if err != nil || def != nil || len(named) != 2 {
 		t.Fatalf("two named: %v %v %v", def, named, err)
 	}
-	if named["openai"].Host != "api.openai.com" || named["anthropic"].Host != "api.anthropic.com" {
+	openai, anthropic := named["openai"], named["anthropic"]
+	if openai == nil || anthropic == nil {
+		t.Fatalf("missing named targets: %v", named)
+	}
+	if openai.Host != "api.openai.com" || anthropic.Host != "api.anthropic.com" {
 		t.Errorf("wrong hosts: %v", named)
 	}
 
