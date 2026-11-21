@@ -74,6 +74,9 @@ func (a *App) finishLive(id uint64, f rawFlow) {
 	if id == 0 || !a.ring.Update(id, func(cur *FlowEntry) { *cur = e }) {
 		a.ring.Push(e)
 	}
+	if a.tail {
+		a.tailFlow(&e)
+	}
 	a.Bar()
 }
 

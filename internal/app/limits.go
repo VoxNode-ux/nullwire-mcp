@@ -82,3 +82,52 @@ func parseMaxBody(spec string) (int, error) {
 	}
 	return n, nil
 }
+
+// maxMaxRAM is the largest value -max-ram accepts.
+const maxMaxRAM = 400 * 1024 * 1024
+
+// parseMaxRAM reads the -max-ram value: a byte count with an optional k, kb,
+// kib, m, mb, mib, g, gb or gib suffix. "" means off (0). Zero, negative
+// values and anything above 400 MiB are errors.
+func parseMaxRAM(spec string) (int, error) {
+	s := strings.ToLower(strings.TrimSpace(spec))
+	if s == "" {
+		return 0, nil
+	}
+	mult := 1
+	for _, u := range []struct {
+		suffix string
+		mult   int
+	}{{"gib", 1 << 30}, {"gb", 1 << 30}, {"mib", 1 << 20}, {"mb", 1 << 20}, {"kib", 1 << 10}, {"kb", 1 << 10}, {"g", 1 << 30}, {"m", 1 << 20}, {"k", 1 << 10}, {"b", 1}} {
+		if strings.HasSuffix(s, u.suffix) {
+			mult = u.mult
+			s = strings.TrimSpace(strings.TrimSuffix(s, u.suffix))
+			break
+		}
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("-max-ram: %q is not a size (try 64m, 256m or 400m)", spec)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("-max-ram: %q must be greater than zero (leave the option out to turn it off)", spec)
+	}
+	if n > maxMaxRAM/mult {
+		return 0, fmt.Errorf("-max-ram: %q is above the 400 MiB limit", spec)
+	}
+	return n * mult, nil
+}
+
+// validateMaxRAM checks that a -max-ram budget can hold at least one full
+// flow at the -max-body limits (plus room for headers), so a flow is never
+// cut just because the budget is tiny. ram 0 means the option is off.
+func validateMaxRAM(ram, maxBody int) error {
+	if ram <= 0 {
+		return nil
+	}
+	l := limitsFor(maxBody)
+	if need := l.reqBody + l.respBody + 64*1024; ram < need {
+		return fmt.Errorf("-max-ram: %d bytes cannot hold one flow at the current body limits; use at least %d bytes", ram, need)
+	}
+	return nil
+}

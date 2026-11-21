@@ -100,9 +100,229 @@ type RingBuffer struct {
 	next   int
 	size   int
 	nextID uint64
+
+	// maxBytes is the -max-ram budget; 0 means off. bytes is the estimated
+	// size of everything stored, and is only kept up to date when maxBytes > 0.
+	maxBytes int
+	bytes    int
+
+	// -ttl and -idle-wipe. timed is set once by SetExpiry before the buffer
+	// is shared; when it is false none of this code runs. born[i] is when
+	// slots[i] was stored; lastPush is when the newest flow arrived.
+	timed     bool
+	ttl, idle time.Duration
+	born      [ringCapacity]time.Time
+	lastPush  time.Time
+	clock     func() time.Time // tests only; nil means time.Now
+	sweepDone chan struct{}
+	sweepWG   sync.WaitGroup
+}
+
+func (r *RingBuffer) now() time.Time {
+	if r.clock != nil {
+		return r.clock()
+	}
+	return time.Now()
+}
+
+// SetExpiry turns on -ttl (entries older than ttl are wiped) and -idle-wipe
+// (the whole buffer is wiped when no flow arrives for idle). Zero means off.
+// Call it before the buffer is shared.
+func (r *RingBuffer) SetExpiry(ttl, idle time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ttl, r.idle = max(ttl, 0), max(idle, 0)
+	r.timed = r.ttl > 0 || r.idle > 0
+	if r.timed {
+		now := r.now()
+		r.lastPush = now
+		for i := 0; i < r.size; i++ {
+			r.born[(r.next-1-i+2*ringCapacity)%ringCapacity] = now
+		}
+	}
+}
+
+// expireLocked wipes what -idle-wipe and -ttl say is due. The caller holds
+// r.mu for writing.
+func (r *RingBuffer) expireLocked(now time.Time) {
+	if r.size == 0 {
+		return
+	}
+	if r.idle > 0 && now.Sub(r.lastPush) >= r.idle {
+		r.wipeLocked()
+		return
+	}
+	if r.ttl <= 0 {
+		return
+	}
+	for r.size > 0 {
+		oldest := (r.next - r.size + ringCapacity) % ringCapacity
+		if now.Sub(r.born[oldest]) < r.ttl {
+			return
+		}
+		r.dropOldestLocked()
+	}
+}
+
+// expire is the lazy check run by the read paths.
+func (r *RingBuffer) expire() {
+	if !r.timed {
+		return
+	}
+	r.mu.Lock()
+	r.expireLocked(r.now())
+	r.mu.Unlock()
+}
+
+// sweepInterval is how often the background sweeper looks: a quarter of the
+// shortest window, kept between 5 ms and 5 s. Reads also expire lazily, so
+// the sweeper only bounds how long expired data can sit unread.
+func sweepInterval(ttl, idle time.Duration) time.Duration {
+	m := ttl
+	if m <= 0 || (idle > 0 && idle < m) {
+		m = idle
+	}
+	return min(max(m/4, 5*time.Millisecond), 5*time.Second)
+}
+
+// StartSweeper starts the background sweeper. It does nothing unless -ttl or
+// -idle-wipe is set, and does nothing when one is already running.
+func (r *RingBuffer) StartSweeper() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.timed || r.sweepDone != nil {
+		return
+	}
+	done := make(chan struct{})
+	r.sweepDone = done
+	tick := time.NewTicker(sweepInterval(r.ttl, r.idle))
+	r.sweepWG.Add(1)
+	go func() {
+		defer r.sweepWG.Done()
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+				r.mu.Lock()
+				r.expireLocked(r.now())
+				r.mu.Unlock()
+			}
+		}
+	}()
+}
+
+// StopSweeper stops the sweeper and waits for it to exit. It is safe to call
+// more than once, or without StartSweeper.
+func (r *RingBuffer) StopSweeper() {
+	r.mu.Lock()
+	done := r.sweepDone
+	r.sweepDone = nil
+	r.mu.Unlock()
+	if done == nil {
+		return
+	}
+	close(done)
+	r.sweepWG.Wait()
 }
 
 func NewRingBuffer() *RingBuffer { return &RingBuffer{nextID: 1} }
+
+// SetMaxBytes turns the byte budget on (n > 0) or off (n <= 0). Call it
+// before the buffer is shared. Entries already stored are counted.
+func (r *RingBuffer) SetMaxBytes(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n <= 0 {
+		r.maxBytes, r.bytes = 0, 0
+		return
+	}
+	r.maxBytes = n
+	r.bytes = 0
+	for i := 0; i < r.size; i++ {
+		r.bytes += entryCost(&r.slots[(r.next-1-i+2*ringCapacity)%ringCapacity])
+	}
+	r.evictLocked(-1)
+}
+
+// Bytes returns the estimated stored size, or 0 when -max-ram is off.
+func (r *RingBuffer) Bytes() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.bytes
+}
+
+// entryFixedCost covers the FlowEntry struct, map headers and slack.
+const entryFixedCost = 512
+
+// entryCost estimates the memory held by one entry: bodies, URL, header
+// text and a fixed allowance for the struct and map overhead.
+func entryCost(e *FlowEntry) int {
+	n := entryFixedCost + len(e.RequestBody) + len(e.ResponseBody) +
+		len(e.URL) + len(e.Method) + len(e.Timestamp) + len(e.Note)
+	for k, v := range e.RequestHeaders {
+		n += len(k) + len(v) + 32
+	}
+	for k, v := range e.ResponseHeaders {
+		n += len(k) + len(v) + 32
+	}
+	return n
+}
+
+// dropOldestLocked removes the oldest entry, zeroing its slot, and returns
+// its slot index. The caller holds r.mu.
+func (r *RingBuffer) dropOldestLocked() int {
+	idx := (r.next - r.size + ringCapacity) % ringCapacity
+	if r.maxBytes > 0 {
+		r.bytes -= entryCost(&r.slots[idx])
+	}
+	r.slots[idx] = FlowEntry{}
+	r.born[idx] = time.Time{}
+	r.size--
+	return idx
+}
+
+// evictLocked drops the oldest entries (FIFO) until the buffer fits the
+// budget. The slot at keep is never dropped (-1 keeps none).
+func (r *RingBuffer) evictLocked(keep int) {
+	for r.bytes > r.maxBytes && r.size > 0 {
+		if (r.next-r.size+ringCapacity)%ringCapacity == keep {
+			return
+		}
+		r.dropOldestLocked()
+	}
+}
+
+// fitEntry cuts the bodies of e until it alone fits the budget. Bodies are
+// already limited by -max-body, and -max-ram is checked against those limits
+// at startup, so this only matters for a huge header set or URL.
+func (r *RingBuffer) fitEntry(e *FlowEntry) {
+	over := entryCost(e) - r.maxBytes
+	if over <= 0 {
+		return
+	}
+	e.ResponseBody = cutBody(e.ResponseBody, over)
+	if over = entryCost(e) - r.maxBytes; over > 0 {
+		e.RequestBody = cutBody(e.RequestBody, over)
+	}
+	if over = entryCost(e) - r.maxBytes; over > 0 {
+		e.RequestHeaders, e.ResponseHeaders = nil, nil
+	}
+}
+
+// cutBody removes at least over bytes from s, keeping the head and adding
+// the truncation marker; when that would not save anything it returns "".
+func cutBody(s string, over int) string {
+	keep := len(s) - over - len(truncMarker)
+	if keep <= 0 {
+		return ""
+	}
+	return truncate(s, keep)
+}
 
 // Push stores entry and returns the ID it was given.
 func (r *RingBuffer) Push(entry FlowEntry) uint64 {
@@ -110,7 +330,24 @@ func (r *RingBuffer) Push(entry FlowEntry) uint64 {
 	defer r.mu.Unlock()
 	entry.ID = r.nextID
 	r.nextID++
+	var now time.Time
+	if r.timed {
+		now = r.now()
+		r.expireLocked(now)
+	}
+	if r.maxBytes > 0 {
+		r.fitEntry(&entry)
+		if r.size == ringCapacity {
+			r.dropOldestLocked() // the slot we are about to reuse
+		}
+		r.bytes += entryCost(&entry)
+		r.evictLocked(-1)
+	}
 	r.slots[r.next] = entry
+	if r.timed {
+		r.born[r.next] = now
+		r.lastPush = now
+	}
 	r.next = (r.next + 1) % ringCapacity
 	if r.size < ringCapacity {
 		r.size++
@@ -124,11 +361,23 @@ func (r *RingBuffer) Push(entry FlowEntry) uint64 {
 func (r *RingBuffer) Update(id uint64, fn func(*FlowEntry)) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.timed {
+		r.expireLocked(r.now())
+	}
 	for i := 0; i < r.size; i++ {
 		idx := (r.next - 1 - i + 2*ringCapacity) % ringCapacity
 		if r.slots[idx].ID == id {
+			if r.maxBytes <= 0 {
+				fn(&r.slots[idx])
+				r.slots[idx].ID = id // fn cannot move an entry to another ID
+				return true
+			}
+			before := entryCost(&r.slots[idx])
 			fn(&r.slots[idx])
-			r.slots[idx].ID = id // fn cannot move an entry to another ID
+			r.slots[idx].ID = id
+			r.fitEntry(&r.slots[idx])
+			r.bytes += entryCost(&r.slots[idx]) - before
+			r.evictLocked(idx)
 			return true
 		}
 	}
@@ -139,12 +388,14 @@ func (r *RingBuffer) Len() int {
 	if r == nil {
 		return 0
 	}
+	r.expire()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.size
 }
 
 func (r *RingBuffer) ListRecent(limit int, methodFilter string, urlSubstring string) []FlowEntry {
+	r.expire()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if limit <= 0 {
@@ -170,6 +421,7 @@ func (r *RingBuffer) ListRecent(limit int, methodFilter string, urlSubstring str
 }
 
 func (r *RingBuffer) GetByID(id uint64) (FlowEntry, bool) {
+	r.expire()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for i := 0; i < r.size; i++ {
@@ -184,9 +436,16 @@ func (r *RingBuffer) GetByID(id uint64) (FlowEntry, bool) {
 func (r *RingBuffer) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.wipeLocked()
+}
+
+// wipeLocked zeroes every slot and resets the counters. The caller holds r.mu.
+func (r *RingBuffer) wipeLocked() {
 	clear(r.slots[:])
+	clear(r.born[:])
 	r.next = 0
 	r.size = 0
+	r.bytes = 0
 }
 
 type VendorConfig struct {
@@ -1457,6 +1716,8 @@ type App struct {
 	allowUninspectable  bool // forward request bodies whose Content-Encoding cannot be decoded
 	maxBody             int  // -max-body: stored body size in bytes; 0 means the defaults
 	wsDeflate           bool // -ws-deflate: keep permessage-deflate and decode it for capture
+	minify              bool // -minify: store scrubbed JSON bodies compacted
+	tail                bool // -tail: one scrubbed summary line per captured flow on stderr, instead of the status bar
 	listener            string // "" for the TCP loopback listener, "unix" for -listen
 	sockPath            string // the -listen socket path, for the status bar
 	tokenOn             bool   // -proxy-token: every request must carry the token
@@ -1489,6 +1750,9 @@ func (a *App) errW() io.Writer {
 }
 
 func (a *App) drawBar() {
+	if a.tail {
+		return // the tail lines own stderr; a \r bar would overwrite them
+	}
 	where := fmt.Sprintf("127.0.0.1:%d", a.port)
 	if a.listener == "unix" {
 		where = "unix socket"
@@ -1497,7 +1761,45 @@ func (a *App) drawBar() {
 		where, a.ring.Len(), ringCapacity, a.scrub.Tokens.Load(), a.scrub.Cookies.Load(), a.scrub.IPs.Load())
 }
 func (a *App) Bar() { a.barMu.Lock(); defer a.barMu.Unlock(); a.drawBar() }
-func (a *App) Logf(format string, args ...any) { a.barMu.Lock(); defer a.barMu.Unlock(); fmt.Fprintf(a.errW(), "\r\033[K"+format+"\n", args...); a.drawBar() }
+func (a *App) Logf(format string, args ...any) {
+	a.barMu.Lock()
+	defer a.barMu.Unlock()
+	if a.tail {
+		fmt.Fprintf(a.errW(), format+"\n", args...)
+		return
+	}
+	fmt.Fprintf(a.errW(), "\r\033[K"+format+"\n", args...)
+	a.drawBar()
+}
+
+// tailLine formats the -tail summary of a stored flow, e.g.
+// "[14:02:11] POST https://api.example.com/v1/chat 200 142ms (3 redacted)".
+// It reads only the scrubbed entry: the URL went through ScrubURL, and no
+// header or body is printed. Control bytes are shown as "?" so nothing in a
+// URL can drive the terminal.
+func tailLine(now time.Time, e *FlowEntry) string {
+	return fmt.Sprintf("[%s] %s %s %d %dms (%d redacted)\n",
+		now.Format("15:04:05"), tailClean(e.Method), tailClean(truncate(e.URL, 300)),
+		e.StatusCode, e.LatencyMs, e.RedactionCount)
+}
+
+func tailClean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || (r >= 0x7f && r < 0xa0) {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
+// tailFlow writes the -tail line for e to stderr, under barMu with the rest
+// of the stderr output. It is only called when -tail is on.
+func (a *App) tailFlow(e *FlowEntry) {
+	line := tailLine(time.Now(), e)
+	a.barMu.Lock()
+	defer a.barMu.Unlock()
+	_, _ = io.WriteString(a.errW(), line)
+}
 
 type capBuffer struct {
 	mu   sync.Mutex
@@ -2810,6 +3112,9 @@ func (a *App) capture(f rawFlow) {
 	}
 	if e, ok := a.buildEntry(f); ok {
 		a.ring.Push(e)
+		if a.tail {
+			a.tailFlow(&e)
+		}
 		a.markBar()
 	}
 }
@@ -2929,6 +3234,13 @@ func (a *App) buildEntryWith(sc *Scrubber, f rawFlow) (FlowEntry, bool) {
 	total += n
 	pb, n := sc.ScrubText(rawRespBody)
 	total += n
+
+	// -minify: compact the scrubbed copy kept in RAM. This runs after
+	// scrubbing and only on what is stored; the bytes already forwarded to the
+	// client and the upstream are never touched.
+	if a.minify {
+		rb, pb = minifyJSON(rb), minifyJSON(pb)
+	}
 
 	return FlowEntry{
 		Timestamp: f.started.UTC().Format(time.RFC3339), Method: f.method, URL: u,
@@ -3415,6 +3727,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	presetSpec := fs.String("preset", "", "comma-separated compliance redaction presets: pci-dss, hipaa, gdpr, all (off by default)")
 	allowUninspectable := fs.Bool("allow-uninspectable", false, "forward request bodies whose Content-Encoding (br, zstd, ...) cannot be inspected; by default they are refused with 415")
 	maxBodySpec := fs.String("max-body", "", "stored body size per request/response, e.g. 1m (default 32 KiB request / 256 KiB response; at most 2m). Secrets are scrubbed before the cut")
+	maxRamSpec := fs.String("max-ram", "", "opt-in RAM ceiling for the captured-flow buffer, e.g. 64m (at most 400m); the oldest flows are dropped and wiped first when a new one would go over. Off by default")
+	ttl := fs.Duration("ttl", 0, "opt-in: wipe any captured flow older than this duration, e.g. 10m (checked on every read and by a background sweeper). Off by default")
+	idleWipe := fs.Duration("idle-wipe", 0, "opt-in: wipe the whole captured-flow buffer when no new flow arrives for this long, e.g. 5m. Off by default")
+	tail := fs.Bool("tail", false, "opt-in: print one scrubbed summary line per captured flow to stderr (method, scrubbed URL, status, latency, redaction count) and turn off the status bar. Never prints bodies or headers. Off by default")
+	minify := fs.Bool("minify", false, "opt-in: store captured JSON bodies compacted (whitespace removed) after scrubbing, to fit more in the ring. Only the RAM copy changes; live traffic is never touched. Invalid or truncated JSON is stored as it is. Off by default")
 	wsDeflate := fs.Bool("ws-deflate", false, "keep WebSocket permessage-deflate and decode it for capture (default: drop the offer so frames stay readable)")
 	policyPubkey := fs.String("policy-pubkey", "", "enterprise mode: ECDSA P-256 public key (PEM file, hex file or hex text) that must verify <secrets-config>.sig; also refuses -allow-uninspectable")
 	attestOut := fs.String("attest-out", "", "write the signed attestation report to this file when the server exits")
@@ -3431,6 +3748,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	maxBody, err := parseMaxBody(*maxBodySpec)
 	if err != nil {
 		return fmt.Errorf("nullwire-mcp: %v", err)
+	}
+	maxRAM, err := parseMaxRAM(*maxRamSpec)
+	if err != nil {
+		return fmt.Errorf("nullwire-mcp: %v", err)
+	}
+	if err := validateMaxRAM(maxRAM, maxBody); err != nil {
+		return fmt.Errorf("nullwire-mcp: %v", err)
+	}
+	if *ttl < 0 {
+		return fmt.Errorf("nullwire-mcp: -ttl: %v must not be negative", *ttl)
+	}
+	if *idleWipe < 0 {
+		return fmt.Errorf("nullwire-mcp: -idle-wipe: %v must not be negative", *idleWipe)
 	}
 	if err := policyLockError(*policyPubkey != "", *allowUninspectable); err != nil {
 		return fmt.Errorf("nullwire-mcp: %v", err)
@@ -3521,6 +3851,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		transport: &http.Transport{Proxy: nil, DisableCompression: true, MaxIdleConns: 256, MaxIdleConnsPerHost: 128, ReadBufferSize: 32 << 10, WriteBufferSize: 32 << 10, IdleConnTimeout: 60 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second, DialContext: dialer.DialContext, TLSClientConfig: tlsCfg, ForceAttemptHTTP2: true, HTTP2: transportHTTP2Config()},
 	}
 	app.stdout, app.stderr = stdout, stderr
+	app.tail = *tail
+	app.minify = *minify
+	app.ring.SetMaxBytes(maxRAM)
+	app.ring.SetExpiry(*ttl, *idleWipe)
 	app.setProxyToken(tok)
 	app.att = attestInfo{
 		started: time.Now().UTC(), policySHA: polSHA, policySigned: polSigned, presets: activePresets,
@@ -3582,12 +3916,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 
 	app.startCapture()
 	app.startBarTicker()
+	app.ring.StartSweeper() // a no-op unless -ttl or -idle-wipe is set
 	// drain stops the capture workers after they finish every queued flow, then
 	// stops the bar ticker with one last redraw. It runs before the ring and the
 	// taint table are wiped, so no queued flow is pushed after the wipe.
 	drain := func() {
 		app.stopCapture()
 		app.stopBarTicker()
+		app.ring.StopSweeper()
 	}
 
 	srv := &http.Server{Handler: app, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, Protocols: serverProtocols(), HTTP2: serverHTTP2Config()}
