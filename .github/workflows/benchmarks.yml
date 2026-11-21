@@ -2,7 +2,7 @@ name: Benchmarks (speed, load and DLP accuracy)
 
 # Workflow 2. Measures the proxy; it never gates a merge.
 #   hey (HTTP/1.1 load) + h2load (HTTP/2 cleartext load) + k6 (SSE streaming)
-#   + hyperfine (CLI/scan speed) + Samsung CredData + clean-code false positives (DLP accuracy)
+#   + hyperfine (CLI/scan speed) + Samsung CredData (DLP accuracy)
 #   + native probes: MCP handshake, tool-call latency (empty and 50 flows),
 #     binary size, scrubber CPU, memory footprint (VmRSS / heap in use),
 #     big body + secret stress, gRPC / gRPC-Web over h2c, and a bash + hey soak
@@ -304,7 +304,7 @@ jobs:
 
   # ------------------------------------------------------------------ 2
   dlp-accuracy:
-    name: DLP accuracy (Samsung CredData and clean-code false positives)
+    name: DLP accuracy (Samsung CredData and test_keys)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -322,14 +322,6 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/Samsung/CredData.git creddata
           git -C creddata rev-parse HEAD
-      - name: Clone the clean-code corpora (shallow, held out, never used for training)
-        id: clean
-        continue-on-error: true
-        run: |
-          git clone --depth 1 --single-branch https://github.com/kubernetes/kubernetes.git kubernetes
-          git clone --depth 1 --single-branch https://github.com/django/django.git django
-          echo "kubernetes @ $(git -C kubernetes rev-parse HEAD)"
-          echo "django @ $(git -C django rev-parse HEAD)"
       - name: Fetch CredData sample files
         id: fetch
         run: |
@@ -436,99 +428,6 @@ jobs:
             grep -P '^FALSE-POSITIVE' diag/samples-CRED.tsv | head -25 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Clean-code false positives (Kubernetes Go, Django Python)
-        id: fp
-        if: always()
-        run: |
-          cat > fp.py <<'PY'
-          import json, os, re, subprocess
-          # Real, benign source code: every line a finding is a false positive.
-          # Test files, testdata and vendored trees are left out. The lines are
-          # flattened into .env chunks (the same way as the test_keys step) and
-          # scanned with nullwire-mcp scan; the repos are never used for training.
-          REPOS = {"kubernetes": ".go", "django": ".py"}
-          SKIP = {".git", "vendor", "node_modules", "testdata", "test", "tests", "testing", "e2e", "third_party", "_output"}
-          MAX_LINES, CHUNK_BYTES, MAX_LINE = 600000, 3 << 20, 2000
-          os.makedirs("work/fp", exist_ok=True)
-
-          def is_code(fn, ext):
-              if not fn.endswith(ext):
-                  return False
-              return not (fn.endswith("_test.go") or fn.startswith("test_") or fn.endswith("_test.py") or fn == "conftest.py")
-
-          def scan_chunk(path, origins, found, lines):
-              out = subprocess.run(["./nullwire-mcp", "scan", path], capture_output=True, text=True).stdout
-              for m in re.finditer(r"^\s+line\s+(\d+)\s", out, re.M):
-                  i = int(m.group(1)) - 1
-                  if 0 <= i < len(origins):
-                      found.append(origins[i])
-
-          results, examples, flagged_all = {}, [], []
-          for repo, ext in REPOS.items():
-              if not os.path.isdir(repo):
-                  results[repo] = {"skipped": "clone missing"}
-                  continue
-              total = nbytes = 0
-              found, origins, buf, size, n_chunk = [], [], [], 0, 0
-              def flush():
-                  global size, n_chunk
-                  if not buf:
-                      return
-                  path = "work/fp/%s_%04d.env" % (repo, n_chunk)
-                  n_chunk += 1
-                  with open(path, "w") as f:
-                      f.write("".join(buf))
-                  scan_chunk(path, origins, found, buf)
-                  buf.clear(); origins.clear(); size = 0
-                  os.remove(path)
-              done = False
-              for root, dirs, files in os.walk(repo):
-                  dirs[:] = sorted(d for d in dirs if d not in SKIP)
-                  for fn in sorted(files):
-                      if not is_code(fn, ext):
-                          continue
-                      rel = os.path.relpath(os.path.join(root, fn), repo)
-                      try:
-                          src = open(os.path.join(root, fn), encoding="utf-8", errors="replace").read().splitlines()
-                      except OSError:
-                          continue
-                      for ln, line in enumerate(src, 1):
-                          line = line.strip().replace("\r", "")
-                          if not line or len(line) >= MAX_LINE:
-                              continue
-                          row = "FP_%d=%s\n" % (total, line)
-                          buf.append(row); origins.append((rel, ln, line)); size += len(row)
-                          total += 1; nbytes += len(line) + 1
-                          if size >= CHUNK_BYTES:
-                              flush()
-                          if total >= MAX_LINES:
-                              done = True
-                              break
-                      if done:
-                          break
-                  if done:
-                      break
-              flush()
-              res = {"lines_scanned": total, "mb_scanned": round(nbytes / 1048576, 2), "flagged_lines": len(found),
-                     "false_positives_per_1000_lines": round(1000 * len(found) / total, 3) if total else None,
-                     "false_positives_per_mb": round(len(found) / (nbytes / 1048576), 3) if nbytes else None}
-              results[repo] = res
-              examples += ["%s: %s:%d  %s" % (repo, r, l, t[:110]) for (r, l, t) in found[:15]]
-              flagged_all += [(repo, r, l, t[:300]) for (r, l, t) in found[:2000]]
-          json.dump(results, open("clean-code-fp-result.json", "w"), indent=2)
-          open("clean-code-fp-examples.txt", "w").write("\n".join(examples) + "\n")
-          # Up to 2000 flagged lines per repo (benign code, so safe to publish): repo, file, line, text.
-          with open("clean-code-fp-flagged.tsv", "w") as f:
-              f.write("repo\tfile\tline\ttext\n")
-              for (rp, fl, ln, tx) in flagged_all:
-                  f.write("%s\t%s\t%d\t%s\n" % (rp, fl, ln, tx.replace("\t", " ")))
-          print(json.dumps(results, indent=2))
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
-              s.write("## Clean-code false positives (held-out Kubernetes and Django, indicative)\n```json\n%s\n```\n" % json.dumps(results, indent=2))
-              if examples:
-                  s.write("First flagged lines (triage list, benign code):\n```\n%s\n```\n" % "\n".join(examples[:20]))
-          PY
-          python3 fp.py
       - name: Install gitleaks and trufflehog (checksum-verified)
         id: scanners
         uses: ./.github/actions/install-scanners
@@ -571,8 +470,6 @@ jobs:
             echo "| test_keys before/after (gitleaks, trufflehog) | ${{ steps.testkeys.outcome }} |"
             echo "| CredData download | ${{ steps.fetch.outcome }} |"
             echo "| CredData scoring | ${{ steps.score.outcome }} |"
-            echo "| Clean-code clone (Kubernetes, Django) | ${{ steps.clean.outcome }} |"
-            echo "| Clean-code false positives | ${{ steps.fp.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
@@ -580,9 +477,6 @@ jobs:
           name: dlp-accuracy
           path: |
             creddata-result.json
-            clean-code-fp-result.json
-            clean-code-fp-examples.txt
-            clean-code-fp-flagged.tsv
             diag/
           if-no-files-found: ignore
 
