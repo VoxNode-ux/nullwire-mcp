@@ -13,7 +13,11 @@ func TestParseTargetMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(m) != 2 || m["auth"].Host != "auth.example.com" || m["billing"].Path != "/base" {
+	authURL, billingURL := m["auth"], m["billing"]
+	if len(m) != 2 || authURL == nil || billingURL == nil {
+		t.Fatalf("map = %v", m)
+	}
+	if authURL.Host != "auth.example.com" || billingURL.Path != "/base" {
 		t.Errorf("map = %v", m)
 	}
 	for _, bad := range []string{

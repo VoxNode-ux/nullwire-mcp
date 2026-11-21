@@ -63,33 +63,48 @@ func fxStdout(t *testing.T, fn func()) string {
 	return <-done
 }
 
+// fxFrame builds one WebSocket frame. The result is allocated up front with
+// make and filled by index, so it is never nil, whatever payload is passed.
 func fxFrame(fin bool, opcode byte, payload []byte, mask bool, key [4]byte) []byte {
 	b0 := opcode
 	if fin {
 		b0 |= 0x80
 	}
-	b := []byte{b0}
 	mbit := byte(0)
 	if mask {
 		mbit = 0x80
 	}
-	switch n := len(payload); {
+	n := len(payload)
+	var hdr [14]byte // 1 + up to 9 length bytes + 4 mask bytes
+	h := 0
+	hdr[h] = b0
+	h++
+	switch {
 	case n < 126:
-		b = append(b, mbit|byte(n))
+		hdr[h] = mbit | byte(n)
+		h++
 	case n < 65536:
-		b = append(b, mbit|126, byte(n>>8), byte(n))
+		hdr[h], hdr[h+1], hdr[h+2] = mbit|126, byte(n>>8), byte(n)
+		h += 3
 	default:
-		b = append(b, mbit|127, 0, 0, 0, 0, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+		hdr[h], hdr[h+5], hdr[h+6], hdr[h+7], hdr[h+8] = mbit|127, byte(n>>24), byte(n>>16), byte(n>>8), byte(n)
+		h += 9
 	}
 	if mask {
-		b = append(b, key[:]...)
+		copy(hdr[h:], key[:])
+		h += 4
+	}
+	out := make([]byte, h+n)
+	copy(out, hdr[:h])
+	body := out[h:]
+	if mask {
 		for i, c := range payload {
-			b = append(b, c^key[i&3])
+			body[i] = c ^ key[i&3]
 		}
 	} else {
-		b = append(b, payload...)
+		copy(body, payload)
 	}
-	return b
+	return out
 }
 
 func fxFeed(p *wsParser, stream []byte, chunk int) {

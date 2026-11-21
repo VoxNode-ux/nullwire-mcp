@@ -132,6 +132,9 @@ func TestMaskGatesAgreeWithNaiveOnMixedCase(t *testing.T) {
 		for _, grp := range groups {
 			pool = append(pool, grp.lits...)
 		}
+		if len(pool) == 0 {
+			t.Fatalf("%s: no literals to build texts from", name)
+		}
 		naive := func(text string) uint32 {
 			lower := strings.ToLower(text)
 			var m uint32

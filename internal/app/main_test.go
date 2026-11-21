@@ -1114,6 +1114,10 @@ func TestCovMatchUpstreamAndUpstreamNames(t *testing.T) {
 		if !found {
 			continue
 		}
+		if base == nil {
+			t.Errorf("matchUpstream(%q, %q): found without a base URL", c.path, c.raw)
+			continue
+		}
 		if base.Host != c.host || rest != c.rest || rawRest != c.wantRawRest {
 			t.Errorf("matchUpstream(%q, %q) = %s %q %q, want %s %q %q", c.path, c.raw, base.Host, rest, rawRest, c.host, c.rest, c.wantRawRest)
 		}
@@ -1182,7 +1186,11 @@ func TestCovCopyHeadersDropsHopByHop(t *testing.T) {
 	if len(dst) != 2 || dst.Get("Content-Type") != "text/plain" || dst.Get("X-Lower") != "v" {
 		t.Errorf("copyHeaders = %v, want only Content-Type and X-Lower", dst)
 	}
-	dst["Content-Type"][0] = "changed"
+	ct := dst["Content-Type"]
+	if len(ct) == 0 {
+		t.Fatal("Content-Type was dropped")
+	}
+	ct[0] = "changed"
 	if src.Get("Content-Type") != "text/plain" {
 		t.Errorf("copyHeaders must copy the value slices")
 	}

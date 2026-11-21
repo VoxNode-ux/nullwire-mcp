@@ -51,6 +51,9 @@ func TestExportHARShapeAndOrder(t *testing.T) {
 	for _, e := range entries {
 		urls = append(urls, e.(map[string]any)["request"].(map[string]any)["url"].(string))
 	}
+	if len(urls) < 3 {
+		t.Fatalf("urls = %d, want 3", len(urls))
+	}
 	if !strings.HasSuffix(urls[0], "/a?x=1&y=two%20words") || !strings.HasSuffix(urls[2], "/c") {
 		t.Errorf("entries are not oldest first: %v", urls)
 	}

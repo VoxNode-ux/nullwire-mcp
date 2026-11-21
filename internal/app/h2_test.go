@@ -363,8 +363,14 @@ func TestAcceptsTrailersAndProtocols(t *testing.T) {
 
 func TestRoundTripperForPicksByProtocol(t *testing.T) {
 	app := fxApp(t)
-	plain, _ := url.Parse("http://upstream.test/")
-	secure, _ := url.Parse("https://upstream.test/")
+	plain, err := url.Parse("http://upstream.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secure, err := url.Parse("https://upstream.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
 	h1 := &http.Request{ProtoMajor: 1}
 	h2 := &http.Request{ProtoMajor: 2}
 

@@ -246,6 +246,9 @@ func TestGQLResponseErrors(t *testing.T) {
 func TestGQLScanBodyPartialJSON(t *testing.T) {
 	// An object missing its closing brace still gives the keys that are there.
 	objs, n, more := gqlScanBody(`{"query":"query A { a }","variables":{"p":1}`)
+	if len(objs) == 0 {
+		t.Fatal("no object scanned")
+	}
 	if len(objs) != 1 || n != 1 || more || objs[0]["query"] != "query A { a }" {
 		t.Errorf("object: %v %d %v", objs, n, more)
 	}
@@ -255,11 +258,17 @@ func TestGQLScanBodyPartialJSON(t *testing.T) {
 
 	// A query string cut in the middle keeps its beginning.
 	objs, _, _ = gqlScanBody(`{"operationName":"Foo","query":"query Foo { a(b: \"x`)
+	if len(objs) == 0 {
+		t.Fatal("no object scanned for the cut query")
+	}
 	if q, _ := objs[0]["query"].(string); !strings.HasPrefix(q, "query Foo") || objs[0]["operationName"] != "Foo" {
 		t.Errorf("cut query: %v", objs[0])
 	}
 	// ... and a cut escape sequence is trimmed off.
 	objs, _, _ = gqlScanBody(`{"query":"query A { a } \`)
+	if len(objs) == 0 {
+		t.Fatal("no object scanned for the cut escape")
+	}
 	if objs[0]["query"] != "query A { a } " {
 		t.Errorf("cut escape: %q", objs[0]["query"])
 	}
