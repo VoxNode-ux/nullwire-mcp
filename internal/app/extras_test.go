@@ -293,6 +293,9 @@ func TestWSDeflateDecode(t *testing.T) {
 		var stream []byte
 		for _, p := range packed {
 			f := fxFrame(true, 0x1, p, true, key)
+			if len(f) == 0 {
+				t.Fatal("empty frame")
+			}
 			f[0] |= 0x40 // RSV1
 			stream = append(stream, f...)
 		}
