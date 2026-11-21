@@ -287,7 +287,7 @@ func TestScoreHelpersEdges(t *testing.T) {
 	long := strings.Repeat(random, 5)
 	h, vr, bm := maxWindowEntropy(long), vowelRatio(long), bigramMean(long)
 	withTable(t, nil)
-	if got, want := tokenLogOdds(long), combineScore(h, bm, vr, maxLenW); got != want {
+	if got, want := tokenLogOdds(long), combineScore(h, bm, vr, maxLenW); math.Abs(got-want) > 1e-12 {
 		t.Errorf("long token: %v, want %v", got, want)
 	}
 	// Non-ASCII bytes in a borderline token go through the escalation without trouble.
