@@ -1,0 +1,128 @@
+name: Real-repo scans (false-positive check on public code)
+
+# Runs on every push to main and by hand (Actions tab -> Run workflow).
+# Shallow-clones public repositories, runs `nullwire-mcp scan --deep` on each
+# one on the runner, and counts findings. Nothing is copied into this
+# repository, nothing is used for training, and only counts and timings are
+# published: no file paths, no matched text. Findings on these repos are NOT
+# reviewed, so treat them as "unreviewed findings", not as proven secrets.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-repo-scans-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.27.2"
+
+jobs:
+  scan:
+    name: Scan ${{ matrix.repo }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        repo:
+          - curl/curl
+          - jupyter/notebook
+          - android/nowinandroid
+          - rust-lang/rustlings
+          - spring-projects/spring-boot
+          - terraform-aws-modules/terraform-aws-vpc
+          - hashicorp/vagrant
+          - vercel/next.js
+          - kubernetes/kubernetes
+          - django/django
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - name: Build NullWire
+        run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o nullwire-mcp .
+      - name: Clone (shallow) and scan
+        env:
+          REPO: ${{ matrix.repo }}
+        run: |
+          git clone --depth 1 --single-branch "https://github.com/${REPO}.git" target
+          sha=$(git -C target rev-parse HEAD)
+          files=$(git -C target ls-files | wc -l)
+          start=$(date +%s.%N)
+          ./nullwire-mcp scan --deep target --toml --yaml --zip > report.txt 2>&1 || true
+          end=$(date +%s.%N)
+          # Same counting rule as the DLP accuracy job: one "line N" entry per finding.
+          findings=$(grep -cE '^\s+line\s+[0-9]+\s' report.txt || true)
+          REPO="$REPO" SHA="$sha" FILES="$files" FINDINGS="$findings" START="$start" END="$end" python3 - <<'PY'
+          import json, os
+          res = {
+              "repo": os.environ["REPO"],
+              "commit": os.environ["SHA"][:7],
+              "files_in_repo": int(os.environ["FILES"]),
+              "findings": int(os.environ["FINDINGS"]),
+              "seconds": round(float(os.environ["END"]) - float(os.environ["START"]), 2),
+          }
+          json.dump(res, open("result.json", "w"))
+          print(res)
+          PY
+          # The raw report stays on the runner. It is never uploaded or printed.
+          rm -f report.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: scan-${{ strategy.job-index }}
+          path: result.json
+          if-no-files-found: ignore
+
+  summary:
+    name: GitHub summary
+    needs: scan
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: scan-*
+          path: results
+          merge-multiple: false
+      - name: Write the summary
+        run: |
+          python3 - <<'PY'
+          import glob, json, os
+          rows = []
+          for p in sorted(glob.glob("results/*/result.json")):
+              rows.append(json.load(open(p)))
+          rows.sort(key=lambda r: r["repo"].lower())
+          out = ["## Real-repo scans", "",
+                 "`nullwire-mcp scan --deep --toml --yaml --zip` on shallow clones of public repositories. "
+                 "Counts only. Findings are unreviewed, so some or all may be test fixtures or false positives.", "",
+                 "| Repository | Commit | Files in repo | Findings | Time (s) |",
+                 "|---|---|---:|---:|---:|"]
+          for r in rows:
+              out.append("| %s | `%s` | %s | %d | %.2f |" % (r["repo"], r["commit"], format(r["files_in_repo"], ","), r["findings"], r["seconds"]))
+          total = len(rows)
+          clean = sum(1 for r in rows if r["findings"] == 0)
+          found = sum(r["findings"] for r in rows)
+          secs = sum(r["seconds"] for r in rows)
+          out += ["",
+                  "**Repos with zero findings:** %d of %d (%.0f%%)" % (clean, total, 100 * clean / total if total else 0),
+                  "", "**Total findings:** %s" % format(found, ","),
+                  "", "**Total scan time:** %.1f s" % secs]
+          expected = 10
+          if total < expected:
+              out += ["", "_%d of %d repositories reported a result. Check the failed jobs above._" % (total, expected)]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write("\n".join(out) + "\n")
+          PY
