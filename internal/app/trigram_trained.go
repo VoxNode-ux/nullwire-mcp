@@ -2,8 +2,5 @@
 
 package app
 
-// trigramTable holds trained trigram evidence, sorted by key. Each word is
-// (a<<14|b<<7|c)<<8 | (score-lo) for the ASCII bytes a,b,c: positive scores
-// mean benign identifier text, negative scores mean random secrets. Empty
-// means the borderline trigram escalation is off.
+// trigramTable holds packed uint32 entries (21-bit triple key + signed score).
 var trigramTable = []uint32{}
