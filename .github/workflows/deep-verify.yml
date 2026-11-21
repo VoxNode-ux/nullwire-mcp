@@ -510,6 +510,32 @@ jobs:
           for c, _, _ in sorted(bad):
               print("FAILED:", c)
 
+          # Show why each failed case failed, so the log alone is enough.
+          for agent in data:
+              for c, _, _ in sorted(bad):
+                  fn = "autobahn/reports/%s_case_%s.json" % (agent, c.replace(".", "_"))
+                  try:
+                      rep = json.load(open(fn))
+                  except Exception as e:
+                      print("::group::detail", c, "(unreadable: %s)" % e)
+                      print("::endgroup::")
+                      continue
+                  print("::group::detail", c)
+                  for k in ("description", "expectation", "result", "resultClose",
+                            "behavior", "behaviorClose", "remoteCloseCode",
+                            "remoteCloseReason", "wasClean", "wasNotCleanReason",
+                            "closedByMe", "droppedByMe", "expected", "received"):
+                      print("%s: %s" % (k, rep.get(k)))
+                  print("::endgroup::")
+          for f in ("nw-err.txt", "echo.log"):
+              try:
+                  tail = open(f).read().splitlines()[-30:]
+                  print("::group::tail of", f)
+                  print("\n".join(tail))
+                  print("::endgroup::")
+              except Exception:
+                  pass
+
           with open("autobahn-summary.md", "w") as out:
               out.write("## WebSocket Conformance (Autobahn 25.10.1)\n")
               out.write(f"- **Total cases run:** {total}\n")
